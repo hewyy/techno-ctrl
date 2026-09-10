@@ -3,7 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
+#include <type_traits>
 
 namespace lps
 {
@@ -52,20 +54,140 @@ struct PlayerSyncCapabilities
     bool acceptsExternalRestart = false;
 };
 
-enum class SequencerEventType : std::uint8_t
+struct PlayerId
 {
-    triggerOn,
-    triggerOff
+    static constexpr std::uint32_t invalidValue =
+        std::numeric_limits<std::uint32_t>::max();
+
+    std::uint32_t value = invalidValue;
+
+    friend constexpr bool operator==(PlayerId left, PlayerId right) noexcept
+    {
+        return left.value == right.value;
+    }
+
+    friend constexpr bool operator!=(PlayerId left, PlayerId right) noexcept
+    {
+        return !(left == right);
+    }
+};
+
+struct RouteId
+{
+    static constexpr std::uint32_t invalidValue =
+        std::numeric_limits<std::uint32_t>::max();
+
+    std::uint32_t value = invalidValue;
+
+    friend constexpr bool operator==(RouteId left, RouteId right) noexcept
+    {
+        return left.value == right.value;
+    }
+};
+
+struct TriggerId
+{
+    std::uint64_t value = 0;
+
+    friend constexpr bool operator==(TriggerId left, TriggerId right) noexcept
+    {
+        return left.value == right.value;
+    }
+};
+
+enum class SemanticEventType : std::uint8_t
+{
+    controlPoint,
+    triggerEnd,
+    triggerStart
+};
+
+enum class InterpolationPolicy : std::uint8_t
+{
+    step,
+    linear
 };
 
 struct SequencerEvent
 {
     double ppqPosition = 0.0;
-    std::uint16_t output = 0;
-    float pitchSemitones = 60.0f;
-    float value = 0.0f;
-    SequencerEventType type = SequencerEventType::triggerOff;
+    TriggerId triggerId;
+    float musicalPitchSemitones = 0.0f;
+    float normalizedValue = 0.0f;
+    std::uint16_t logicalControl = 0;
+    SemanticEventType type = SemanticEventType::triggerEnd;
+    InterpolationPolicy interpolation = InterpolationPolicy::step;
+    bool hasMusicalPitch = false;
+
+    [[nodiscard]] static SequencerEvent triggerStart(
+        double ppq,
+        TriggerId id,
+        float intensity,
+        std::optional<float> pitch = std::nullopt) noexcept
+    {
+        SequencerEvent event;
+        event.ppqPosition = ppq;
+        event.triggerId = id;
+        event.normalizedValue = intensity;
+        event.type = SemanticEventType::triggerStart;
+        event.hasMusicalPitch = pitch.has_value();
+        event.musicalPitchSemitones = pitch.value_or(0.0f);
+        return event;
+    }
+
+    [[nodiscard]] static SequencerEvent triggerEnd(
+        double ppq,
+        TriggerId id) noexcept
+    {
+        SequencerEvent event;
+        event.ppqPosition = ppq;
+        event.triggerId = id;
+        event.type = SemanticEventType::triggerEnd;
+        return event;
+    }
+
+    [[nodiscard]] static SequencerEvent controlPoint(
+        double ppq,
+        std::uint16_t control,
+        float value,
+        InterpolationPolicy interpolationPolicy =
+            InterpolationPolicy::step) noexcept
+    {
+        SequencerEvent event;
+        event.ppqPosition = ppq;
+        event.logicalControl = control;
+        event.normalizedValue = value;
+        event.type = SemanticEventType::controlPoint;
+        event.interpolation = interpolationPolicy;
+        return event;
+    }
 };
+
+struct RouteMapping
+{
+    bool usesFixedPitch = false;
+    float fixedPitchSemitones = 60.0f;
+
+    [[nodiscard]] static constexpr RouteMapping fixedPitch(
+        float semitones) noexcept
+    {
+        return { true, semitones };
+    }
+};
+
+struct RoutedEvent
+{
+    SequencerEvent event;
+    PlayerId sourcePlayerId;
+    RouteId routeId;
+    std::uint32_t frameOffset = 0;
+    std::uint64_t stableOrder = 0;
+    float mappedPitchSemitones = 0.0f;
+    bool hasMappedPitch = false;
+};
+
+static_assert(std::is_trivially_copyable_v<SequencerEvent>);
+static_assert(std::is_trivially_copyable_v<RoutedEvent>);
 
 class SequencerEventBuffer
 {

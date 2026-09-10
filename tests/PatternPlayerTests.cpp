@@ -39,23 +39,23 @@ constexpr double epsilon = 1.0e-9;
     return *entry;
 }
 
-[[nodiscard]] std::vector<double> triggerOnPositions(
+[[nodiscard]] std::vector<double> triggerStartPositions(
     const lps::SequencerEventBuffer& events)
 {
     std::vector<double> positions;
     for (const auto& event : events)
-        if (event.type == lps::SequencerEventType::triggerOn)
+        if (event.type == lps::SemanticEventType::triggerStart)
             positions.push_back(event.ppqPosition);
     return positions;
 }
 
-[[nodiscard]] std::vector<float> triggerOnValues(
+[[nodiscard]] std::vector<float> triggerStartValues(
     const lps::SequencerEventBuffer& events)
 {
     std::vector<float> values;
     for (const auto& event : events)
-        if (event.type == lps::SequencerEventType::triggerOn)
-            values.push_back(event.value);
+        if (event.type == lps::SemanticEventType::triggerStart)
+            values.push_back(event.normalizedValue);
     return values;
 }
 
@@ -94,7 +94,7 @@ void testBasicKickPlaysTwoFullCycles()
 
     const auto result = player.process(block, lps::PlayerDirectives {}, events);
 
-    checkPositions(triggerOnPositions(events), {0.0, 1.0});
+    checkPositions(triggerStartPositions(events), {0.0, 1.0});
     CHECK(result.active);
     CHECK(result.firstCycleBoundaryPpq.has_value());
     CHECK(close(*result.firstCycleBoundaryPpq, 0.0));
@@ -122,10 +122,10 @@ void testVelocityModulationAdvancesOnlyOnHitsAndWraps()
     // Basic Kick has one hit followed by three rests. Modulation values still
     // advance consecutively per hit and wrap after the fourth hit.
     checkPositions(
-        triggerOnPositions(events),
+        triggerStartPositions(events),
         {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0});
     checkVelocityValues(
-        triggerOnValues(events),
+        triggerStartValues(events),
         {255, 100, 225, 150, 255, 100, 225, 150, 255, 100});
     CHECK(player.activeVelocityModulationId()
           == lps::VelocityModulationId {2});
@@ -151,7 +151,7 @@ void testVelocityModulationSnapshotTracksLastPlayedHitAcrossRests()
     rests.ppqEnd = 0.9;
     rests.playing = true;
     player.process(rests, events);
-    CHECK(triggerOnValues(events).empty());
+    CHECK(triggerStartValues(events).empty());
     CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 
     lps::TimelineBlock secondHit;
@@ -159,7 +159,7 @@ void testVelocityModulationSnapshotTracksLastPlayedHitAcrossRests()
     secondHit.ppqEnd = 1.1;
     secondHit.playing = true;
     player.process(secondHit, events);
-    checkVelocityValues(triggerOnValues(events), {100});
+    checkVelocityValues(triggerStartValues(events), {100});
     CHECK(player.modulationPlaybackSnapshot().currentStep == 1);
 }
 
@@ -176,7 +176,7 @@ void testVelocityModulationRestartsOnTransportDiscontinuity()
     firstRun.playing = true;
     firstRun.transportDiscontinuity = true;
     player.process(firstRun, events);
-    checkVelocityValues(triggerOnValues(events), {255, 100});
+    checkVelocityValues(triggerStartValues(events), {255, 100});
     CHECK(player.modulationPlaybackSnapshot().currentStep == 1);
 
     lps::TimelineBlock jumped;
@@ -186,7 +186,7 @@ void testVelocityModulationRestartsOnTransportDiscontinuity()
     jumped.transportDiscontinuity = true;
     player.process(jumped, events);
 
-    checkVelocityValues(triggerOnValues(events), {255});
+    checkVelocityValues(triggerStartValues(events), {255});
     CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 }
 
@@ -203,7 +203,7 @@ void testVelocityModulationRestartsOnExplicitSequenceReset()
     firstRun.playing = true;
     firstRun.transportDiscontinuity = true;
     player.process(firstRun, events);
-    checkVelocityValues(triggerOnValues(events), {255, 100});
+    checkVelocityValues(triggerStartValues(events), {255, 100});
 
     lps::TimelineBlock resetBlock;
     resetBlock.ppqStart = firstRun.ppqEnd;
@@ -213,7 +213,7 @@ void testVelocityModulationRestartsOnExplicitSequenceReset()
     directives.restartAtPpq = 1.5;
     (void) player.process(resetBlock, directives, events);
 
-    checkVelocityValues(triggerOnValues(events), {255});
+    checkVelocityValues(triggerStartValues(events), {255});
     CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 }
 
@@ -233,7 +233,7 @@ void testVelocityModulationContinuesAcrossPatternChanges()
     start.playing = true;
     start.transportDiscontinuity = true;
     player.process(start, events);
-    checkVelocityValues(triggerOnValues(events), {255});
+    checkVelocityValues(triggerStartValues(events), {255});
 
     player.selectPattern(allSteps->id);
     lps::TimelineBlock crossingPatternBoundary;
@@ -243,7 +243,7 @@ void testVelocityModulationContinuesAcrossPatternChanges()
     player.process(crossingPatternBoundary, events);
 
     CHECK(player.activePatternId() == allSteps->id);
-    checkVelocityValues(triggerOnValues(events), {100});
+    checkVelocityValues(triggerStartValues(events), {100});
     CHECK(player.modulationPlaybackSnapshot().currentStep == 1);
 }
 
@@ -260,7 +260,7 @@ void testSelectingVelocityModulationRestartsItsOwnPhase()
     firstRun.playing = true;
     firstRun.transportDiscontinuity = true;
     player.process(firstRun, events);
-    checkVelocityValues(triggerOnValues(events), {255, 100});
+    checkVelocityValues(triggerStartValues(events), {255, 100});
 
     player.selectVelocityModulation(lps::VelocityModulationId {1});
     lps::TimelineBlock steadyBlock;
@@ -268,7 +268,7 @@ void testSelectingVelocityModulationRestartsItsOwnPhase()
     steadyBlock.ppqEnd = 2.1;
     steadyBlock.playing = true;
     player.process(steadyBlock, events);
-    checkVelocityValues(triggerOnValues(events), {201});
+    checkVelocityValues(triggerStartValues(events), {201});
     CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 
     player.selectVelocityModulation(lps::VelocityModulationId {2});
@@ -277,7 +277,7 @@ void testSelectingVelocityModulationRestartsItsOwnPhase()
     fourStepAgain.ppqEnd = 3.1;
     fourStepAgain.playing = true;
     player.process(fourStepAgain, events);
-    checkVelocityValues(triggerOnValues(events), {255});
+    checkVelocityValues(triggerStartValues(events), {255});
     CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 }
 
@@ -298,7 +298,7 @@ void testSmallBlocksDoNotDuplicateTriggers()
         block.transportDiscontinuity = close(start, 0.0);
         player.process(block, events);
 
-        const auto blockPositions = triggerOnPositions(events);
+        const auto blockPositions = triggerStartPositions(events);
         positions.insert(positions.end(), blockPositions.begin(), blockPositions.end());
     }
 
@@ -321,7 +321,7 @@ void testTransportStartAtOffGridPpqBeginsAtFirstStep()
     CHECK(player.patternPlaybackSnapshot().playing);
     CHECK(player.patternPlaybackSnapshot().currentStep == 0);
     CHECK(events.size() == 1);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOn);
+    CHECK(events[0].type == lps::SemanticEventType::triggerStart);
     CHECK(close(events[0].ppqPosition, block.ppqStart));
 }
 
@@ -354,7 +354,7 @@ void testResumeAfterStopRestartsAtFirstStep()
     CHECK(player.patternPlaybackSnapshot().playing);
     CHECK(player.patternPlaybackSnapshot().currentStep == 0);
     CHECK(events.size() == 1);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOn);
+    CHECK(events[0].type == lps::SemanticEventType::triggerStart);
     CHECK(close(events[0].ppqPosition, resumed.ppqStart));
 }
 
@@ -371,7 +371,7 @@ void testContiguousPlaybackKeepsAdvancingFromRebasedStart()
     firstBlock.transportDiscontinuity = true;
     player.process(firstBlock, events);
     CHECK(events.size() == 1);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOn);
+    CHECK(events[0].type == lps::SemanticEventType::triggerStart);
     CHECK(close(events[0].ppqPosition, firstBlock.ppqStart));
 
     lps::TimelineBlock nextBlock;
@@ -381,7 +381,7 @@ void testContiguousPlaybackKeepsAdvancingFromRebasedStart()
     player.process(nextBlock, events);
     CHECK(player.patternPlaybackSnapshot().currentStep == 0);
     CHECK(events.size() == 1);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOff);
+    CHECK(events[0].type == lps::SemanticEventType::triggerEnd);
     CHECK(close(events[0].ppqPosition, 4.225));
 
     lps::TimelineBlock thirdBlock;
@@ -405,7 +405,7 @@ void testDiscontinuityTurnsOffHeldTriggerBeforeRestarting()
     firstBlock.transportDiscontinuity = true;
     player.process(firstBlock, events);
     CHECK(events.size() == 1);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOn);
+    CHECK(events[0].type == lps::SemanticEventType::triggerStart);
 
     lps::TimelineBlock jumpedBlock;
     jumpedBlock.ppqStart = 3.2;
@@ -415,8 +415,8 @@ void testDiscontinuityTurnsOffHeldTriggerBeforeRestarting()
     player.process(jumpedBlock, events);
 
     CHECK(events.size() == 2);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOff);
-    CHECK(events[1].type == lps::SequencerEventType::triggerOn);
+    CHECK(events[0].type == lps::SemanticEventType::triggerEnd);
+    CHECK(events[1].type == lps::SemanticEventType::triggerStart);
     CHECK(close(events[0].ppqPosition, jumpedBlock.ppqStart));
     CHECK(close(events[1].ppqPosition, jumpedBlock.ppqStart));
     CHECK(player.patternPlaybackSnapshot().currentStep == 0);
@@ -433,23 +433,21 @@ void testStopEmitsTriggerOff()
     playing.transportDiscontinuity = true;
     player.process(playing, events);
     CHECK(events.size() == 1);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOn);
+    CHECK(events[0].type == lps::SemanticEventType::triggerStart);
 
     lps::TimelineBlock stopped;
     stopped.ppqStart = 0.05;
     player.process(stopped, events);
     CHECK(events.size() == 1);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOff);
+    CHECK(events[0].type == lps::SemanticEventType::triggerEnd);
     CHECK(player.patternPlaybackSnapshot().currentStep == -1);
     CHECK(!player.patternPlaybackSnapshot().playing);
 }
 
-void testMidiNoteIsUsedForTriggerOnAndOff()
+void testSemanticEventsPairStartAndEndByTriggerIdentity()
 {
     const lps::PatternLibrary library;
-    constexpr std::uint8_t bassDrumNote = 36;
-    lps::PatternPlayer player { library, bassDrumNote };
-    CHECK(player.midiNote() == bassDrumNote);
+    lps::PatternPlayer player { library };
 
     lps::SequencerEventBuffer events;
     lps::TimelineBlock firstBlock;
@@ -458,7 +456,10 @@ void testMidiNoteIsUsedForTriggerOnAndOff()
     firstBlock.transportDiscontinuity = true;
     player.process(firstBlock, events);
     CHECK(events.size() == 1);
-    CHECK(events[0].pitchSemitones == static_cast<float>(bassDrumNote));
+    CHECK(events[0].type == lps::SemanticEventType::triggerStart);
+    CHECK(!events[0].hasMusicalPitch);
+    const auto triggerId = events[0].triggerId;
+    CHECK(triggerId.value != 0);
 
     lps::TimelineBlock laterBlock;
     laterBlock.ppqStart = firstBlock.ppqEnd;
@@ -466,8 +467,8 @@ void testMidiNoteIsUsedForTriggerOnAndOff()
     laterBlock.playing = true;
     player.process(laterBlock, events);
     CHECK(events.size() == 1);
-    CHECK(events[0].type == lps::SequencerEventType::triggerOff);
-    CHECK(events[0].pitchSemitones == static_cast<float>(bassDrumNote));
+    CHECK(events[0].type == lps::SemanticEventType::triggerEnd);
+    CHECK(events[0].triggerId == triggerId);
 }
 
 void testPatternViewStartsAsBasicKick()
@@ -545,7 +546,7 @@ void testSelectionDuringPlaybackWaitsForTheOldPatternEnd()
     CHECK(player.activePatternId() == allSteps.id);
     CHECK(player.patternView().playbackStart == 0);
     CHECK(player.patternView().playbackEnd == 3);
-    checkPositions(triggerOnPositions(events), {1.0});
+    checkPositions(triggerStartPositions(events), {1.0});
 }
 
 void testStoppedProcessAppliesPendingSelection()
@@ -608,7 +609,7 @@ void testLoadedPatternLengthSetsThePlaybackCycleEnd()
     block.transportDiscontinuity = true;
     player.process(block, events);
 
-    checkPositions(triggerOnPositions(events), {0.0, 2.25, 4.5});
+    checkPositions(triggerStartPositions(events), {0.0, 2.25, 4.5});
 }
 
 void testSelectionWaitsForTheActivePlaybackWindowEnd()
@@ -635,7 +636,7 @@ void testSelectionWaitsForTheActivePlaybackWindowEnd()
     player.process(crossShortWindowEnd, events);
 
     CHECK(player.activePatternId() == allSteps.id);
-    checkPositions(triggerOnPositions(events), {1.5});
+    checkPositions(triggerStartPositions(events), {1.5});
     CHECK(player.patternView().playbackStart == 0);
     CHECK(player.patternView().playbackEnd == 3);
 }
@@ -681,7 +682,7 @@ void testOffsetRotatesPlaybackWithoutChangingDraftLength()
     block.playing = true;
     block.transportDiscontinuity = true;
     player.process(block, events);
-    checkPositions(triggerOnPositions(events), {0.25});
+    checkPositions(triggerStartPositions(events), {0.25});
 
     player.toggleStep(2);
     const auto edited = player.patternView();
@@ -708,7 +709,7 @@ void testSpeedChangesTimingWithoutChangingPattern()
     block.transportDiscontinuity = true;
     player.process(block, events);
 
-    checkPositions(triggerOnPositions(events), {0.0, 0.5});
+    checkPositions(triggerStartPositions(events), {0.0, 0.5});
     const auto afterPlayback = player.patternView();
     CHECK(afterPlayback.stepCount == original.stepCount);
     CHECK(afterPlayback.hitMask == original.hitMask);
@@ -746,7 +747,7 @@ void testPlaybackWindowWaitsForOldEndThenStartsAtNewStart()
     crossOldEnd.playing = true;
     player.process(crossOldEnd, events);
 
-    checkPositions(triggerOnPositions(events), {1.0});
+    checkPositions(triggerStartPositions(events), {1.0});
     CHECK(player.patternPlaybackSnapshot().playing);
     CHECK(player.patternPlaybackSnapshot().currentStep == 1);
 }
@@ -775,14 +776,14 @@ void testPlaybackWindowCanExtendAcrossTheFullDraftWithoutChangingThePattern()
     firstCycle.playing = true;
     firstCycle.transportDiscontinuity = true;
     player.process(firstCycle, events);
-    checkPositions(triggerOnPositions(events), {0.0});
+    checkPositions(triggerStartPositions(events), {0.0});
 
     lps::TimelineBlock extendedCycle;
     extendedCycle.ppqStart = firstCycle.ppqEnd;
     extendedCycle.ppqEnd = 8.1;
     extendedCycle.playing = true;
     player.process(extendedCycle, events);
-    checkPositions(triggerOnPositions(events), {7.75, 8.0});
+    checkPositions(triggerStartPositions(events), {7.75, 8.0});
 
     CHECK(!kick.pattern.hits[31]);
     CHECK(kick.pattern.length == 4);
@@ -1038,7 +1039,7 @@ int main()
     testContiguousPlaybackKeepsAdvancingFromRebasedStart();
     testDiscontinuityTurnsOffHeldTriggerBeforeRestarting();
     testStopEmitsTriggerOff();
-    testMidiNoteIsUsedForTriggerOnAndOff();
+    testSemanticEventsPairStartAndEndByTriggerIdentity();
     testPatternViewStartsAsBasicKick();
     testInvalidSelectionIsIgnoredAndPrepareLoadsAValidSelection();
     testSelectionDuringPlaybackWaitsForTheOldPatternEnd();

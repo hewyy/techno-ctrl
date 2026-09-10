@@ -7,44 +7,12 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
 
 namespace lps
 {
-
-struct PlayerId
-{
-    static constexpr std::uint32_t invalidValue =
-        std::numeric_limits<std::uint32_t>::max();
-
-    std::uint32_t value = invalidValue;
-
-    friend constexpr bool operator==(PlayerId left, PlayerId right) noexcept
-    {
-        return left.value == right.value;
-    }
-
-    friend constexpr bool operator!=(PlayerId left, PlayerId right) noexcept
-    {
-        return !(left == right);
-    }
-};
-
-struct RouteId
-{
-    static constexpr std::uint32_t invalidValue =
-        std::numeric_limits<std::uint32_t>::max();
-
-    std::uint32_t value = invalidValue;
-
-    friend constexpr bool operator==(RouteId left, RouteId right) noexcept
-    {
-        return left.value == right.value;
-    }
-};
 
 class SequencerEngine
 {
@@ -54,7 +22,8 @@ public:
     [[nodiscard]] std::optional<PlayerId> registerPlayer(IPlayer& player);
     [[nodiscard]] std::optional<RouteId> connect(
         PlayerId playerId,
-        ITransport& transport);
+        ITransport& transport,
+        RouteMapping mapping = {});
 
     void prepare(const PrepareSpec& spec) noexcept;
     void reset() noexcept;
@@ -113,11 +82,13 @@ private:
         RouteId id;
         PlayerId playerId;
         ITransport* transport = nullptr;
+        RouteMapping mapping;
         bool resetThisBlock = false;
     };
 
     std::vector<PlayerSlot> playerSlots_;
     std::vector<Route> routes_;
+    std::vector<RoutedEvent> routedEvents_;
     std::optional<PlayerId> masterPlayerId_;
     bool topologyFrozen_ = false;
 
@@ -131,7 +102,12 @@ private:
     void resetPlayerOutputs(
         PlayerId playerId,
         const TimelineBlock& block) noexcept;
-    void validatePlayerEvents(PlayerSlot& slot) noexcept;
+    void validatePlayerEvents(
+        PlayerSlot& slot,
+        const TimelineBlock& block) noexcept;
+    [[nodiscard]] static std::optional<std::uint32_t> frameOffsetFor(
+        const SequencerEvent& event,
+        const TimelineBlock& block) noexcept;
 };
 
 } // namespace lps

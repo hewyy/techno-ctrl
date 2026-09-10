@@ -16,9 +16,7 @@ public:
     void clearMidiBuffer() noexcept;
 
     void prepare(const PrepareSpec& spec) noexcept override;
-    [[nodiscard]] bool send(
-        const SequencerEvent& event,
-        const TimelineBlock& block) noexcept override;
+    [[nodiscard]] bool send(const RoutedEvent& event) noexcept override;
     void resetOutputs(const TimelineBlock& block) noexcept override;
 
 private:

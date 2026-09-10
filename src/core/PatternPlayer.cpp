@@ -14,21 +14,16 @@ const VelocityModulationLibrary& defaultVelocityModulationLibrary() noexcept
 }
 } // namespace
 
-PatternPlayer::PatternPlayer(
-    const PatternLibrary& patternLibrary,
-    std::uint8_t midiNote) noexcept
-    : PatternPlayer(
-        patternLibrary, defaultVelocityModulationLibrary(), midiNote)
+PatternPlayer::PatternPlayer(const PatternLibrary& patternLibrary) noexcept
+    : PatternPlayer(patternLibrary, defaultVelocityModulationLibrary())
 {
 }
 
 PatternPlayer::PatternPlayer(
     const PatternLibrary& patternLibrary,
-    const VelocityModulationLibrary& velocityModulationLibrary,
-    std::uint8_t midiNote) noexcept
+    const VelocityModulationLibrary& velocityModulationLibrary) noexcept
     : patternLibrary_(patternLibrary),
-      velocityModulationLibrary_(velocityModulationLibrary),
-      midiNote_(std::min<std::uint8_t>(midiNote, 127))
+      velocityModulationLibrary_(velocityModulationLibrary)
 {
     if (const auto* initialPattern = patternLibrary_.recordAt(0))
     {
@@ -43,11 +38,6 @@ PatternPlayer::PatternPlayer(
             initialModulation->id.value(), std::memory_order_relaxed);
         (void) activateVelocityModulation(initialModulation->id);
     }
-}
-
-std::uint8_t PatternPlayer::midiNote() const noexcept
-{
-    return midiNote_;
 }
 
 void PatternPlayer::selectPattern(PatternId patternId) noexcept
@@ -556,6 +546,7 @@ void PatternPlayer::reset() noexcept
     playbackWindowOriginStep_ = 0;
     nextVelocityModulationStep_ = 0;
     triggerIsOn_ = false;
+    activeTriggerId_ = {};
     patternPlaybackSnapshot_ = {};
     modulationPlaybackSnapshot_ = {};
 }
@@ -609,15 +600,21 @@ PlayerProcessResult PatternPlayer::process(
         modulationPlaybackSnapshot_.currentStep = -1;
     }
 
-    const auto emit = [this, &output](double ppq, SequencerEventType type, float value)
+    const auto emitStart = [this, &output](double ppq, float intensity)
     {
-        (void) output.push({ ppq, 0, static_cast<float>(midiNote_), value, type });
+        activeTriggerId_ = TriggerId { nextTriggerId_++ };
+        (void) output.push(SequencerEvent::triggerStart(
+            ppq, activeTriggerId_, intensity));
+    };
+    const auto emitEnd = [this, &output](double ppq)
+    {
+        (void) output.push(SequencerEvent::triggerEnd(ppq, activeTriggerId_));
     };
 
     if (block.transportDiscontinuity)
     {
         if (triggerIsOn_)
-            emit(block.ppqStart, SequencerEventType::triggerOff, 0.0f);
+            emitEnd(block.ppqStart);
 
         pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
         lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
@@ -670,7 +667,7 @@ PlayerProcessResult PatternPlayer::process(
     if (!block.playing || block.ppqEnd <= block.ppqStart || currentDraftStepCount == 0)
     {
         if (triggerIsOn_)
-            emit(block.ppqStart, SequencerEventType::triggerOff, 0.0f);
+            emitEnd(block.ppqStart);
 
         pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
         triggerIsOn_ = false;
@@ -768,7 +765,7 @@ PlayerProcessResult PatternPlayer::process(
             // accelerated step that may now occur earlier.
             if (triggerIsOn_ && pendingTriggerOffPpq_ <= stepPpq)
             {
-                emit(pendingTriggerOffPpq_, SequencerEventType::triggerOff, 0.0f);
+                emitEnd(pendingTriggerOffPpq_);
                 triggerIsOn_ = false;
                 pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
             }
@@ -799,7 +796,7 @@ PlayerProcessResult PatternPlayer::process(
             {
                 if (triggerIsOn_)
                 {
-                    emit(stepPpq, SequencerEventType::triggerOff, 0.0f);
+                    emitEnd(stepPpq);
                     pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
                 }
 
@@ -811,9 +808,8 @@ PlayerProcessResult PatternPlayer::process(
                     % velocityLength;
                 const auto velocityValue = editableVelocityValues_[velocityStep].load(
                     std::memory_order_relaxed);
-                emit(
+                emitStart(
                     stepPpq,
-                    SequencerEventType::triggerOn,
                     static_cast<float>(velocityValue) / 255.0f);
                 modulationPlaybackSnapshot_.currentStep = static_cast<int>(velocityStep);
                 nextVelocityModulationStep_ = (velocityStep + 1) % velocityLength;
@@ -823,7 +819,7 @@ PlayerProcessResult PatternPlayer::process(
                 const double offPpq = stepPpq + stepLengthPpq * gateRatio;
                 if (offPpq < rangeEnd)
                 {
-                    emit(offPpq, SequencerEventType::triggerOff, 0.0f);
+                    emitEnd(offPpq);
                     triggerIsOn_ = false;
                     pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
                 }
@@ -838,7 +834,7 @@ PlayerProcessResult PatternPlayer::process(
 
         if (triggerIsOn_ && pendingTriggerOffPpq_ < rangeEnd)
         {
-            emit(pendingTriggerOffPpq_, SequencerEventType::triggerOff, 0.0f);
+            emitEnd(pendingTriggerOffPpq_);
             triggerIsOn_ = false;
             pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
         }
@@ -913,7 +909,7 @@ PlayerProcessResult PatternPlayer::process(
     if (patternActivated || hasExternalReset)
     {
         if (triggerIsOn_)
-            emit(transitionPpq, SequencerEventType::triggerOff, 0.0f);
+            emitEnd(transitionPpq);
         pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
         triggerIsOn_ = false;
         playbackOriginPpq_ = transitionPpq;

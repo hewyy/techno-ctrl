@@ -26,38 +26,27 @@ void MidiBufferTransport::prepare(const PrepareSpec& /*spec*/) noexcept
 }
 
 bool MidiBufferTransport::send(
-    const SequencerEvent& event,
-    const TimelineBlock& block) noexcept
+    const RoutedEvent& routed) noexcept
 {
     if (midiBuffer_ == nullptr)
         return false;
+    if (routed.event.type == SemanticEventType::controlPoint)
+        return true;
+    if (!routed.hasMappedPitch)
+        return false;
 
     const auto note = std::clamp(
-        static_cast<int>(std::lround(event.pitchSemitones)), 0, 127);
-    const auto message = event.type == SequencerEventType::triggerOn
+        static_cast<int>(std::lround(routed.mappedPitchSemitones)), 0, 127);
+    const auto message = routed.event.type == SemanticEventType::triggerStart
         ? juce::MidiMessage::noteOn(
             midiChannel_,
             note,
-            std::clamp(event.value, 0.0f, 1.0f))
+            std::clamp(routed.event.normalizedValue, 0.0f, 1.0f))
         : juce::MidiMessage::noteOff(
             midiChannel_,
             note);
 
-    const double ppqPerSample = block.tempoBpm > 0.0 && block.sampleRate > 0.0
-        ? block.tempoBpm / (60.0 * block.sampleRate)
-        : 0.0;
-    const auto maximumOffset = block.sampleCount == 0
-        ? 0
-        : static_cast<int>(block.sampleCount - 1);
-    const auto sampleOffset = ppqPerSample > 0.0
-        ? std::clamp(
-            static_cast<int>(std::llround(
-                (event.ppqPosition - block.ppqStart) / ppqPerSample)),
-            0,
-            maximumOffset)
-        : 0;
-
-    return midiBuffer_->addEvent(message, sampleOffset);
+    return midiBuffer_->addEvent(message, static_cast<int>(routed.frameOffset));
 }
 
 void MidiBufferTransport::resetOutputs(const TimelineBlock& /*block*/) noexcept

@@ -22,15 +22,10 @@ public:
     static constexpr std::size_t longestPatternLength = Pattern::maxLength;
     static constexpr std::size_t playbackSpeedCount = 3;
 
-    explicit PatternPlayer(
-        const PatternLibrary& patternLibrary,
-        std::uint8_t midiNote = 60) noexcept;
+    explicit PatternPlayer(const PatternLibrary& patternLibrary) noexcept;
     PatternPlayer(
         const PatternLibrary& patternLibrary,
-        const VelocityModulationLibrary& velocityModulationLibrary,
-        std::uint8_t midiNote = 60) noexcept;
-
-    [[nodiscard]] std::uint8_t midiNote() const noexcept;
+        const VelocityModulationLibrary& velocityModulationLibrary) noexcept;
 
     void selectPattern(PatternId patternId) noexcept;
     void selectSavedPattern(PatternId patternId) noexcept;
@@ -113,13 +108,13 @@ private:
 
     static constexpr double baseStepLengthPpq = 0.25;
     static constexpr double gateRatio = 0.5;
-    const std::uint8_t midiNote_;
-
     double pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
     double playbackOriginPpq_ = 0.0;
     std::int64_t lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
     std::int64_t playbackWindowOriginStep_ = 0;
     std::size_t nextVelocityModulationStep_ = 0;
+    std::uint64_t nextTriggerId_ = 1;
+    TriggerId activeTriggerId_;
     bool triggerIsOn_ = false;
 
     [[nodiscard]] static std::uint32_t packPlaybackWindow(

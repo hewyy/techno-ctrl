@@ -17,6 +17,23 @@ namespace
 #define CHECK(condition) \
     ((condition) ? static_cast<void>(0) : failTest(#condition, __FILE__, __LINE__))
 
+[[nodiscard]] lps::RoutedEvent routedTrigger(
+    lps::SemanticEventType type,
+    std::uint64_t trigger,
+    float note,
+    float intensity,
+    std::uint32_t frameOffset)
+{
+    lps::RoutedEvent routed;
+    routed.event = type == lps::SemanticEventType::triggerStart
+        ? lps::SequencerEvent::triggerStart(0.0, { trigger }, intensity)
+        : lps::SequencerEvent::triggerEnd(0.0, { trigger });
+    routed.frameOffset = frameOffset;
+    routed.mappedPitchSemitones = note;
+    routed.hasMappedPitch = true;
+    return routed;
+}
+
 void testDistinctDrumNotesUseOneTransportChannel()
 {
     constexpr int drumChannel = 1;
@@ -25,24 +42,16 @@ void testDistinctDrumNotesUseOneTransportChannel()
     juce::MidiBuffer midi;
     transport.setMidiBuffer(midi);
 
-    lps::TimelineBlock block;
-    block.ppqStart = 0.0;
-    block.tempoBpm = 120.0;
-    block.sampleRate = 48'000.0;
-    block.sampleCount = 512;
-
-    CHECK(transport.send(
-        { 0.000, 0, 36.0f, 100.0f / 127.0f, lps::SequencerEventType::triggerOn },
-        block));
-    CHECK(transport.send(
-        { 0.005, 0, 39.0f, 100.0f / 127.0f, lps::SequencerEventType::triggerOn },
-        block));
-    CHECK(transport.send(
-        { 0.010, 0, 36.0f, 0.0f, lps::SequencerEventType::triggerOff },
-        block));
-    CHECK(transport.send(
-        { 0.015, 0, 39.0f, 0.0f, lps::SequencerEventType::triggerOff },
-        block));
+    CHECK(transport.send(routedTrigger(
+        lps::SemanticEventType::triggerStart, 1, 36.0f,
+        100.0f / 127.0f, 0)));
+    CHECK(transport.send(routedTrigger(
+        lps::SemanticEventType::triggerStart, 2, 39.0f,
+        100.0f / 127.0f, 120)));
+    CHECK(transport.send(routedTrigger(
+        lps::SemanticEventType::triggerEnd, 1, 36.0f, 0.0f, 240)));
+    CHECK(transport.send(routedTrigger(
+        lps::SemanticEventType::triggerEnd, 2, 39.0f, 0.0f, 360)));
 
     std::vector<juce::MidiMessage> messages;
     std::vector<int> samplePositions;
@@ -76,21 +85,15 @@ void testEightBitVelocityLevelsMapAcrossTheMidiRange()
     juce::MidiBuffer midi;
     transport.setMidiBuffer(midi);
 
-    lps::TimelineBlock block;
-    block.tempoBpm = 120.0;
-    block.sampleRate = 48'000.0;
-    block.sampleCount = 512;
-
     constexpr std::array<std::uint8_t, 4> levels {255, 100, 225, 150};
     for (const auto level : levels)
     {
-        CHECK(transport.send(
-            { 0.0,
-              0,
-              36.0f,
-              static_cast<float>(level) / 255.0f,
-              lps::SequencerEventType::triggerOn },
-            block));
+        CHECK(transport.send(routedTrigger(
+            lps::SemanticEventType::triggerStart,
+            static_cast<std::uint64_t>(level),
+            36.0f,
+            static_cast<float>(level) / 255.0f,
+            0)));
     }
 
     constexpr std::array<int, 4> expectedMidiVelocities {127, 50, 112, 75};
@@ -116,9 +119,8 @@ void testResetOutputsSendsMidiPanicAtBlockStart()
     block.tempoBpm = 120.0;
     block.sampleRate = 48'000.0;
     block.sampleCount = 512;
-    CHECK(transport.send(
-        { 0.0, 0, 60.0f, 1.0f, lps::SequencerEventType::triggerOn },
-        block));
+    CHECK(transport.send(routedTrigger(
+        lps::SemanticEventType::triggerStart, 1, 60.0f, 1.0f, 0)));
 
     transport.resetOutputs(block);
 
@@ -134,7 +136,7 @@ void testResetOutputsSendsMidiPanicAtBlockStart()
 void testSendReportsMissingDestination()
 {
     lps::MidiBufferTransport transport;
-    CHECK(!transport.send({}, {}));
+    CHECK(!transport.send({}));
 }
 }
 

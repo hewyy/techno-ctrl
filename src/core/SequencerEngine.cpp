@@ -8,6 +8,7 @@ namespace lps
 
 void SequencerEngine::run(const TimelineBlock& block) noexcept
 {
+    routedEvents_.clear();
     for (auto& slot : playerSlots_)
     {
         slot.events.clear();
@@ -26,7 +27,7 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
     {
         masterSlot->processResult = masterSlot->player->process(
             block, directives, masterSlot->events);
-        validatePlayerEvents(*masterSlot);
+        validatePlayerEvents(*masterSlot, block);
         masterBoundaryPpq = masterSlot->processResult.firstCycleBoundaryPpq;
 
         if (playerBlockFailed(masterSlot->id)
@@ -62,7 +63,7 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
 
         slot.processResult = slot.player->process(
             block, directives, slot.events);
-        validatePlayerEvents(slot);
+        validatePlayerEvents(slot, block);
     }
 
     for (auto& route : routes_)
@@ -87,40 +88,80 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
         if (route.resetThisBlock)
             route.transport->resetOutputs(block);
 
-    for (auto& slot : playerSlots_)
+    std::uint64_t stableOrder = 0;
+    for (const auto& route : routes_)
     {
-        if (playerBlockFailed(slot.id))
+        const auto* slot = findSlot(route.playerId);
+        if (slot == nullptr || playerBlockFailed(route.playerId))
             continue;
 
-        const bool muted = slot.muted->load(std::memory_order_relaxed);
-        bool deliveryFailed = false;
-        for (const auto& route : routes_)
+        const bool muted = slot->muted->load(std::memory_order_relaxed);
+        for (std::size_t eventIndex = 0;
+             eventIndex < slot->events.size();
+             ++eventIndex)
         {
-            if (route.playerId == slot.id)
-            {
-                for (std::size_t eventIndex = 0;
-                     eventIndex < slot.events.size();
-                     ++eventIndex)
-                {
-                    if (slot.validation.valid[eventIndex] == 0)
-                        continue;
+            if (slot->validation.valid[eventIndex] == 0)
+                continue;
 
-                    const auto& event = slot.events[eventIndex];
-                    if ((event.type != SequencerEventType::triggerOn || !muted)
-                        && !isSuppressed(slot.id, event)
-                        && !route.transport->send(event, block))
-                    {
-                        resetPlayerOutputs(slot.id, block);
-                        slot.player->reset();
-                        slot.validation.failed = true;
-                        deliveryFailed = true;
-                        break;
-                    }
-                }
+            const auto& event = slot->events[eventIndex];
+            if ((event.type == SemanticEventType::triggerStart && muted)
+                || isSuppressed(slot->id, event))
+            {
+                continue;
             }
 
-            if (deliveryFailed)
-                break;
+            const auto frameOffset = frameOffsetFor(event, block);
+            if (!frameOffset.has_value())
+            {
+                ++stableOrder;
+                continue;
+            }
+
+            RoutedEvent routed;
+            routed.event = event;
+            routed.sourcePlayerId = slot->id;
+            routed.routeId = route.id;
+            routed.frameOffset = *frameOffset;
+            routed.stableOrder = stableOrder++;
+            if (route.mapping.usesFixedPitch)
+            {
+                routed.mappedPitchSemitones = route.mapping.fixedPitchSemitones;
+                routed.hasMappedPitch = true;
+            }
+            else if (event.hasMusicalPitch)
+            {
+                routed.mappedPitchSemitones = event.musicalPitchSemitones;
+                routed.hasMappedPitch = true;
+            }
+            routedEvents_.push_back(routed);
+        }
+    }
+
+    std::sort(
+        routedEvents_.begin(),
+        routedEvents_.end(),
+        [](const RoutedEvent& left, const RoutedEvent& right)
+        {
+            if (left.frameOffset != right.frameOffset)
+                return left.frameOffset < right.frameOffset;
+            if (left.event.type != right.event.type)
+                return left.event.type < right.event.type;
+            return left.stableOrder < right.stableOrder;
+        });
+
+    for (const auto& routed : routedEvents_)
+    {
+        auto* slot = findSlot(routed.sourcePlayerId);
+        if (slot == nullptr || slot->validation.failed)
+            continue;
+
+        const auto routeIndex = routed.routeId.value;
+        if (routeIndex >= routes_.size()
+            || !routes_[routeIndex].transport->send(routed))
+        {
+            resetPlayerOutputs(routed.sourcePlayerId, block);
+            slot->player->reset();
+            slot->validation.failed = true;
         }
     }
 }
@@ -157,7 +198,8 @@ std::optional<PlayerId> SequencerEngine::registerPlayer(IPlayer& player)
 
 std::optional<RouteId> SequencerEngine::connect(
     PlayerId playerId,
-    ITransport& transport)
+    ITransport& transport,
+    RouteMapping mapping)
 {
     if (topologyFrozen_
         || findSlot(playerId) == nullptr
@@ -175,11 +217,13 @@ std::optional<RouteId> SequencerEngine::connect(
     }
 
     const RouteId routeId { static_cast<std::uint32_t>(routes_.size()) };
-    routes_.push_back({ routeId, playerId, &transport, false });
+    routes_.push_back({ routeId, playerId, &transport, mapping, false });
     return routeId;
 }
 
-void SequencerEngine::validatePlayerEvents(PlayerSlot& slot) noexcept
+void SequencerEngine::validatePlayerEvents(
+    PlayerSlot& slot,
+    const TimelineBlock& block) noexcept
 {
     slot.validation.valid.fill(0);
     slot.validation.failed = false;
@@ -191,7 +235,8 @@ void SequencerEngine::validatePlayerEvents(PlayerSlot& slot) noexcept
     {
         const auto ppq = slot.events[eventIndex].ppqPosition;
         const bool valid = std::isfinite(ppq)
-            && (!hasPrevious || ppq >= previousPpq);
+            && (!hasPrevious || ppq >= previousPpq)
+            && frameOffsetFor(slot.events[eventIndex], block).has_value();
         if (!valid)
         {
             ++invalidCount;
@@ -277,7 +322,7 @@ bool SequencerEngine::isSuppressed(
     PlayerId playerId,
     const SequencerEvent& event) const noexcept
 {
-    if (event.type != SequencerEventType::triggerOn)
+    if (event.type != SemanticEventType::triggerStart)
         return false;
 
     constexpr double simultaneousTolerancePpq = 1.0e-9;
@@ -297,7 +342,7 @@ bool SequencerEngine::isSuppressed(
                 continue;
 
             const auto& suppressorEvent = suppressor.events[eventIndex];
-            if (suppressorEvent.type == SequencerEventType::triggerOn
+            if (suppressorEvent.type == SemanticEventType::triggerStart
                 && std::abs(suppressorEvent.ppqPosition - event.ppqPosition)
                     <= simultaneousTolerancePpq)
             {
@@ -402,12 +447,46 @@ bool SequencerEngine::suppression(
 void SequencerEngine::prepare(const PrepareSpec& spec) noexcept
 {
     topologyFrozen_ = true;
+    routedEvents_.reserve(routes_.size() * SequencerEventBuffer::capacity);
     for (auto& slot : playerSlots_)
         slot.player->prepare(spec);
 
     for (std::size_t routeIndex = 0; routeIndex < routes_.size(); ++routeIndex)
         if (firstRouteFor(routes_[routeIndex].transport) == routeIndex)
             routes_[routeIndex].transport->prepare(spec);
+}
+
+std::optional<std::uint32_t> SequencerEngine::frameOffsetFor(
+    const SequencerEvent& event,
+    const TimelineBlock& block) noexcept
+{
+    if (!std::isfinite(event.ppqPosition))
+        return std::nullopt;
+    if (block.sampleCount == 0)
+        return std::uint32_t { 0 };
+    if (!std::isfinite(block.ppqStart)
+        || !std::isfinite(block.tempoBpm)
+        || !std::isfinite(block.sampleRate)
+        || block.tempoBpm <= 0.0
+        || block.sampleRate <= 0.0)
+    {
+        return std::nullopt;
+    }
+
+    const auto ppqPerSample = block.tempoBpm / (60.0 * block.sampleRate);
+    const auto rawOffset = (event.ppqPosition - block.ppqStart) / ppqPerSample;
+    if (!std::isfinite(rawOffset)
+        || rawOffset < -0.5
+        || rawOffset > static_cast<double>(block.sampleCount) - 0.5)
+    {
+        return std::nullopt;
+    }
+
+    const auto rounded = std::llround(rawOffset);
+    return static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        rounded,
+        0,
+        static_cast<std::int64_t>(block.sampleCount - 1)));
 }
 
 void SequencerEngine::reset() noexcept

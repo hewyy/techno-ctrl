@@ -58,7 +58,12 @@ public:
     {
         ++processCount;
         lastDirectives = directives;
-        (void) output.push({ block.ppqStart + eventOffset, 2, 64.0f, 0.75f, eventType });
+        const auto ppq = block.ppqStart + eventOffset;
+        const auto event = eventType == lps::SemanticEventType::triggerStart
+            ? lps::SequencerEvent::triggerStart(
+                ppq, lps::TriggerId { 2 }, 0.75f, 64.0f)
+            : lps::SequencerEvent::triggerEnd(ppq, lps::TriggerId { 2 });
+        (void) output.push(event);
         lps::PlayerProcessResult result;
         result.active = true;
         if (capabilities.providesCycleBoundaries)
@@ -76,11 +81,35 @@ public:
     bool wasReset = false;
     int resetCount = 0;
     double eventOffset = 0.25;
-    lps::SequencerEventType eventType = lps::SequencerEventType::triggerOn;
+    lps::SemanticEventType eventType = lps::SemanticEventType::triggerStart;
     double cycleBoundaryOffset = 0.0;
     lps::PlayerDirectives lastDirectives;
     lps::PlayerSyncCapabilities capabilities;
 };
+
+struct DeliveredEvent
+{
+    double ppqPosition = 0.0;
+    float pitchSemitones = 0.0f;
+    lps::TriggerId triggerId;
+    lps::SemanticEventType type = lps::SemanticEventType::triggerEnd;
+    lps::PlayerId sourcePlayerId;
+    lps::RouteId routeId;
+    std::uint32_t frameOffset = 0;
+};
+
+[[nodiscard]] DeliveredEvent delivered(const lps::RoutedEvent& routed)
+{
+    return {
+        routed.event.ppqPosition,
+        routed.mappedPitchSemitones,
+        routed.event.triggerId,
+        routed.event.type,
+        routed.sourcePlayerId,
+        routed.routeId,
+        routed.frameOffset
+    };
+}
 
 class TestTransport final : public lps::ITransport
 {
@@ -91,12 +120,9 @@ public:
         preparedMaximumBlockSize = spec.maximumBlockSize;
         ++prepareCount;
     }
-    [[nodiscard]] bool send(
-        const lps::SequencerEvent& event,
-        const lps::TimelineBlock& block) noexcept override
+    [[nodiscard]] bool send(const lps::RoutedEvent& event) noexcept override
     {
-        lastEvent = event;
-        lastBlock = block;
+        lastEvent = delivered(event);
         ++sendCount;
         return deliverySucceeds;
     }
@@ -104,8 +130,7 @@ public:
     {
         ++resetCount;
     }
-    lps::SequencerEvent lastEvent {};
-    lps::TimelineBlock lastBlock {};
+    DeliveredEvent lastEvent {};
     double preparedRate = 0.0;
     std::uint32_t preparedMaximumBlockSize = 0;
     int prepareCount = 0;
@@ -118,16 +143,14 @@ class CollectingTransport final : public lps::ITransport
 {
 public:
     void prepare(const lps::PrepareSpec&) noexcept override {}
-    [[nodiscard]] bool send(
-        const lps::SequencerEvent& event,
-        const lps::TimelineBlock&) noexcept override
+    [[nodiscard]] bool send(const lps::RoutedEvent& event) noexcept override
     {
-        events.push_back(event);
+        events.push_back(delivered(event));
         return true;
     }
     void resetOutputs(const lps::TimelineBlock&) noexcept override { ++resetCount; }
 
-    std::vector<lps::SequencerEvent> events;
+    std::vector<DeliveredEvent> events;
     int resetCount = 0;
 };
 
@@ -145,13 +168,11 @@ public:
              index < lps::SequencerEventBuffer::capacity + 1;
              ++index)
         {
-            (void) output.push({
+            (void) output.push(lps::SequencerEvent::triggerStart(
                 block.ppqStart + static_cast<double>(index) * 0.001,
-                0,
-                60.0f,
+                lps::TriggerId { index + 1 },
                 1.0f,
-                lps::SequencerEventType::triggerOn
-            });
+                60.0f));
         }
         return { true, std::nullopt, output.overflowed() };
     }
@@ -172,16 +193,14 @@ public:
         const lps::PlayerDirectives&,
         lps::SequencerEventBuffer& output) noexcept override
     {
-        (void) output.push({ 0.2, 0, 60.0f, 1.0f, lps::SequencerEventType::triggerOn });
-        (void) output.push({
-            std::numeric_limits<double>::quiet_NaN(),
-            0,
-            61.0f,
-            1.0f,
-            lps::SequencerEventType::triggerOn
-        });
-        (void) output.push({ 0.1, 0, 62.0f, 1.0f, lps::SequencerEventType::triggerOn });
-        (void) output.push({ 0.3, 0, 63.0f, 1.0f, lps::SequencerEventType::triggerOn });
+        (void) output.push(lps::SequencerEvent::triggerStart(
+            0.2, { 1 }, 1.0f, 60.0f));
+        (void) output.push(lps::SequencerEvent::triggerStart(
+            std::numeric_limits<double>::quiet_NaN(), { 2 }, 1.0f, 61.0f));
+        (void) output.push(lps::SequencerEvent::triggerStart(
+            0.1, { 3 }, 1.0f, 62.0f));
+        (void) output.push(lps::SequencerEvent::triggerStart(
+            0.3, { 4 }, 1.0f, 63.0f));
         return { true, std::nullopt, output.overflowed() };
     }
     [[nodiscard]] lps::PlayerSyncCapabilities syncCapabilities() const noexcept override
@@ -191,12 +210,34 @@ public:
     int resetCount = 0;
 };
 
-[[nodiscard]] std::vector<double> triggerOnPositions(
+class EventListPlayer final : public lps::IPlayer
+{
+public:
+    void prepare(const lps::PrepareSpec&) noexcept override {}
+    void reset() noexcept override {}
+    [[nodiscard]] lps::PlayerProcessResult process(
+        const lps::TimelineBlock&,
+        const lps::PlayerDirectives&,
+        lps::SequencerEventBuffer& output) noexcept override
+    {
+        for (const auto& event : events)
+            (void) output.push(event);
+        return { true, std::nullopt, output.overflowed() };
+    }
+    [[nodiscard]] lps::PlayerSyncCapabilities syncCapabilities() const noexcept override
+    {
+        return {};
+    }
+
+    std::vector<lps::SequencerEvent> events;
+};
+
+[[nodiscard]] std::vector<double> triggerStartPositions(
     const CollectingTransport& transport)
 {
     std::vector<double> positions;
     for (const auto& event : transport.events)
-        if (event.type == lps::SequencerEventType::triggerOn)
+        if (event.type == lps::SemanticEventType::triggerStart)
             positions.push_back(event.ppqPosition);
     return positions;
 }
@@ -214,11 +255,12 @@ void checkPositions(
 [[nodiscard]] lps::PlayerId registerAndConnect(
     lps::SequencerEngine& engine,
     lps::IPlayer& player,
-    lps::ITransport& transport)
+    lps::ITransport& transport,
+    lps::RouteMapping mapping = {})
 {
     const auto playerId = engine.registerPlayer(player);
     CHECK(playerId.has_value());
-    const auto routeId = engine.connect(*playerId, transport);
+    const auto routeId = engine.connect(*playerId, transport, mapping);
     CHECK(routeId.has_value());
     return *playerId;
 }
@@ -259,10 +301,11 @@ void testLifecycleAndRouting()
     CHECK(player.processCount == 1);
     CHECK(transport.sendCount == 1);
     CHECK(transport.lastEvent.ppqPosition == 4.25);
-    CHECK(transport.lastEvent.output == 2);
     CHECK(transport.lastEvent.pitchSemitones == 64.0f);
-    CHECK(transport.lastEvent.type == lps::SequencerEventType::triggerOn);
-    CHECK(transport.lastBlock.ppqStart == block.ppqStart);
+    CHECK(transport.lastEvent.type == lps::SemanticEventType::triggerStart);
+    CHECK(transport.lastEvent.triggerId == lps::TriggerId { 2 });
+    CHECK(transport.lastEvent.sourcePlayerId == lps::PlayerId { 0 });
+    CHECK(transport.lastEvent.routeId == lps::RouteId { 0 });
     // The custom player deliberately does not clear its output. A second run
     // still routes only the newly emitted event because buffers belong to the
     // engine.
@@ -497,14 +540,14 @@ void testTriggerOffIsNeverSuppressed()
     TestPlayer player2;
     TestTransport transport1;
     TestTransport transport2;
-    player2.eventType = lps::SequencerEventType::triggerOff;
+    player2.eventType = lps::SemanticEventType::triggerEnd;
     (void) registerAndConnect(engine, player1, transport1);
     (void) registerAndConnect(engine, player2, transport2);
     engine.setSuppression(lps::PlayerId { 0 }, lps::PlayerId { 1 }, true);
     engine.run({});
 
     CHECK(transport2.sendCount == 1);
-    CHECK(transport2.lastEvent.type == lps::SequencerEventType::triggerOff);
+    CHECK(transport2.lastEvent.type == lps::SemanticEventType::triggerEnd);
 }
 
 void testPlayerMuteDefaultsAndBounds()
@@ -536,7 +579,7 @@ void testMutedPlayerStillRoutesTriggerOff()
     lps::SequencerEngine engine;
     TestPlayer player;
     TestTransport transport;
-    player.eventType = lps::SequencerEventType::triggerOff;
+    player.eventType = lps::SemanticEventType::triggerEnd;
     (void) registerAndConnect(engine, player, transport);
     engine.setPlayerMuted(lps::PlayerId { 0 }, true);
 
@@ -544,7 +587,7 @@ void testMutedPlayerStillRoutesTriggerOff()
 
     CHECK(player.processCount == 1);
     CHECK(transport.sendCount == 1);
-    CHECK(transport.lastEvent.type == lps::SequencerEventType::triggerOff);
+    CHECK(transport.lastEvent.type == lps::SemanticEventType::triggerEnd);
 }
 
 void testMutedPlayerStillParticipatesInSuppression()
@@ -570,7 +613,7 @@ void testMutedPlayerStillParticipatesInSuppression()
 void testMutedPlayerContinuesAndUnmutePreservesPhase()
 {
     const lps::PatternLibrary library;
-    lps::PatternPlayer player { library, 36 };
+    lps::PatternPlayer player { library };
     CollectingTransport transport;
     lps::SequencerEngine engine;
     player.selectPattern(entryAt(library, 1).id);
@@ -584,14 +627,14 @@ void testMutedPlayerContinuesAndUnmutePreservesPhase()
 
     CHECK(player.patternPlaybackSnapshot().playing);
     CHECK(player.patternPlaybackSnapshot().currentStep == 1);
-    CHECK(triggerOnPositions(transport).empty());
+    CHECK(triggerStartPositions(transport).empty());
 
     transport.events.clear();
     engine.setPlayerMuted(lps::PlayerId { 0 }, false);
     engine.run(playingBlock(0.35, 0.55));
 
     CHECK(!engine.playerMuted(lps::PlayerId { 0 }));
-    checkPositions(triggerOnPositions(transport), {0.5});
+    checkPositions(triggerStartPositions(transport), {0.5});
 }
 
 void testEnginePlayerCountIsDefinedByCaller()
@@ -623,13 +666,17 @@ void testFixedNotePlayersUseRegularRoutingAndSuppression()
 {
     const lps::PatternLibrary library;
     lps::SequencerEngine engine;
-    lps::PatternPlayer bassDrum { library, 36 };
-    lps::PatternPlayer snare { library, 39 };
+    lps::PatternPlayer bassDrum { library };
+    lps::PatternPlayer snare { library };
     bassDrum.setPlaybackSpeed(0);
     snare.setPlaybackSpeed(2);
     CollectingTransport sharedTransport;
-    (void) registerAndConnect(engine, bassDrum, sharedTransport);
-    (void) registerAndConnect(engine, snare, sharedTransport);
+    (void) registerAndConnect(
+        engine, bassDrum, sharedTransport,
+        lps::RouteMapping::fixedPitch(36.0f));
+    (void) registerAndConnect(
+        engine, snare, sharedTransport,
+        lps::RouteMapping::fixedPitch(39.0f));
 
     lps::TimelineBlock block;
     block.ppqStart = 2.1;
@@ -639,10 +686,10 @@ void testFixedNotePlayersUseRegularRoutingAndSuppression()
     engine.run(block);
 
     CHECK(sharedTransport.events.size() == 2);
-    CHECK(sharedTransport.events[0].type == lps::SequencerEventType::triggerOn);
+    CHECK(sharedTransport.events[0].type == lps::SemanticEventType::triggerStart);
     CHECK(sharedTransport.events[0].pitchSemitones == 36.0f);
     CHECK(sharedTransport.events[0].ppqPosition == block.ppqStart);
-    CHECK(sharedTransport.events[1].type == lps::SequencerEventType::triggerOn);
+    CHECK(sharedTransport.events[1].type == lps::SemanticEventType::triggerStart);
     CHECK(sharedTransport.events[1].pitchSemitones == 39.0f);
     CHECK(sharedTransport.events[1].ppqPosition == block.ppqStart);
     CHECK(bassDrum.patternPlaybackSnapshot().currentStep == 0);
@@ -663,8 +710,8 @@ void testSequenceResetUsesTheNextMasterBoundaryOnlyOnce()
     const lps::PatternLibrary library;
     const auto& threeStepPulse = entryAt(library, 5);
     lps::SequencerEngine engine;
-    lps::PatternPlayer master { library, 36 };
-    lps::PatternPlayer target { library, 39 };
+    lps::PatternPlayer master { library };
+    lps::PatternPlayer target { library };
     target.selectPattern(threeStepPulse.id);
     CollectingTransport masterTransport;
     CollectingTransport targetTransport;
@@ -685,7 +732,7 @@ void testSequenceResetUsesTheNextMasterBoundaryOnlyOnce()
     // The target first finishes the part of its old three-step cycle that is
     // before PPQ 1.0, then its first step is aligned with the master's next
     // four-step cycle. The event at 0.75 must not be discarded.
-    checkPositions(triggerOnPositions(targetTransport), {0.75, 1.0});
+    checkPositions(triggerStartPositions(targetTransport), {0.75, 1.0});
     CHECK(!engine.resetToMasterPending(lps::PlayerId { 1 }));
 
     targetTransport.events.clear();
@@ -693,7 +740,7 @@ void testSequenceResetUsesTheNextMasterBoundaryOnlyOnce()
 
     // A reset is a one-shot operation. The target keeps its own three-step
     // cycle after alignment instead of restarting at every master boundary.
-    checkPositions(triggerOnPositions(targetTransport), {1.75});
+    checkPositions(triggerStartPositions(targetTransport), {1.75});
 }
 
 void testPatternSelectionWaitsForTheNextMasterBoundary()
@@ -702,8 +749,8 @@ void testPatternSelectionWaitsForTheNextMasterBoundary()
     const auto& allSteps = entryAt(library, 1);
     const auto& threeStepPulse = entryAt(library, 5);
     lps::SequencerEngine engine;
-    lps::PatternPlayer master { library, 36 };
-    lps::PatternPlayer target { library, 39 };
+    lps::PatternPlayer master { library };
+    lps::PatternPlayer target { library };
     target.selectPattern(threeStepPulse.id);
     CollectingTransport masterTransport;
     CollectingTransport targetTransport;
@@ -724,12 +771,12 @@ void testPatternSelectionWaitsForTheNextMasterBoundary()
     // next loop start at PPQ 1.0.
     engine.run(playingBlock(0.3, 0.8));
     CHECK(target.activePatternId() == threeStepPulse.id);
-    checkPositions(triggerOnPositions(targetTransport), {0.75});
+    checkPositions(triggerStartPositions(targetTransport), {0.75});
 
     targetTransport.events.clear();
     engine.run(playingBlock(0.8, 1.0));
     CHECK(target.activePatternId() == threeStepPulse.id);
-    CHECK(triggerOnPositions(targetTransport).empty());
+    CHECK(triggerStartPositions(targetTransport).empty());
 
     // Loop boundaries use half-open blocks, so a boundary exactly at the prior
     // block's end is applied once at the beginning of this block.
@@ -738,7 +785,7 @@ void testPatternSelectionWaitsForTheNextMasterBoundary()
     CHECK(target.activePatternId() == allSteps.id);
     CHECK(target.patternView().playbackStart == 0);
     CHECK(target.patternView().playbackEnd == 3);
-    checkPositions(triggerOnPositions(targetTransport), {1.0});
+    checkPositions(triggerStartPositions(targetTransport), {1.0});
 }
 
 void testMasterBoundaryUsesItsActiveWindowAndSpeedWithoutRequiringAHit()
@@ -753,8 +800,8 @@ void testMasterBoundaryUsesItsActiveWindowAndSpeedWithoutRequiringAHit()
     CHECK(inserted.entry != nullptr);
 
     lps::SequencerEngine engine;
-    lps::PatternPlayer master { library, 36 };
-    lps::PatternPlayer target { library, 39 };
+    lps::PatternPlayer master { library };
+    lps::PatternPlayer target { library };
     master.selectPattern(nineStepPulse.id);
     target.selectPattern(inserted.entry->id);
     CollectingTransport masterTransport;
@@ -774,16 +821,16 @@ void testMasterBoundaryUsesItsActiveWindowAndSpeedWithoutRequiringAHit()
     target.setPlaybackWindow(1, 3);
 
     engine.run(playingBlock(0.0, 0.1, true));
-    CHECK(triggerOnPositions(masterTransport).empty());
-    checkPositions(triggerOnPositions(targetTransport), {0.0});
+    CHECK(triggerStartPositions(masterTransport).empty());
+    checkPositions(triggerStartPositions(targetTransport), {0.0});
     masterTransport.events.clear();
     targetTransport.events.clear();
 
     CHECK(engine.requestResetToMaster(lps::PlayerId { 1 }));
     engine.run(playingBlock(0.1, 0.6));
 
-    CHECK(triggerOnPositions(masterTransport).empty());
-    checkPositions(triggerOnPositions(targetTransport), {0.5});
+    CHECK(triggerStartPositions(masterTransport).empty());
+    checkPositions(triggerStartPositions(targetTransport), {0.5});
     CHECK(target.activePatternId() == inserted.entry->id);
     CHECK(target.playbackSpeed() == 0);
     CHECK(target.requestedPlaybackStart() == 1);
@@ -792,7 +839,7 @@ void testMasterBoundaryUsesItsActiveWindowAndSpeedWithoutRequiringAHit()
     targetTransport.events.clear();
     engine.run(playingBlock(0.6, 1.6));
     // Master boundaries at 1.0 and 1.5 must not continuously reset target.
-    CHECK(triggerOnPositions(targetTransport).empty());
+    CHECK(triggerStartPositions(targetTransport).empty());
 }
 
 void testSequenceResetOnlyAffectsTheRequestedNonMasterPlayer()
@@ -800,9 +847,9 @@ void testSequenceResetOnlyAffectsTheRequestedNonMasterPlayer()
     const lps::PatternLibrary library;
     const auto& threeStepPulse = entryAt(library, 5);
     lps::SequencerEngine engine;
-    lps::PatternPlayer master { library, 36 };
-    lps::PatternPlayer requestedTarget { library, 39 };
-    lps::PatternPlayer otherTarget { library, 40 };
+    lps::PatternPlayer master { library };
+    lps::PatternPlayer requestedTarget { library };
+    lps::PatternPlayer otherTarget { library };
     requestedTarget.selectPattern(threeStepPulse.id);
     otherTarget.selectPattern(threeStepPulse.id);
     CollectingTransport masterTransport;
@@ -829,8 +876,8 @@ void testSequenceResetOnlyAffectsTheRequestedNonMasterPlayer()
     CHECK(!engine.resetToMasterPending(lps::PlayerId { 2 }));
     engine.run(playingBlock(0.3, 1.1));
 
-    checkPositions(triggerOnPositions(requestedTransport), {0.75, 1.0});
-    checkPositions(triggerOnPositions(otherTransport), {0.75});
+    checkPositions(triggerStartPositions(requestedTransport), {0.75, 1.0});
+    checkPositions(triggerStartPositions(otherTransport), {0.75});
     CHECK(!engine.resetToMasterPending(lps::PlayerId { 1 }));
     CHECK(!engine.resetToMasterPending(lps::PlayerId { 2 }));
 }
@@ -840,8 +887,8 @@ void testSequenceResetQueuedWhileStoppedIsConsumedAtTransportStart()
     const lps::PatternLibrary library;
     const auto& threeStepPulse = entryAt(library, 5);
     lps::SequencerEngine engine;
-    lps::PatternPlayer master { library, 36 };
-    lps::PatternPlayer target { library, 39 };
+    lps::PatternPlayer master { library };
+    lps::PatternPlayer target { library };
     target.selectPattern(threeStepPulse.id);
     CollectingTransport masterTransport;
     CollectingTransport targetTransport;
@@ -864,22 +911,22 @@ void testSequenceResetQueuedWhileStoppedIsConsumedAtTransportStart()
 
     constexpr double resumedAt = 6.125;
     engine.run(playingBlock(resumedAt, resumedAt + 0.1, true));
-    checkPositions(triggerOnPositions(targetTransport), {resumedAt});
+    checkPositions(triggerStartPositions(targetTransport), {resumedAt});
     CHECK(!engine.resetToMasterPending(lps::PlayerId { 1 }));
 
     targetTransport.events.clear();
     engine.run(playingBlock(resumedAt + 0.1, resumedAt + 1.075));
     // The target's own next three-step boundary is 0.75 PPQ after restart.
     // It must not also restart at the master's boundary one PPQ later.
-    checkPositions(triggerOnPositions(targetTransport), {resumedAt + 0.75});
+    checkPositions(triggerStartPositions(targetTransport), {resumedAt + 0.75});
 }
 
 void testSequenceResetTurnsOffAHeldTriggerBeforeRestartingIt()
 {
     const lps::PatternLibrary library;
     lps::SequencerEngine engine;
-    lps::PatternPlayer master { library, 36 };
-    lps::PatternPlayer target { library, 39 };
+    lps::PatternPlayer master { library };
+    lps::PatternPlayer target { library };
     CollectingTransport masterTransport;
     CollectingTransport targetTransport;
     (void) registerAndConnect(engine, master, masterTransport);
@@ -898,11 +945,61 @@ void testSequenceResetTurnsOffAHeldTriggerBeforeRestartingIt()
     engine.run(playingBlock(0.05, 0.2));
 
     CHECK(targetTransport.events.size() == 2);
-    CHECK(targetTransport.events[0].type == lps::SequencerEventType::triggerOff);
+    CHECK(targetTransport.events[0].type == lps::SemanticEventType::triggerEnd);
     CHECK(close(targetTransport.events[0].ppqPosition, 0.125));
-    CHECK(targetTransport.events[1].type == lps::SequencerEventType::triggerOn);
+    CHECK(targetTransport.events[1].type == lps::SemanticEventType::triggerStart);
     CHECK(close(targetTransport.events[1].ppqPosition, 0.125));
     CHECK(!engine.resetToMasterPending(lps::PlayerId { 1 }));
+}
+
+void testRoutesAreGloballyFrameOrderedWithDeterministicSameFramePriority()
+{
+    lps::SequencerEngine engine;
+    EventListPlayer laterPlayer;
+    EventListPlayer earlierPlayer;
+    EventListPlayer controlPlayer;
+    CollectingTransport transport;
+
+    laterPlayer.events = {
+        lps::SequencerEvent::triggerStart(0.010, { 1 }, 1.0f),
+        lps::SequencerEvent::triggerEnd(0.015, { 1 })
+    };
+    earlierPlayer.events = {
+        lps::SequencerEvent::triggerEnd(0.005, { 2 }),
+        lps::SequencerEvent::triggerStart(0.015, { 3 }, 1.0f)
+    };
+    controlPlayer.events = {
+        lps::SequencerEvent::controlPoint(0.015, 7, 0.5f)
+    };
+
+    (void) registerAndConnect(
+        engine, laterPlayer, transport,
+        lps::RouteMapping::fixedPitch(36.0f));
+    (void) registerAndConnect(
+        engine, earlierPlayer, transport,
+        lps::RouteMapping::fixedPitch(39.0f));
+    (void) registerAndConnect(engine, controlPlayer, transport);
+    engine.prepare({ 48'000.0, 512 });
+
+    lps::TimelineBlock block;
+    block.ppqEnd = 0.02;
+    block.tempoBpm = 120.0;
+    block.sampleRate = 48'000.0;
+    block.sampleCount = 512;
+    block.playing = true;
+    engine.run(block);
+
+    CHECK(transport.events.size() == 5);
+    CHECK(transport.events[0].frameOffset == 120);
+    CHECK(transport.events[0].type == lps::SemanticEventType::triggerEnd);
+    CHECK(transport.events[1].frameOffset == 240);
+    CHECK(transport.events[1].type == lps::SemanticEventType::triggerStart);
+    CHECK(transport.events[2].frameOffset == 360);
+    CHECK(transport.events[2].type == lps::SemanticEventType::controlPoint);
+    CHECK(transport.events[3].type == lps::SemanticEventType::triggerEnd);
+    CHECK(transport.events[4].type == lps::SemanticEventType::triggerStart);
+    CHECK(transport.events[3].sourcePlayerId == lps::PlayerId { 0 });
+    CHECK(transport.events[4].routeId == lps::RouteId { 1 });
 }
 
 } // namespace
@@ -934,6 +1031,7 @@ int main()
     testSequenceResetOnlyAffectsTheRequestedNonMasterPlayer();
     testSequenceResetQueuedWhileStoppedIsConsumedAtTransportStart();
     testSequenceResetTurnsOffAHeldTriggerBeforeRestartingIt();
+    testRoutesAreGloballyFrameOrderedWithDeterministicSameFramePriority();
     std::cout << "All sequencer engine tests passed.\n";
     return 0;
 }

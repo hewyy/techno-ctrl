@@ -81,7 +81,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     {
         const auto& voice = defaultDrumVoices[index];
         auto player = std::make_unique<lps::PatternPlayer>(
-            patternLibrary_, velocityModulationLibrary_, voice.midiNote);
+            patternLibrary_, velocityModulationLibrary_);
         if (patternLibrary_.size() != 0)
         {
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))
@@ -90,7 +90,11 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         const auto playerId = engine_->registerPlayer(*player);
         jassert(playerId.has_value());
         const auto routeId = playerId.has_value()
-            ? engine_->connect(*playerId, *drumTransport_)
+            ? engine_->connect(
+                *playerId,
+                *drumTransport_,
+                lps::RouteMapping::fixedPitch(
+                    static_cast<float>(voice.midiNote)))
             : std::nullopt;
         jassert(routeId.has_value());
         (void) routeId;
@@ -282,8 +286,9 @@ juce::String LivePatternSequencerProcessor::playerNameForUi(std::size_t playerIn
 
 int LivePatternSequencerProcessor::playerMidiNoteForUi(std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
-    return player != nullptr ? static_cast<int>(player->midiNote()) : -1;
+    return playerIndex < defaultDrumVoices.size()
+        ? static_cast<int>(defaultDrumVoices[playerIndex].midiNote)
+        : -1;
 }
 
 int LivePatternSequencerProcessor::drumMidiChannelForUi() const noexcept
