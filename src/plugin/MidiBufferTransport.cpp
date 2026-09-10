@@ -21,12 +21,16 @@ void MidiBufferTransport::clearMidiBuffer() noexcept
     midiBuffer_ = nullptr;
 }
 
-void MidiBufferTransport::send(
+void MidiBufferTransport::prepare(const PrepareSpec& /*spec*/) noexcept
+{
+}
+
+bool MidiBufferTransport::send(
     const SequencerEvent& event,
-    const ClockBlock& block) noexcept
+    const TimelineBlock& block) noexcept
 {
     if (midiBuffer_ == nullptr)
-        return;
+        return false;
 
     const auto note = std::clamp(
         static_cast<int>(std::lround(event.pitchSemitones)), 0, 127);
@@ -53,7 +57,14 @@ void MidiBufferTransport::send(
             maximumOffset)
         : 0;
 
-    midiBuffer_->addEvent(message, sampleOffset);
+    return midiBuffer_->addEvent(message, sampleOffset);
+}
+
+void MidiBufferTransport::resetOutputs(const TimelineBlock& /*block*/) noexcept
+{
+    if (midiBuffer_ != nullptr)
+        (void) midiBuffer_->addEvent(
+            juce::MidiMessage::allNotesOff(midiChannel_), 0);
 }
 
 } // namespace lps

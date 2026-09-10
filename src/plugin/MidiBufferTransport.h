@@ -15,9 +15,11 @@ public:
     void setMidiBuffer(juce::MidiBuffer& midiBuffer) noexcept;
     void clearMidiBuffer() noexcept;
 
-    void send(
+    void prepare(const PrepareSpec& spec) noexcept override;
+    [[nodiscard]] bool send(
         const SequencerEvent& event,
-        const ClockBlock& block) noexcept override;
+        const TimelineBlock& block) noexcept override;
+    void resetOutputs(const TimelineBlock& block) noexcept override;
 
 private:
     juce::MidiBuffer* midiBuffer_ = nullptr;

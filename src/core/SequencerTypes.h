@@ -3,11 +3,18 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace lps
 {
 
-struct ClockBlock
+struct PrepareSpec
+{
+    double sampleRate = 44'100.0;
+    std::uint32_t maximumBlockSize = 0;
+};
+
+struct TimelineBlock
 {
     double ppqStart = 0.0;
     double ppqEnd = 0.0;
@@ -16,27 +23,33 @@ struct ClockBlock
     std::uint32_t sampleCount = 0;
     bool playing = false;
     bool transportDiscontinuity = false;
-    // Per-player directive supplied by SequencerEngine. Unlike a transport
-    // discontinuity, this only restarts the sequence phase; it does not imply
-    // that the host transport moved.
-    bool sequenceReset = false;
-    double sequenceResetPpq = 0.0;
-    // Followers use the master's loop starts as their pattern-selection
-    // quantization grid. The synchronization flag remains set between
-    // boundaries so they cannot activate a pending selection at their own
-    // loop start instead.
-    bool patternChangesFollowMaster = false;
-    bool masterCycleBoundary = false;
-    double masterCycleBoundaryPpq = 0.0;
 };
 
-struct CycleBoundarySnapshot
+struct PlayerDirectives
 {
-    // The first loop start produced in the most recent half-open ClockBlock
-    // interval [ppqStart, ppqEnd). A loop start is reported independently of
-    // whether the first pattern step contains a hit.
-    double ppqPosition = 0.0;
-    bool valid = false;
+    // Unlike a transport discontinuity, this restarts only player phase and
+    // does not imply that the host timeline moved.
+    std::optional<double> restartAtPpq;
+    // Followers may use an external cycle as the quantization grid for their
+    // own pending transitions.
+    std::optional<double> externalCycleBoundaryPpq;
+    bool quantizePendingTransitionsExternally = false;
+};
+
+struct PlayerProcessResult
+{
+    bool active = false;
+    // First cycle start in the half-open TimelineBlock interval
+    // [ppqStart, ppqEnd), whether or not it emitted a trigger.
+    std::optional<double> firstCycleBoundaryPpq;
+    bool eventOverflow = false;
+};
+
+struct PlayerSyncCapabilities
+{
+    bool providesCycleBoundaries = false;
+    bool acceptsExternalCycleBoundaries = false;
+    bool acceptsExternalRestart = false;
 };
 
 enum class SequencerEventType : std::uint8_t
@@ -59,12 +72,21 @@ class SequencerEventBuffer
 public:
     static constexpr std::size_t capacity = 128;
 
-    void clear() noexcept { size_ = 0; }
+    void clear() noexcept
+    {
+        size_ = 0;
+        overflowed_ = false;
+        droppedCount_ = 0;
+    }
 
     [[nodiscard]] bool push(SequencerEvent event) noexcept
     {
         if (size_ == capacity)
+        {
+            overflowed_ = true;
+            ++droppedCount_;
             return false;
+        }
 
         events_[size_++] = event;
         return true;
@@ -72,6 +94,8 @@ public:
 
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    [[nodiscard]] bool overflowed() const noexcept { return overflowed_; }
+    [[nodiscard]] std::size_t droppedCount() const noexcept { return droppedCount_; }
     [[nodiscard]] const SequencerEvent& operator[](std::size_t index) const noexcept
     {
         return events_[index];
@@ -83,6 +107,8 @@ public:
 private:
     std::array<SequencerEvent, capacity> events_ {};
     std::size_t size_ = 0;
+    bool overflowed_ = false;
+    std::size_t droppedCount_ = 0;
 };
 
 struct Pattern
@@ -116,6 +142,8 @@ struct PatternView
         auto sourceStep = (static_cast<int>(step) - stepOffset) % length;
         if (sourceStep < 0)
             sourceStep += length;
+        if (sourceStep >= 32)
+            return false;
         return (hitMask & (std::uint32_t { 1 } << sourceStep)) != 0;
     }
 
@@ -125,14 +153,16 @@ struct PatternView
     }
 };
 
-struct PlaybackSnapshot
+struct PatternPlaybackSnapshot
 {
     int currentStep = -1;
     bool playing = false;
-    // Velocity modulations advance on hits rather than pattern steps, so this
-    // playhead cannot be derived from currentStep.
-    int currentVelocityModulationStep = -1;
 };
 
+struct ModulationPlaybackSnapshot
+{
+    // Modulation can advance independently of pattern steps.
+    int currentStep = -1;
+};
 
 } // namespace lps

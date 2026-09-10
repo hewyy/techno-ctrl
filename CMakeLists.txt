@@ -24,6 +24,7 @@ endif()
 
 add_library(sequencer_core STATIC
     src/core/IPlayer.h
+    src/core/IPlayerEditorModels.h
     src/core/ITransport.h
     src/core/PatternLibrary.cpp
     src/core/PatternLibrary.h

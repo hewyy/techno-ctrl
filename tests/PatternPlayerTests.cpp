@@ -87,14 +87,22 @@ void testBasicKickPlaysTwoFullCycles()
     const lps::PatternLibrary library;
     lps::PatternPlayer player { library };
     lps::SequencerEventBuffer events;
-    lps::ClockBlock block;
+    lps::TimelineBlock block;
     block.ppqEnd = 2.0;
     block.playing = true;
     block.transportDiscontinuity = true;
 
-    player.process(block, events);
+    const auto result = player.process(block, lps::PlayerDirectives {}, events);
 
     checkPositions(triggerOnPositions(events), {0.0, 1.0});
+    CHECK(result.active);
+    CHECK(result.firstCycleBoundaryPpq.has_value());
+    CHECK(close(*result.firstCycleBoundaryPpq, 0.0));
+    CHECK(!result.eventOverflow);
+    const auto capabilities = player.syncCapabilities();
+    CHECK(capabilities.providesCycleBoundaries);
+    CHECK(capabilities.acceptsExternalCycleBoundaries);
+    CHECK(capabilities.acceptsExternalRestart);
 }
 
 void testVelocityModulationAdvancesOnlyOnHitsAndWraps()
@@ -105,7 +113,7 @@ void testVelocityModulationAdvancesOnlyOnHitsAndWraps()
     player.selectVelocityModulation(lps::VelocityModulationId {2});
 
     lps::SequencerEventBuffer events;
-    lps::ClockBlock block;
+    lps::TimelineBlock block;
     block.ppqEnd = 9.1;
     block.playing = true;
     block.transportDiscontinuity = true;
@@ -131,28 +139,28 @@ void testVelocityModulationSnapshotTracksLastPlayedHitAcrossRests()
     player.selectVelocityModulation(lps::VelocityModulationId {2});
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstHit;
+    lps::TimelineBlock firstHit;
     firstHit.ppqEnd = 0.1;
     firstHit.playing = true;
     firstHit.transportDiscontinuity = true;
     player.process(firstHit, events);
-    CHECK(player.snapshot().currentVelocityModulationStep == 0);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 
-    lps::ClockBlock rests;
+    lps::TimelineBlock rests;
     rests.ppqStart = firstHit.ppqEnd;
     rests.ppqEnd = 0.9;
     rests.playing = true;
     player.process(rests, events);
     CHECK(triggerOnValues(events).empty());
-    CHECK(player.snapshot().currentVelocityModulationStep == 0);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 
-    lps::ClockBlock secondHit;
+    lps::TimelineBlock secondHit;
     secondHit.ppqStart = rests.ppqEnd;
     secondHit.ppqEnd = 1.1;
     secondHit.playing = true;
     player.process(secondHit, events);
     checkVelocityValues(triggerOnValues(events), {100});
-    CHECK(player.snapshot().currentVelocityModulationStep == 1);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 1);
 }
 
 void testVelocityModulationRestartsOnTransportDiscontinuity()
@@ -163,15 +171,15 @@ void testVelocityModulationRestartsOnTransportDiscontinuity()
     player.selectVelocityModulation(lps::VelocityModulationId {2});
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstRun;
+    lps::TimelineBlock firstRun;
     firstRun.ppqEnd = 1.1;
     firstRun.playing = true;
     firstRun.transportDiscontinuity = true;
     player.process(firstRun, events);
     checkVelocityValues(triggerOnValues(events), {255, 100});
-    CHECK(player.snapshot().currentVelocityModulationStep == 1);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 1);
 
-    lps::ClockBlock jumped;
+    lps::TimelineBlock jumped;
     jumped.ppqStart = 9.3;
     jumped.ppqEnd = 9.4;
     jumped.playing = true;
@@ -179,7 +187,7 @@ void testVelocityModulationRestartsOnTransportDiscontinuity()
     player.process(jumped, events);
 
     checkVelocityValues(triggerOnValues(events), {255});
-    CHECK(player.snapshot().currentVelocityModulationStep == 0);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 }
 
 void testVelocityModulationRestartsOnExplicitSequenceReset()
@@ -190,23 +198,23 @@ void testVelocityModulationRestartsOnExplicitSequenceReset()
     player.selectVelocityModulation(lps::VelocityModulationId {2});
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstRun;
+    lps::TimelineBlock firstRun;
     firstRun.ppqEnd = 1.1;
     firstRun.playing = true;
     firstRun.transportDiscontinuity = true;
     player.process(firstRun, events);
     checkVelocityValues(triggerOnValues(events), {255, 100});
 
-    lps::ClockBlock resetBlock;
+    lps::TimelineBlock resetBlock;
     resetBlock.ppqStart = firstRun.ppqEnd;
     resetBlock.ppqEnd = 1.7;
     resetBlock.playing = true;
-    resetBlock.sequenceReset = true;
-    resetBlock.sequenceResetPpq = 1.5;
-    player.process(resetBlock, events);
+    lps::PlayerDirectives directives;
+    directives.restartAtPpq = 1.5;
+    (void) player.process(resetBlock, directives, events);
 
     checkVelocityValues(triggerOnValues(events), {255});
-    CHECK(player.snapshot().currentVelocityModulationStep == 0);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 }
 
 void testVelocityModulationContinuesAcrossPatternChanges()
@@ -220,7 +228,7 @@ void testVelocityModulationContinuesAcrossPatternChanges()
     player.selectVelocityModulation(lps::VelocityModulationId {2});
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock start;
+    lps::TimelineBlock start;
     start.ppqEnd = 0.1;
     start.playing = true;
     start.transportDiscontinuity = true;
@@ -228,7 +236,7 @@ void testVelocityModulationContinuesAcrossPatternChanges()
     checkVelocityValues(triggerOnValues(events), {255});
 
     player.selectPattern(allSteps->id);
-    lps::ClockBlock crossingPatternBoundary;
+    lps::TimelineBlock crossingPatternBoundary;
     crossingPatternBoundary.ppqStart = start.ppqEnd;
     crossingPatternBoundary.ppqEnd = 1.1;
     crossingPatternBoundary.playing = true;
@@ -236,7 +244,7 @@ void testVelocityModulationContinuesAcrossPatternChanges()
 
     CHECK(player.activePatternId() == allSteps->id);
     checkVelocityValues(triggerOnValues(events), {100});
-    CHECK(player.snapshot().currentVelocityModulationStep == 1);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 1);
 }
 
 void testSelectingVelocityModulationRestartsItsOwnPhase()
@@ -247,7 +255,7 @@ void testSelectingVelocityModulationRestartsItsOwnPhase()
     player.selectVelocityModulation(lps::VelocityModulationId {2});
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstRun;
+    lps::TimelineBlock firstRun;
     firstRun.ppqEnd = 1.1;
     firstRun.playing = true;
     firstRun.transportDiscontinuity = true;
@@ -255,22 +263,22 @@ void testSelectingVelocityModulationRestartsItsOwnPhase()
     checkVelocityValues(triggerOnValues(events), {255, 100});
 
     player.selectVelocityModulation(lps::VelocityModulationId {1});
-    lps::ClockBlock steadyBlock;
+    lps::TimelineBlock steadyBlock;
     steadyBlock.ppqStart = firstRun.ppqEnd;
     steadyBlock.ppqEnd = 2.1;
     steadyBlock.playing = true;
     player.process(steadyBlock, events);
     checkVelocityValues(triggerOnValues(events), {201});
-    CHECK(player.snapshot().currentVelocityModulationStep == 0);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 
     player.selectVelocityModulation(lps::VelocityModulationId {2});
-    lps::ClockBlock fourStepAgain;
+    lps::TimelineBlock fourStepAgain;
     fourStepAgain.ppqStart = steadyBlock.ppqEnd;
     fourStepAgain.ppqEnd = 3.1;
     fourStepAgain.playing = true;
     player.process(fourStepAgain, events);
     checkVelocityValues(triggerOnValues(events), {255});
-    CHECK(player.snapshot().currentVelocityModulationStep == 0);
+    CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 }
 
 void testSmallBlocksDoNotDuplicateTriggers()
@@ -283,7 +291,7 @@ void testSmallBlocksDoNotDuplicateTriggers()
 
     for (double start = 0.0; start < 2.0; start += blockLength)
     {
-        lps::ClockBlock block;
+        lps::TimelineBlock block;
         block.ppqStart = start;
         block.ppqEnd = std::min(start + blockLength, 2.0);
         block.playing = true;
@@ -302,7 +310,7 @@ void testTransportStartAtOffGridPpqBeginsAtFirstStep()
     const lps::PatternLibrary library;
     lps::PatternPlayer player { library };
     lps::SequencerEventBuffer events;
-    lps::ClockBlock block;
+    lps::TimelineBlock block;
     block.ppqStart = 2.1;
     block.ppqEnd = 2.2;
     block.playing = true;
@@ -310,8 +318,8 @@ void testTransportStartAtOffGridPpqBeginsAtFirstStep()
 
     player.process(block, events);
 
-    CHECK(player.snapshot().playing);
-    CHECK(player.snapshot().currentStep == 0);
+    CHECK(player.patternPlaybackSnapshot().playing);
+    CHECK(player.patternPlaybackSnapshot().currentStep == 0);
     CHECK(events.size() == 1);
     CHECK(events[0].type == lps::SequencerEventType::triggerOn);
     CHECK(close(events[0].ppqPosition, block.ppqStart));
@@ -323,28 +331,28 @@ void testResumeAfterStopRestartsAtFirstStep()
     lps::PatternPlayer player { library };
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstRun;
+    lps::TimelineBlock firstRun;
     firstRun.ppqEnd = 0.6;
     firstRun.playing = true;
     firstRun.transportDiscontinuity = true;
     player.process(firstRun, events);
 
-    lps::ClockBlock stopped;
+    lps::TimelineBlock stopped;
     stopped.ppqStart = firstRun.ppqEnd;
     stopped.ppqEnd = stopped.ppqStart;
     stopped.transportDiscontinuity = true;
     player.process(stopped, events);
-    CHECK(!player.snapshot().playing);
+    CHECK(!player.patternPlaybackSnapshot().playing);
 
-    lps::ClockBlock resumed;
+    lps::TimelineBlock resumed;
     resumed.ppqStart = 6.125;
     resumed.ppqEnd = 6.225;
     resumed.playing = true;
     resumed.transportDiscontinuity = true;
     player.process(resumed, events);
 
-    CHECK(player.snapshot().playing);
-    CHECK(player.snapshot().currentStep == 0);
+    CHECK(player.patternPlaybackSnapshot().playing);
+    CHECK(player.patternPlaybackSnapshot().currentStep == 0);
     CHECK(events.size() == 1);
     CHECK(events[0].type == lps::SequencerEventType::triggerOn);
     CHECK(close(events[0].ppqPosition, resumed.ppqStart));
@@ -356,7 +364,7 @@ void testContiguousPlaybackKeepsAdvancingFromRebasedStart()
     lps::PatternPlayer player { library };
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstBlock;
+    lps::TimelineBlock firstBlock;
     firstBlock.ppqStart = 4.1;
     firstBlock.ppqEnd = 4.2;
     firstBlock.playing = true;
@@ -366,22 +374,22 @@ void testContiguousPlaybackKeepsAdvancingFromRebasedStart()
     CHECK(events[0].type == lps::SequencerEventType::triggerOn);
     CHECK(close(events[0].ppqPosition, firstBlock.ppqStart));
 
-    lps::ClockBlock nextBlock;
+    lps::TimelineBlock nextBlock;
     nextBlock.ppqStart = firstBlock.ppqEnd;
     nextBlock.ppqEnd = 4.4;
     nextBlock.playing = true;
     player.process(nextBlock, events);
-    CHECK(player.snapshot().currentStep == 0);
+    CHECK(player.patternPlaybackSnapshot().currentStep == 0);
     CHECK(events.size() == 1);
     CHECK(events[0].type == lps::SequencerEventType::triggerOff);
     CHECK(close(events[0].ppqPosition, 4.225));
 
-    lps::ClockBlock thirdBlock;
+    lps::TimelineBlock thirdBlock;
     thirdBlock.ppqStart = nextBlock.ppqEnd;
     thirdBlock.ppqEnd = 4.6;
     thirdBlock.playing = true;
     player.process(thirdBlock, events);
-    CHECK(player.snapshot().currentStep == 1);
+    CHECK(player.patternPlaybackSnapshot().currentStep == 1);
     CHECK(events.empty());
 }
 
@@ -391,7 +399,7 @@ void testDiscontinuityTurnsOffHeldTriggerBeforeRestarting()
     lps::PatternPlayer player { library };
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstBlock;
+    lps::TimelineBlock firstBlock;
     firstBlock.ppqEnd = 0.1;
     firstBlock.playing = true;
     firstBlock.transportDiscontinuity = true;
@@ -399,7 +407,7 @@ void testDiscontinuityTurnsOffHeldTriggerBeforeRestarting()
     CHECK(events.size() == 1);
     CHECK(events[0].type == lps::SequencerEventType::triggerOn);
 
-    lps::ClockBlock jumpedBlock;
+    lps::TimelineBlock jumpedBlock;
     jumpedBlock.ppqStart = 3.2;
     jumpedBlock.ppqEnd = 3.3;
     jumpedBlock.playing = true;
@@ -411,7 +419,7 @@ void testDiscontinuityTurnsOffHeldTriggerBeforeRestarting()
     CHECK(events[1].type == lps::SequencerEventType::triggerOn);
     CHECK(close(events[0].ppqPosition, jumpedBlock.ppqStart));
     CHECK(close(events[1].ppqPosition, jumpedBlock.ppqStart));
-    CHECK(player.snapshot().currentStep == 0);
+    CHECK(player.patternPlaybackSnapshot().currentStep == 0);
 }
 
 void testStopEmitsTriggerOff()
@@ -419,7 +427,7 @@ void testStopEmitsTriggerOff()
     const lps::PatternLibrary library;
     lps::PatternPlayer player { library };
     lps::SequencerEventBuffer events;
-    lps::ClockBlock playing;
+    lps::TimelineBlock playing;
     playing.ppqEnd = 0.05;
     playing.playing = true;
     playing.transportDiscontinuity = true;
@@ -427,13 +435,13 @@ void testStopEmitsTriggerOff()
     CHECK(events.size() == 1);
     CHECK(events[0].type == lps::SequencerEventType::triggerOn);
 
-    lps::ClockBlock stopped;
+    lps::TimelineBlock stopped;
     stopped.ppqStart = 0.05;
     player.process(stopped, events);
     CHECK(events.size() == 1);
     CHECK(events[0].type == lps::SequencerEventType::triggerOff);
-    CHECK(player.snapshot().currentStep == -1);
-    CHECK(!player.snapshot().playing);
+    CHECK(player.patternPlaybackSnapshot().currentStep == -1);
+    CHECK(!player.patternPlaybackSnapshot().playing);
 }
 
 void testMidiNoteIsUsedForTriggerOnAndOff()
@@ -444,7 +452,7 @@ void testMidiNoteIsUsedForTriggerOnAndOff()
     CHECK(player.midiNote() == bassDrumNote);
 
     lps::SequencerEventBuffer events;
-    lps::ClockBlock firstBlock;
+    lps::TimelineBlock firstBlock;
     firstBlock.ppqEnd = 0.1;
     firstBlock.playing = true;
     firstBlock.transportDiscontinuity = true;
@@ -452,7 +460,7 @@ void testMidiNoteIsUsedForTriggerOnAndOff()
     CHECK(events.size() == 1);
     CHECK(events[0].pitchSemitones == static_cast<float>(bassDrumNote));
 
-    lps::ClockBlock laterBlock;
+    lps::TimelineBlock laterBlock;
     laterBlock.ppqStart = firstBlock.ppqEnd;
     laterBlock.ppqEnd = 0.2;
     laterBlock.playing = true;
@@ -466,7 +474,7 @@ void testPatternViewStartsAsBasicKick()
 {
     const lps::PatternLibrary library;
     const lps::PatternPlayer player { library };
-    const auto pattern = player.get_pattern_view();
+    const auto pattern = player.patternView();
 
     CHECK(pattern.stepCount == lps::Pattern::maxLength);
     CHECK(pattern.isHit(0));
@@ -492,10 +500,10 @@ void testInvalidSelectionIsIgnoredAndPrepareLoadsAValidSelection()
     player.selectPattern(allSteps.id);
     CHECK(player.selectedPatternId() == allSteps.id);
     CHECK(player.activePatternId() == kick.id);
-    player.prepare(48'000.0);
+    player.prepare({ 48'000.0, 512 });
 
     CHECK(player.activePatternId() == allSteps.id);
-    const auto view = player.get_pattern_view();
+    const auto view = player.patternView();
     CHECK(view.stepCount == lps::Pattern::maxLength);
     CHECK(view.isHit(0) && view.isHit(1) && view.isHit(2) && view.isHit(3));
     CHECK(view.playbackStart == 0);
@@ -510,7 +518,7 @@ void testSelectionDuringPlaybackWaitsForTheOldPatternEnd()
     lps::PatternPlayer player { library };
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstBlock;
+    lps::TimelineBlock firstBlock;
     firstBlock.ppqEnd = 0.1;
     firstBlock.playing = true;
     firstBlock.transportDiscontinuity = true;
@@ -521,22 +529,22 @@ void testSelectionDuringPlaybackWaitsForTheOldPatternEnd()
     CHECK(player.selectedPatternId() == allSteps.id);
     CHECK(player.activePatternId() == kick.id);
 
-    lps::ClockBlock beforeBoundary;
+    lps::TimelineBlock beforeBoundary;
     beforeBoundary.ppqStart = 0.1;
     beforeBoundary.ppqEnd = 0.9;
     beforeBoundary.playing = true;
     player.process(beforeBoundary, events);
     CHECK(player.activePatternId() == kick.id);
 
-    lps::ClockBlock crossingBoundary;
+    lps::TimelineBlock crossingBoundary;
     crossingBoundary.ppqStart = 0.9;
     crossingBoundary.ppqEnd = 1.1;
     crossingBoundary.playing = true;
     player.process(crossingBoundary, events);
 
     CHECK(player.activePatternId() == allSteps.id);
-    CHECK(player.get_pattern_view().playbackStart == 0);
-    CHECK(player.get_pattern_view().playbackEnd == 3);
+    CHECK(player.patternView().playbackStart == 0);
+    CHECK(player.patternView().playbackEnd == 3);
     checkPositions(triggerOnPositions(events), {1.0});
 }
 
@@ -551,7 +559,7 @@ void testStoppedProcessAppliesPendingSelection()
     player.process({}, events);
 
     CHECK(player.activePatternId() == allSteps.id);
-    CHECK(player.get_pattern_view().isHit(3));
+    CHECK(player.patternView().isHit(3));
     CHECK(events.empty());
 }
 
@@ -564,9 +572,9 @@ void testLoadingVariableLengthPatternsResetsThePlaybackRange()
 
     player.setPlaybackWindow(0, lps::Pattern::maxLength - 1);
     player.selectPattern(nineStepPulse.id);
-    player.prepare(48'000.0);
+    player.prepare({ 48'000.0, 512 });
 
-    auto view = player.get_pattern_view();
+    auto view = player.patternView();
     CHECK(view.stepCount == lps::Pattern::maxLength);
     CHECK(view.playbackStart == 0);
     CHECK(view.playbackEnd == 8);
@@ -575,9 +583,9 @@ void testLoadingVariableLengthPatternsResetsThePlaybackRange()
 
     player.setPlaybackWindow(2, 5);
     player.selectPattern(backbeat.id);
-    player.prepare(48'000.0);
+    player.prepare({ 48'000.0, 512 });
 
-    view = player.get_pattern_view();
+    view = player.patternView();
     CHECK(view.stepCount == lps::Pattern::maxLength);
     CHECK(view.playbackStart == 0);
     CHECK(view.playbackEnd == 15);
@@ -591,10 +599,10 @@ void testLoadedPatternLengthSetsThePlaybackCycleEnd()
     const auto& nineStepPulse = entryAt(library, 8);
     lps::PatternPlayer player { library };
     player.selectPattern(nineStepPulse.id);
-    player.prepare(48'000.0);
+    player.prepare({ 48'000.0, 512 });
 
     lps::SequencerEventBuffer events;
-    lps::ClockBlock block;
+    lps::TimelineBlock block;
     block.ppqEnd = 4.6;
     block.playing = true;
     block.transportDiscontinuity = true;
@@ -611,16 +619,16 @@ void testSelectionWaitsForTheActivePlaybackWindowEnd()
     lps::SequencerEventBuffer events;
 
     player.setPlaybackWindow(1, 2);
-    lps::ClockBlock establishShortWindow;
+    lps::TimelineBlock establishShortWindow;
     establishShortWindow.ppqEnd = 1.1;
     establishShortWindow.playing = true;
     establishShortWindow.transportDiscontinuity = true;
     player.process(establishShortWindow, events);
-    CHECK(player.get_pattern_view().playbackStart == 1);
-    CHECK(player.get_pattern_view().playbackEnd == 2);
+    CHECK(player.patternView().playbackStart == 1);
+    CHECK(player.patternView().playbackEnd == 2);
 
     player.selectPattern(allSteps.id);
-    lps::ClockBlock crossShortWindowEnd;
+    lps::TimelineBlock crossShortWindowEnd;
     crossShortWindowEnd.ppqStart = 1.1;
     crossShortWindowEnd.ppqEnd = 1.55;
     crossShortWindowEnd.playing = true;
@@ -628,8 +636,8 @@ void testSelectionWaitsForTheActivePlaybackWindowEnd()
 
     CHECK(player.activePatternId() == allSteps.id);
     checkPositions(triggerOnPositions(events), {1.5});
-    CHECK(player.get_pattern_view().playbackStart == 0);
-    CHECK(player.get_pattern_view().playbackEnd == 3);
+    CHECK(player.patternView().playbackStart == 0);
+    CHECK(player.patternView().playbackEnd == 3);
 }
 
 void testPlayerDraftDoesNotModifyLibraryOrAnotherPlayer()
@@ -641,34 +649,34 @@ void testPlayerDraftDoesNotModifyLibraryOrAnotherPlayer()
     lps::PatternPlayer second { library };
 
     CHECK(!kick.pattern.hits[1]);
-    CHECK(!first.get_pattern_view().isHit(1));
-    CHECK(!second.get_pattern_view().isHit(1));
+    CHECK(!first.patternView().isHit(1));
+    CHECK(!second.patternView().isHit(1));
 
     first.toggleStep(1);
-    CHECK(first.get_pattern_view().isHit(1));
-    CHECK(!second.get_pattern_view().isHit(1));
+    CHECK(first.patternView().isHit(1));
+    CHECK(!second.patternView().isHit(1));
     CHECK(!kick.pattern.hits[1]);
 
     first.selectPattern(allSteps.id);
-    first.prepare(48'000.0);
+    first.prepare({ 48'000.0, 512 });
     first.selectPattern(kick.id);
-    first.prepare(48'000.0);
-    CHECK(!first.get_pattern_view().isHit(1));
+    first.prepare({ 48'000.0, 512 });
+    CHECK(!first.patternView().isHit(1));
 }
 
 void testOffsetRotatesPlaybackWithoutChangingDraftLength()
 {
     const lps::PatternLibrary library;
     lps::PatternPlayer player { library };
-    CHECK(player.get_pattern_view().isHit(0));
+    CHECK(player.patternView().isHit(0));
 
     player.offsetPatternRight();
     CHECK(player.patternOffset() == 1);
-    CHECK(!player.get_pattern_view().isHit(0));
-    CHECK(player.get_pattern_view().isHit(1));
+    CHECK(!player.patternView().isHit(0));
+    CHECK(player.patternView().isHit(1));
 
     lps::SequencerEventBuffer events;
-    lps::ClockBlock block;
+    lps::TimelineBlock block;
     block.ppqEnd = 0.4;
     block.playing = true;
     block.transportDiscontinuity = true;
@@ -676,7 +684,7 @@ void testOffsetRotatesPlaybackWithoutChangingDraftLength()
     checkPositions(triggerOnPositions(events), {0.25});
 
     player.toggleStep(2);
-    const auto edited = player.get_pattern_view();
+    const auto edited = player.patternView();
     CHECK(edited.stepCount == lps::Pattern::maxLength);
     CHECK(edited.isHit(1));
     CHECK(edited.isHit(2));
@@ -686,7 +694,7 @@ void testSpeedChangesTimingWithoutChangingPattern()
 {
     const lps::PatternLibrary library;
     lps::PatternPlayer player { library };
-    const auto original = player.get_pattern_view();
+    const auto original = player.patternView();
     const auto originalSaveCandidate = player.patternForSave();
     CHECK(!player.hasUnsavedPatternChanges());
     player.setPlaybackSpeed(2);
@@ -694,14 +702,14 @@ void testSpeedChangesTimingWithoutChangingPattern()
     CHECK(!player.hasUnsavedPatternChanges());
 
     lps::SequencerEventBuffer events;
-    lps::ClockBlock block;
+    lps::TimelineBlock block;
     block.ppqEnd = 1.0;
     block.playing = true;
     block.transportDiscontinuity = true;
     player.process(block, events);
 
     checkPositions(triggerOnPositions(events), {0.0, 0.5});
-    const auto afterPlayback = player.get_pattern_view();
+    const auto afterPlayback = player.patternView();
     CHECK(afterPlayback.stepCount == original.stepCount);
     CHECK(afterPlayback.hitMask == original.hitMask);
     CHECK(patternsEqual(player.patternForSave(), originalSaveCandidate));
@@ -714,33 +722,33 @@ void testPlaybackWindowWaitsForOldEndThenStartsAtNewStart()
     player.toggleStep(1);
     lps::SequencerEventBuffer events;
 
-    lps::ClockBlock firstBlock;
+    lps::TimelineBlock firstBlock;
     firstBlock.ppqEnd = 0.1;
     firstBlock.playing = true;
     firstBlock.transportDiscontinuity = true;
     player.process(firstBlock, events);
 
     player.setPlaybackWindow(1, 3);
-    const auto requestedView = player.get_pattern_view();
+    const auto requestedView = player.patternView();
     CHECK(!requestedView.isInsidePlaybackWindow(0));
     CHECK(requestedView.isInsidePlaybackWindow(1));
     CHECK(requestedView.isInsidePlaybackWindow(3));
 
-    lps::ClockBlock finishOldCycle;
+    lps::TimelineBlock finishOldCycle;
     finishOldCycle.ppqStart = 0.1;
     finishOldCycle.ppqEnd = 1.0;
     finishOldCycle.playing = true;
     player.process(finishOldCycle, events);
 
-    lps::ClockBlock crossOldEnd;
+    lps::TimelineBlock crossOldEnd;
     crossOldEnd.ppqStart = 1.0;
     crossOldEnd.ppqEnd = 1.1;
     crossOldEnd.playing = true;
     player.process(crossOldEnd, events);
 
     checkPositions(triggerOnPositions(events), {1.0});
-    CHECK(player.snapshot().playing);
-    CHECK(player.snapshot().currentStep == 1);
+    CHECK(player.patternPlaybackSnapshot().playing);
+    CHECK(player.patternPlaybackSnapshot().currentStep == 1);
 }
 
 void testPlaybackWindowCanExtendAcrossTheFullDraftWithoutChangingThePattern()
@@ -748,28 +756,28 @@ void testPlaybackWindowCanExtendAcrossTheFullDraftWithoutChangingThePattern()
     const lps::PatternLibrary library;
     const auto& kick = entryAt(library, 0);
     lps::PatternPlayer player { library };
-    const auto original = player.get_pattern_view();
+    const auto original = player.patternView();
 
     player.setPlaybackWindow(0, lps::Pattern::maxLength - 1);
-    const auto extended = player.get_pattern_view();
+    const auto extended = player.patternView();
     CHECK(extended.playbackStart == 0);
     CHECK(extended.playbackEnd == lps::Pattern::maxLength - 1);
     CHECK(extended.hitMask == original.hitMask);
     CHECK(kick.pattern.length == 4);
     CHECK(!kick.pattern.hits[31]);
     player.toggleStep(31);
-    CHECK(player.get_pattern_view().isHit(31));
+    CHECK(player.patternView().isHit(31));
     CHECK(!kick.pattern.hits[31]);
 
     lps::SequencerEventBuffer events;
-    lps::ClockBlock firstCycle;
+    lps::TimelineBlock firstCycle;
     firstCycle.ppqEnd = 1.1;
     firstCycle.playing = true;
     firstCycle.transportDiscontinuity = true;
     player.process(firstCycle, events);
     checkPositions(triggerOnPositions(events), {0.0});
 
-    lps::ClockBlock extendedCycle;
+    lps::TimelineBlock extendedCycle;
     extendedCycle.ppqStart = firstCycle.ppqEnd;
     extendedCycle.ppqEnd = 8.1;
     extendedCycle.playing = true;
@@ -787,15 +795,15 @@ void testPlaybackWindowChosenWhileStoppedIsActiveAtTransportStart()
     player.setPlaybackWindow(4, 7);
 
     lps::SequencerEventBuffer events;
-    lps::ClockBlock start;
+    lps::TimelineBlock start;
     start.ppqEnd = 0.1;
     start.playing = true;
     start.transportDiscontinuity = true;
     player.process(start, events);
 
     CHECK(events.empty());
-    CHECK(player.snapshot().playing);
-    CHECK(player.snapshot().currentStep == 4);
+    CHECK(player.patternPlaybackSnapshot().playing);
+    CHECK(player.patternPlaybackSnapshot().currentStep == 4);
 }
 
 void testUnsavedStateTracksEditsLoopAndOffsetAndCanReturnToClean()
@@ -852,7 +860,7 @@ void testPatternForSaveExcludesOutsideHitsButTheDraftRemainsModified()
 
     CHECK(patternsEqual(player.patternForSave(), kick.pattern));
     CHECK(player.hasUnsavedPatternChanges());
-    CHECK(player.get_pattern_view().isHit(lps::Pattern::maxLength - 1));
+    CHECK(player.patternView().isHit(lps::Pattern::maxLength - 1));
 }
 
 void testSelectingAnEquivalentSavedPatternDiscardsExcludedDraftEdits()
@@ -870,7 +878,7 @@ void testSelectingAnEquivalentSavedPatternDiscardsExcludedDraftEdits()
     player.process({}, events);
 
     CHECK(player.activePatternId() == kick.id);
-    CHECK(!player.get_pattern_view().isHit(lps::Pattern::maxLength - 1));
+    CHECK(!player.patternView().isHit(lps::Pattern::maxLength - 1));
     CHECK(!player.hasUnsavedPatternChanges());
     CHECK(player.requestedPlaybackStart() == 0);
     CHECK(player.requestedPlaybackEnd() == 3);
@@ -920,7 +928,7 @@ void testOrdinaryPatternSelectionPreservesThePlayerOffset()
 
     player.offsetPatternRight();
     player.selectPattern(allSteps.id);
-    player.prepare(48'000.0);
+    player.prepare({ 48'000.0, 512 });
 
     CHECK(player.activePatternId() == allSteps.id);
     CHECK(player.patternOffset() == 1);
@@ -941,7 +949,7 @@ void testSavedPatternActivationWaitsForBoundaryThenResetsBakedModifiers()
     CHECK(saved.hits[0]);
     CHECK(saved.hits[1]);
 
-    lps::ClockBlock start;
+    lps::TimelineBlock start;
     start.ppqEnd = 0.1;
     start.playing = true;
     start.transportDiscontinuity = true;
@@ -952,7 +960,7 @@ void testSavedPatternActivationWaitsForBoundaryThenResetsBakedModifiers()
     CHECK(insert.inserted);
     player.selectSavedPattern(insert.entry->id);
 
-    lps::ClockBlock beforeBoundary;
+    lps::TimelineBlock beforeBoundary;
     beforeBoundary.ppqStart = 0.1;
     beforeBoundary.ppqEnd = 0.49;
     beforeBoundary.playing = true;
@@ -960,7 +968,7 @@ void testSavedPatternActivationWaitsForBoundaryThenResetsBakedModifiers()
     CHECK(player.activePatternId() == kick.id);
     CHECK(player.patternOffset() == 1);
 
-    lps::ClockBlock crossingBoundary;
+    lps::TimelineBlock crossingBoundary;
     crossingBoundary.ppqStart = 0.49;
     crossingBoundary.ppqEnd = 0.51;
     crossingBoundary.playing = true;
@@ -994,7 +1002,7 @@ void testSaveSnapshotNeverCombinesConcurrentPatternActivations()
         {
             player.selectSavedPattern(
                 iteration % 2 == 0 ? backbeat.id : kick.id);
-            player.prepare(48'000.0);
+            player.prepare({ 48'000.0, 512 });
         }
 
         done.store(true, std::memory_order_release);

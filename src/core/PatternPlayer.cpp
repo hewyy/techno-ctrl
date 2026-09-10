@@ -531,7 +531,7 @@ bool PatternPlayer::hasUnsavedVelocityModulationChanges() const noexcept
         && !velocityModulationsEqual(draft.modulation, activeEntry->modulation);
 }
 
-void PatternPlayer::prepare(double /*sampleRate*/) noexcept
+void PatternPlayer::prepare(const PrepareSpec& /*spec*/) noexcept
 {
     const auto selection = requestedPatternSelection();
     const auto requestedPattern = patternIdFromSelection(selection);
@@ -556,11 +556,11 @@ void PatternPlayer::reset() noexcept
     playbackWindowOriginStep_ = 0;
     nextVelocityModulationStep_ = 0;
     triggerIsOn_ = false;
-    snapshot_ = {};
-    cycleBoundarySnapshot_ = {};
+    patternPlaybackSnapshot_ = {};
+    modulationPlaybackSnapshot_ = {};
 }
 
-PatternView PatternPlayer::get_pattern_view() const noexcept
+PatternView PatternPlayer::patternView() const noexcept
 {
     const auto draft = draftSnapshot();
     const auto* activeRecord = patternLibrary_.find(draft.activePatternId);
@@ -578,29 +578,35 @@ PatternView PatternPlayer::get_pattern_view() const noexcept
     };
 }
 
-PlaybackSnapshot PatternPlayer::snapshot() const noexcept
+PatternPlaybackSnapshot PatternPlayer::patternPlaybackSnapshot() const noexcept
 {
-    return snapshot_;
+    return patternPlaybackSnapshot_;
 }
 
-CycleBoundarySnapshot PatternPlayer::cycleBoundarySnapshot() const noexcept
+ModulationPlaybackSnapshot PatternPlayer::modulationPlaybackSnapshot() const noexcept
 {
-    return cycleBoundarySnapshot_;
+    return modulationPlaybackSnapshot_;
 }
 
-void PatternPlayer::process(
-    const ClockBlock& block,
+PlayerSyncCapabilities PatternPlayer::syncCapabilities() const noexcept
+{
+    return { true, true, true };
+}
+
+PlayerProcessResult PatternPlayer::process(
+    const TimelineBlock& block,
+    const PlayerDirectives& directives,
     SequencerEventBuffer& output) noexcept
 {
     output.clear();
-    cycleBoundarySnapshot_ = {};
+    PlayerProcessResult result;
 
     const auto requestedVelocityModulation = selectedVelocityModulationId();
     if (requestedVelocityModulation != activeVelocityModulationId()
         && activateVelocityModulation(requestedVelocityModulation))
     {
         nextVelocityModulationStep_ = 0;
-        snapshot_.currentVelocityModulationStep = -1;
+        modulationPlaybackSnapshot_.currentStep = -1;
     }
 
     const auto emit = [this, &output](double ppq, SequencerEventType type, float value)
@@ -617,7 +623,7 @@ void PatternPlayer::process(
         lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
         nextVelocityModulationStep_ = 0;
         triggerIsOn_ = false;
-        snapshot_.currentVelocityModulationStep = -1;
+        modulationPlaybackSnapshot_.currentStep = -1;
 
         if (block.playing)
         {
@@ -668,8 +674,10 @@ void PatternPlayer::process(
 
         pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
         triggerIsOn_ = false;
-        snapshot_ = { -1, false, -1 };
-        return;
+        patternPlaybackSnapshot_ = { -1, false };
+        modulationPlaybackSnapshot_ = { -1 };
+        result.eventOverflow = output.overflowed();
+        return result;
     }
 
     constexpr double stepBoundaryTolerance = 1.0e-9;
@@ -690,9 +698,9 @@ void PatternPlayer::process(
             % static_cast<std::int64_t>(playbackLength);
         if (snapshotCycleStep < 0)
             snapshotCycleStep += static_cast<std::int64_t>(playbackLength);
-        snapshot_.currentStep = static_cast<int>(playbackStart
+        patternPlaybackSnapshot_.currentStep = static_cast<int>(playbackStart
             + static_cast<std::size_t>(snapshotCycleStep));
-        snapshot_.playing = true;
+        patternPlaybackSnapshot_.playing = true;
 
         auto playbackStep = static_cast<std::int64_t>(std::ceil(
             (rangeStart - playbackOriginPpq_) / stepLengthPpq
@@ -727,7 +735,7 @@ void PatternPlayer::process(
             selection = requestedPatternSelection();
             const auto pendingPattern = patternIdFromSelection(selection);
             if ((pendingPattern != activePattern || selectionResetsOffset(selection))
-                && !block.patternChangesFollowMaster
+                && !directives.quantizePendingTransitionsExternally
                 && atPlaybackBoundary
                 && activatePattern(pendingPattern, selectionResetsOffset(selection)))
             {
@@ -748,8 +756,8 @@ void PatternPlayer::process(
             if (playbackStep == playbackStepAtStart
                 && playbackWindowOriginStep_ == playbackStep)
             {
-                snapshot_.currentStep = static_cast<int>(playbackStart);
-                snapshot_.playing = true;
+                patternPlaybackSnapshot_.currentStep = static_cast<int>(playbackStart);
+                patternPlaybackSnapshot_.playing = true;
             }
 
             const double stepPpq = playbackOriginPpq_
@@ -765,14 +773,12 @@ void PatternPlayer::process(
                 pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
             }
 
-            if (!cycleBoundarySnapshot_.valid
+            if (!result.firstCycleBoundaryPpq.has_value()
                 && (atInitialPlaybackBoundary || atPlaybackBoundary)
                 && stepPpq + stepBoundaryTolerance >= block.ppqStart
                 && stepPpq < block.ppqEnd)
             {
-                cycleBoundarySnapshot_ = {
-                    std::max(stepPpq, block.ppqStart), true
-                };
+                result.firstCycleBoundaryPpq = std::max(stepPpq, block.ppqStart);
             }
 
             const auto activeLength = playbackEnd - playbackStart + 1;
@@ -809,7 +815,7 @@ void PatternPlayer::process(
                     stepPpq,
                     SequencerEventType::triggerOn,
                     static_cast<float>(velocityValue) / 255.0f);
-                snapshot_.currentVelocityModulationStep = static_cast<int>(velocityStep);
+                modulationPlaybackSnapshot_.currentStep = static_cast<int>(velocityStep);
                 nextVelocityModulationStep_ = (velocityStep + 1) % velocityLength;
                 triggerIsOn_ = true;
                 lastTriggeredPlaybackStep_ = playbackStep;
@@ -842,16 +848,17 @@ void PatternPlayer::process(
     const bool patternChangePending =
         patternIdFromSelection(pendingSelection) != activePattern
         || selectionResetsOffset(pendingSelection);
-    const auto masterBoundaryPpq = block.masterCycleBoundaryPpq;
-    const bool hasSynchronizedPatternChange = block.patternChangesFollowMaster
-        && block.masterCycleBoundary
+    const auto masterBoundaryPpq = directives.externalCycleBoundaryPpq.value_or(0.0);
+    const bool hasSynchronizedPatternChange =
+        directives.quantizePendingTransitionsExternally
+        && directives.externalCycleBoundaryPpq.has_value()
         && patternChangePending
         && std::isfinite(masterBoundaryPpq)
         && masterBoundaryPpq + stepBoundaryTolerance >= block.ppqStart
         && masterBoundaryPpq < block.ppqEnd;
 
-    const auto externalResetPpq = block.sequenceResetPpq;
-    const bool hasExternalReset = block.sequenceReset
+    const auto externalResetPpq = directives.restartAtPpq.value_or(0.0);
+    const bool hasExternalReset = directives.restartAtPpq.has_value()
         && std::isfinite(externalResetPpq)
         && externalResetPpq + stepBoundaryTolerance >= block.ppqStart
         && externalResetPpq < block.ppqEnd;
@@ -859,7 +866,9 @@ void PatternPlayer::process(
     if (!hasExternalReset && !hasSynchronizedPatternChange)
     {
         processRange(block.ppqStart, block.ppqEnd);
-        return;
+        result.active = patternPlaybackSnapshot_.playing;
+        result.eventOverflow = output.overflowed();
+        return result;
     }
 
     // Both directives originate from the same validated master boundary in
@@ -917,10 +926,13 @@ void PatternPlayer::process(
     if (hasExternalReset)
     {
         nextVelocityModulationStep_ = 0;
-        snapshot_.currentVelocityModulationStep = -1;
+        modulationPlaybackSnapshot_.currentStep = -1;
     }
 
     processRange(transitionPpq, block.ppqEnd);
+    result.active = patternPlaybackSnapshot_.playing;
+    result.eventOverflow = output.overflowed();
+    return result;
 }
 
 } // namespace lps

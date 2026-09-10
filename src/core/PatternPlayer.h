@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/IPlayer.h"
+#include "core/IPlayerEditorModels.h"
 #include "core/PatternLibrary.h"
 #include "core/VelocityModulationLibrary.h"
 
@@ -12,7 +13,10 @@
 namespace lps
 {
 
-class PatternPlayer final : public IPlayer
+class PatternPlayer final
+    : public IPlayer,
+      public IPatternEditorModel,
+      public IModulationEditorModel
 {
 public:
     static constexpr std::size_t longestPatternLength = Pattern::maxLength;
@@ -55,15 +59,25 @@ public:
     [[nodiscard]] VelocityModulation velocityModulationForSave() const noexcept;
     [[nodiscard]] bool hasUnsavedVelocityModulationChanges() const noexcept;
 
-    void prepare(double sampleRate) noexcept override;
+    void prepare(const PrepareSpec& spec) noexcept override;
     void reset() noexcept override;
-    void process(
-        const ClockBlock& block,
+    [[nodiscard]] PlayerProcessResult process(
+        const TimelineBlock& block,
+        const PlayerDirectives& directives,
         SequencerEventBuffer& output) noexcept override;
+    void process(
+        const TimelineBlock& block,
+        SequencerEventBuffer& output) noexcept
+    {
+        (void) process(block, {}, output);
+    }
+    [[nodiscard]] PlayerSyncCapabilities syncCapabilities() const noexcept override;
 
-    [[nodiscard]] PatternView get_pattern_view() const noexcept override;
-    [[nodiscard]] PlaybackSnapshot snapshot() const noexcept override;
-    [[nodiscard]] CycleBoundarySnapshot cycleBoundarySnapshot() const noexcept override;
+    [[nodiscard]] PatternView patternView() const noexcept override;
+    [[nodiscard]] PatternPlaybackSnapshot patternPlaybackSnapshot()
+        const noexcept override;
+    [[nodiscard]] ModulationPlaybackSnapshot modulationPlaybackSnapshot()
+        const noexcept override;
 
 private:
     const PatternLibrary& patternLibrary_;
@@ -94,8 +108,8 @@ private:
     std::array<std::atomic<std::uint8_t>, VelocityModulation::maxLength>
         editableVelocityValues_ {};
     std::atomic<std::size_t> editableVelocityLength_ { 0 };
-    PlaybackSnapshot snapshot_;
-    CycleBoundarySnapshot cycleBoundarySnapshot_;
+    PatternPlaybackSnapshot patternPlaybackSnapshot_;
+    ModulationPlaybackSnapshot modulationPlaybackSnapshot_;
 
     static constexpr double baseStepLengthPpq = 0.25;
     static constexpr double gateRatio = 0.5;

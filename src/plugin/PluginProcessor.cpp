@@ -1,6 +1,7 @@
 #include "plugin/PluginProcessor.h"
 #include "plugin/PluginEditor.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -86,7 +87,13 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))
                 player->selectPattern(pattern->id);
         }
-        engine_->add_stuff(*player, *drumTransport_);
+        const auto playerId = engine_->registerPlayer(*player);
+        jassert(playerId.has_value());
+        const auto routeId = playerId.has_value()
+            ? engine_->connect(*playerId, *drumTransport_)
+            : std::nullopt;
+        jassert(routeId.has_value());
+        (void) routeId;
 
         playerNames_.emplace_back(voice.name);
         players_.push_back(std::move(player));
@@ -95,7 +102,9 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
             std::make_unique<std::atomic<int>>(-1));
     }
 
-    const bool masterConfigured = engine_->setMasterPlayer(configuredMasterIndex());
+    const auto masterId = engine_->playerIdAt(configuredMasterIndex());
+    const bool masterConfigured = masterId.has_value()
+        && engine_->setMasterPlayer(*masterId);
     jassert(masterConfigured);
     (void) masterConfigured;
 }
@@ -107,9 +116,12 @@ const juce::String LivePatternSequencerProcessor::getName() const
 
 void LivePatternSequencerProcessor::prepareToPlay(
     double sampleRate,
-    int /*maximumExpectedSamplesPerBlock*/)
+    int maximumExpectedSamplesPerBlock)
 {
-    engine_->prepare(sampleRate);
+    engine_->prepare({
+        sampleRate,
+        static_cast<std::uint32_t>(std::max(maximumExpectedSamplesPerBlock, 0))
+    });
     expectedNextPpq_.reset();
     wasPlaying_ = false;
     updateUiSnapshot();
@@ -130,7 +142,7 @@ void LivePatternSequencerProcessor::processBlock(
     juce::ScopedNoDenormals noDenormals;
     audio.clear();
 
-    lps::ClockBlock block;
+    lps::TimelineBlock block;
     block.sampleRate = getSampleRate();
     block.sampleCount = static_cast<std::uint32_t>(audio.getNumSamples());
 
@@ -202,9 +214,9 @@ std::size_t LivePatternSequencerProcessor::playerCountForUi() const noexcept
 std::optional<std::size_t>
 LivePatternSequencerProcessor::masterPlayerIndexForUi() const noexcept
 {
-    const auto masterIndex = engine_->masterPlayerIndex();
-    return masterIndex && *masterIndex < playerCountForUi()
-        ? masterIndex
+    const auto masterId = engine_->masterPlayerId();
+    return masterId && masterId->value < playerCountForUi()
+        ? std::optional<std::size_t> { masterId->value }
         : std::nullopt;
 }
 
@@ -221,15 +233,17 @@ bool LivePatternSequencerProcessor::resetPlayerToMaster(
     if (playerIndex >= playerCountForUi() || playerIsMasterForUi(playerIndex))
         return false;
 
-    return engine_->requestResetToMaster(playerIndex);
+    const auto playerId = engine_->playerIdAt(playerIndex);
+    return playerId.has_value() && engine_->requestResetToMaster(*playerId);
 }
 
 bool LivePatternSequencerProcessor::playerResetToMasterPendingForUi(
     std::size_t playerIndex) const noexcept
 {
-    return playerIndex < playerCountForUi()
+    const auto playerId = engine_->playerIdAt(playerIndex);
+    return playerId.has_value()
         && !playerIsMasterForUi(playerIndex)
-        && engine_->resetToMasterPending(playerIndex);
+        && engine_->resetToMasterPending(*playerId);
 }
 
 int LivePatternSequencerProcessor::currentStepForUi(std::size_t playerIndex) const noexcept
@@ -255,7 +269,8 @@ bool LivePatternSequencerProcessor::playingForUi() const noexcept
 
 lps::PatternView LivePatternSequencerProcessor::patternForUi(std::size_t playerIndex) const noexcept
 {
-    return engine_->pattern(playerIndex);
+    const auto* player = playerAt(playerIndex);
+    return player != nullptr ? player->patternView() : lps::PatternView {};
 }
 
 juce::String LivePatternSequencerProcessor::playerNameForUi(std::size_t playerIndex) const
@@ -633,13 +648,15 @@ void LivePatternSequencerProcessor::setPlayerMuted(
     std::size_t playerIndex,
     bool muted) noexcept
 {
-    engine_->setPlayerMuted(playerIndex, muted);
+    if (const auto playerId = engine_->playerIdAt(playerIndex))
+        engine_->setPlayerMuted(*playerId, muted);
 }
 
 bool LivePatternSequencerProcessor::playerMutedForUi(
     std::size_t playerIndex) const noexcept
 {
-    return engine_->playerMuted(playerIndex);
+    const auto playerId = engine_->playerIdAt(playerIndex);
+    return playerId.has_value() && engine_->playerMuted(*playerId);
 }
 
 void LivePatternSequencerProcessor::setSuppression(
@@ -647,14 +664,20 @@ void LivePatternSequencerProcessor::setSuppression(
     std::size_t suppressedIndex,
     bool enabled) noexcept
 {
-    engine_->setSuppression(suppressorIndex, suppressedIndex, enabled);
+    const auto suppressorId = engine_->playerIdAt(suppressorIndex);
+    const auto suppressedId = engine_->playerIdAt(suppressedIndex);
+    if (suppressorId && suppressedId)
+        engine_->setSuppression(*suppressorId, *suppressedId, enabled);
 }
 
 bool LivePatternSequencerProcessor::suppression(
     std::size_t suppressorIndex,
     std::size_t suppressedIndex) const noexcept
 {
-    return engine_->suppression(suppressorIndex, suppressedIndex);
+    const auto suppressorId = engine_->playerIdAt(suppressorIndex);
+    const auto suppressedId = engine_->playerIdAt(suppressedIndex);
+    return suppressorId && suppressedId
+        && engine_->suppression(*suppressorId, *suppressedId);
 }
 
 void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
@@ -663,12 +686,18 @@ void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
 
     for (std::size_t index = 0; index < currentSteps_.size(); ++index)
     {
-        const auto snapshot = engine_->snapshot(index);
-        currentSteps_[index]->store(snapshot.currentStep, std::memory_order_relaxed);
+        const auto* player = playerAt(index);
+        if (player == nullptr)
+            continue;
+
+        const auto patternSnapshot = player->patternPlaybackSnapshot();
+        const auto modulationSnapshot = player->modulationPlaybackSnapshot();
+        currentSteps_[index]->store(
+            patternSnapshot.currentStep, std::memory_order_relaxed);
         currentVelocityModulationSteps_[index]->store(
-            snapshot.currentVelocityModulationStep,
+            modulationSnapshot.currentStep,
             std::memory_order_relaxed);
-        anyPlaying = anyPlaying || snapshot.playing;
+        anyPlaying = anyPlaying || patternSnapshot.playing;
     }
 
     playing_.store(anyPlaying, std::memory_order_relaxed);
