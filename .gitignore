@@ -1,0 +1,26 @@
+# Build output
+build*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Compiled binaries and plugin bundles
+*.o
+*.obj
+*.a
+*.lib
+*.dylib
+*.dll
+*.so
+*.exe
+*.vst3
+*.component
+
+# IDE and OS metadata
+.DS_Store
+.idea/
+.vscode/
+*.xcodeproj/
+*.xcworkspace/
