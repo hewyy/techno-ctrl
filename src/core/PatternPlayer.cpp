@@ -12,6 +12,29 @@ const VelocityModulationLibrary& defaultVelocityModulationLibrary() noexcept
     static const VelocityModulationLibrary library;
     return library;
 }
+
+ModulationLaneDefinition intensityLaneDefinition() noexcept
+{
+    ModulationLaneDefinition definition;
+    definition.id = { 1 };
+    definition.target = ModulationTarget::intensity;
+    definition.advanceOn = ModulationAdvancePoint::candidateTrigger;
+    definition.resetOn = ModulationResetReason::sourceSelection
+        | ModulationResetReason::transportDiscontinuity
+        | resetMask(ModulationResetReason::explicitRestart);
+    return definition;
+}
+
+ModulationLaneState laneStateFrom(const VelocityModulation& modulation) noexcept
+{
+    ModulationLaneState state;
+    state.length = static_cast<std::uint8_t>(std::min<std::size_t>(
+        modulation.length, VelocityModulation::maxLength));
+    for (std::size_t step = 0; step < state.length; ++step)
+        state.values[step] = NormalizedValue::fromUnipolar8(
+            modulation.values[step]);
+    return state;
+}
 } // namespace
 
 PatternPlayer::PatternPlayer(const PatternLibrary& patternLibrary) noexcept
@@ -23,7 +46,8 @@ PatternPlayer::PatternPlayer(
     const PatternLibrary& patternLibrary,
     const VelocityModulationLibrary& velocityModulationLibrary) noexcept
     : patternLibrary_(patternLibrary),
-      velocityModulationLibrary_(velocityModulationLibrary)
+      velocityModulationLibrary_(velocityModulationLibrary),
+      velocityLane_(intensityLaneDefinition())
 {
     if (const auto* initialPattern = patternLibrary_.recordAt(0))
     {
@@ -544,7 +568,7 @@ void PatternPlayer::reset() noexcept
     playbackOriginPpq_ = 0.0;
     lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
     playbackWindowOriginStep_ = 0;
-    nextVelocityModulationStep_ = 0;
+    velocityLane_.reset(ModulationResetReason::transportDiscontinuity);
     triggerIsOn_ = false;
     activeTriggerId_ = {};
     patternPlaybackSnapshot_ = {};
@@ -596,9 +620,11 @@ PlayerProcessResult PatternPlayer::process(
     if (requestedVelocityModulation != activeVelocityModulationId()
         && activateVelocityModulation(requestedVelocityModulation))
     {
-        nextVelocityModulationStep_ = 0;
+        velocityLane_.reset(ModulationResetReason::sourceSelection);
         modulationPlaybackSnapshot_.currentStep = -1;
     }
+    velocityLane_.publishState(
+        laneStateFrom(velocityModulationSnapshot().modulation));
 
     const auto emitStart = [this, &output](double ppq, float intensity)
     {
@@ -618,7 +644,7 @@ PlayerProcessResult PatternPlayer::process(
 
         pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
         lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
-        nextVelocityModulationStep_ = 0;
+        velocityLane_.reset(ModulationResetReason::transportDiscontinuity);
         triggerIsOn_ = false;
         modulationPlaybackSnapshot_.currentStep = -1;
 
@@ -800,19 +826,13 @@ PlayerProcessResult PatternPlayer::process(
                     pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
                 }
 
-                const auto velocityLength = std::clamp<std::size_t>(
-                    editableVelocityLength_.load(std::memory_order_relaxed),
-                    1,
-                    VelocityModulation::maxLength);
-                const auto velocityStep = nextVelocityModulationStep_
-                    % velocityLength;
-                const auto velocityValue = editableVelocityValues_[velocityStep].load(
-                    std::memory_order_relaxed);
+                const auto modulation = velocityLane_.advance(
+                    ModulationAdvancePoint::candidateTrigger);
                 emitStart(
                     stepPpq,
-                    static_cast<float>(velocityValue) / 255.0f);
-                modulationPlaybackSnapshot_.currentStep = static_cast<int>(velocityStep);
-                nextVelocityModulationStep_ = (velocityStep + 1) % velocityLength;
+                    modulation.has_value() ? modulation->mappedValue : 1.0f);
+                modulationPlaybackSnapshot_.currentStep =
+                    velocityLane_.currentStep();
                 triggerIsOn_ = true;
                 lastTriggeredPlaybackStep_ = playbackStep;
 
@@ -921,7 +941,7 @@ PlayerProcessResult PatternPlayer::process(
     // phase reset restarts both sequences together.
     if (hasExternalReset)
     {
-        nextVelocityModulationStep_ = 0;
+        velocityLane_.reset(ModulationResetReason::explicitRestart);
         modulationPlaybackSnapshot_.currentStep = -1;
     }
 

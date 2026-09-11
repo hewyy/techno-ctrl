@@ -26,6 +26,8 @@ add_library(sequencer_core STATIC
     src/core/IPlayer.h
     src/core/IPlayerEditorModels.h
     src/core/IOutputRenderer.h
+    src/core/ModulationLane.cpp
+    src/core/ModulationLane.h
     src/core/PatternLibrary.cpp
     src/core/PatternLibrary.h
     src/core/PatternPlayer.cpp
@@ -56,6 +58,10 @@ add_executable(velocity_modulation_library_tests
     tests/VelocityModulationLibraryTests.cpp
 )
 
+add_executable(modulation_lane_tests
+    tests/ModulationLaneTests.cpp
+)
+
 add_executable(midi_buffer_transport_tests
     tests/MidiBufferTransportTests.cpp
     src/plugin/MidiBufferRenderer.cpp
@@ -66,6 +72,7 @@ target_link_libraries(sequencer_core_tests PRIVATE sequencer_core)
 target_link_libraries(pattern_player_tests PRIVATE sequencer_core)
 target_link_libraries(pattern_library_tests PRIVATE sequencer_core)
 target_link_libraries(velocity_modulation_library_tests PRIVATE sequencer_core)
+target_link_libraries(modulation_lane_tests PRIVATE sequencer_core)
 target_include_directories(midi_buffer_transport_tests PRIVATE src)
 target_link_libraries(midi_buffer_transport_tests
     PRIVATE
@@ -78,6 +85,7 @@ add_test(NAME sequencer_core_tests COMMAND sequencer_core_tests)
 add_test(NAME pattern_player_tests COMMAND pattern_player_tests)
 add_test(NAME pattern_library_tests COMMAND pattern_library_tests)
 add_test(NAME velocity_modulation_library_tests COMMAND velocity_modulation_library_tests)
+add_test(NAME modulation_lane_tests COMMAND modulation_lane_tests)
 add_test(NAME midi_buffer_transport_tests COMMAND midi_buffer_transport_tests)
 
 juce_add_plugin(LivePatternSequencer

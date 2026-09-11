@@ -2,6 +2,7 @@
 
 #include "core/IPlayer.h"
 #include "core/IPlayerEditorModels.h"
+#include "core/ModulationLane.h"
 #include "core/PatternLibrary.h"
 #include "core/VelocityModulationLibrary.h"
 
@@ -112,7 +113,7 @@ private:
     double playbackOriginPpq_ = 0.0;
     std::int64_t lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
     std::int64_t playbackWindowOriginStep_ = 0;
-    std::size_t nextVelocityModulationStep_ = 0;
+    ModulationLaneRuntime velocityLane_;
     std::uint64_t nextTriggerId_ = 1;
     TriggerId activeTriggerId_;
     bool triggerIsOn_ = false;
