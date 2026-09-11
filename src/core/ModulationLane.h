@@ -102,6 +102,9 @@ struct ModulationLaneDefinition
     std::uint16_t logicalControl = 0;
 };
 
+[[nodiscard]] ModulationLaneDefinition makeIntensityLaneDefinition(
+    LaneId id = { 1 }) noexcept;
+
 struct ModulationLaneState
 {
     static constexpr std::size_t maximumStepCount = 32;

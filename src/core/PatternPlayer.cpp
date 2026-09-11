@@ -13,18 +13,6 @@ const VelocityModulationLibrary& defaultVelocityModulationLibrary() noexcept
     return library;
 }
 
-ModulationLaneDefinition intensityLaneDefinition() noexcept
-{
-    ModulationLaneDefinition definition;
-    definition.id = { 1 };
-    definition.target = ModulationTarget::intensity;
-    definition.advanceOn = ModulationAdvancePoint::candidateTrigger;
-    definition.resetOn = ModulationResetReason::sourceSelection
-        | ModulationResetReason::transportDiscontinuity
-        | resetMask(ModulationResetReason::explicitRestart);
-    return definition;
-}
-
 ModulationLaneState laneStateFrom(const VelocityModulation& modulation) noexcept
 {
     ModulationLaneState state;
@@ -47,7 +35,7 @@ PatternPlayer::PatternPlayer(
     const VelocityModulationLibrary& velocityModulationLibrary) noexcept
     : patternLibrary_(patternLibrary),
       velocityModulationLibrary_(velocityModulationLibrary),
-      velocityLane_(intensityLaneDefinition())
+      velocityLane_(makeIntensityLaneDefinition())
 {
     if (const auto* initialPattern = patternLibrary_.recordAt(0))
     {

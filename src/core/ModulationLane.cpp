@@ -18,6 +18,18 @@ float ValueMapping::map(NormalizedValue value) const noexcept
     return minimum + (maximum - minimum) * value.toFloat();
 }
 
+ModulationLaneDefinition makeIntensityLaneDefinition(LaneId id) noexcept
+{
+    ModulationLaneDefinition definition;
+    definition.id = id;
+    definition.target = ModulationTarget::intensity;
+    definition.advanceOn = ModulationAdvancePoint::candidateTrigger;
+    definition.resetOn = ModulationResetReason::sourceSelection
+        | ModulationResetReason::transportDiscontinuity
+        | resetMask(ModulationResetReason::explicitRestart);
+    return definition;
+}
+
 ModulationLaneRuntime::ModulationLaneRuntime(
     ModulationLaneDefinition definition) noexcept
     : definition_(definition)
