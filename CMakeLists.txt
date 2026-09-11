@@ -74,6 +74,12 @@ add_executable(midi_buffer_transport_tests
     src/plugin/MidiBufferRenderer.h
 )
 
+add_executable(cv_buffer_renderer_tests
+    tests/CvBufferRendererTests.cpp
+    src/plugin/CvBufferRenderer.cpp
+    src/plugin/CvBufferRenderer.h
+)
+
 target_link_libraries(sequencer_core_tests PRIVATE sequencer_core)
 target_link_libraries(pattern_player_tests PRIVATE sequencer_core)
 target_link_libraries(pattern_library_tests PRIVATE sequencer_core)
@@ -82,6 +88,12 @@ target_link_libraries(modulation_lane_tests PRIVATE sequencer_core)
 target_link_libraries(pulse_player_tests PRIVATE sequencer_core)
 target_include_directories(midi_buffer_transport_tests PRIVATE src)
 target_link_libraries(midi_buffer_transport_tests
+    PRIVATE
+        sequencer_core
+        juce::juce_audio_basics
+)
+target_include_directories(cv_buffer_renderer_tests PRIVATE src)
+target_link_libraries(cv_buffer_renderer_tests
     PRIVATE
         sequencer_core
         juce::juce_audio_basics
@@ -95,6 +107,7 @@ add_test(NAME velocity_modulation_library_tests COMMAND velocity_modulation_libr
 add_test(NAME modulation_lane_tests COMMAND modulation_lane_tests)
 add_test(NAME pulse_player_tests COMMAND pulse_player_tests)
 add_test(NAME midi_buffer_transport_tests COMMAND midi_buffer_transport_tests)
+add_test(NAME cv_buffer_renderer_tests COMMAND cv_buffer_renderer_tests)
 
 juce_add_plugin(LivePatternSequencer
     COMPANY_NAME "Hew"
@@ -103,15 +116,17 @@ juce_add_plugin(LivePatternSequencer
     PLUGIN_CODE Lpsq
     FORMATS VST3
     PRODUCT_NAME "Live Pattern Sequencer MVP"
-    IS_SYNTH FALSE
+    IS_SYNTH TRUE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT TRUE
-    IS_MIDI_EFFECT TRUE
+    IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     COPY_PLUGIN_AFTER_BUILD FALSE
 )
 
 target_sources(LivePatternSequencer PRIVATE
+    src/plugin/CvBufferRenderer.cpp
+    src/plugin/CvBufferRenderer.h
     src/plugin/MidiBufferRenderer.cpp
     src/plugin/MidiBufferRenderer.h
     src/plugin/PatternLibraryFileStore.cpp

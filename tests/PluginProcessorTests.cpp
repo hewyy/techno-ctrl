@@ -700,6 +700,17 @@ void testMixedPlayerCapabilitiesAreExposedWithoutConcreteAssumptions()
         == LivePatternSequencerProcessor::SavePatternStatus::failed);
     CHECK(!processor.resetPlayerToMaster(pulseIndex));
 }
+
+void testPluginDeclaresIsolatedCvOutputsAlongsideMidi()
+{
+    TemporaryPatternCatalog catalog;
+    LivePatternSequencerProcessor processor(catalog.file());
+    CHECK(processor.getTotalNumInputChannels() == 0);
+    CHECK(processor.getTotalNumOutputChannels()
+        == static_cast<int>(processor.playerCountForUi()) * 3);
+    CHECK(processor.producesMidi());
+    CHECK(!processor.isMidiEffect());
+}
 } // namespace
 
 int main()
@@ -720,6 +731,7 @@ int main()
     testSimultaneousDistinctSavesFromStaleProcessorsAreBothRestored();
     testOversizedInt64SchemaVersionIsRejectedAndPreserved();
     testMixedPlayerCapabilitiesAreExposedWithoutConcreteAssumptions();
+    testPluginDeclaresIsolatedCvOutputsAlongsideMidi();
     std::cout << "All plugin processor tests passed.\n";
     return EXIT_SUCCESS;
 }

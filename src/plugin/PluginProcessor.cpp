@@ -59,11 +59,16 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor()
 
 LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     const juce::File& patternCatalogFile)
-    : juce::AudioProcessor(juce::AudioProcessor::BusesProperties()),
+    : juce::AudioProcessor(
+          juce::AudioProcessor::BusesProperties().withOutput(
+              "CV Output",
+              juce::AudioChannelSet::discreteChannels(cvOutputChannelCount),
+              true)),
       patternLibraryFileStore_(patternCatalogFile),
       velocityModulationLibraryFileStore_(
           patternCatalogFile.getSiblingFile("velocity-modulations.json")),
       drumRenderer_(std::make_unique<lps::MidiBufferRenderer>(drumMidiChannel)),
+      cvRenderer_(std::make_unique<lps::CvBufferRenderer>()),
       engine_(std::make_unique<lps::SequencerEngine>())
 {
     // Catalog replacement is startup-only and must finish before PatternPlayer
@@ -100,6 +105,20 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
             : std::nullopt;
         jassert(routeId.has_value());
         (void) routeId;
+        const auto cvRouteId = playerId.has_value()
+            ? engine_->connect(
+                *playerId,
+                *cvRenderer_,
+                lps::RouteMapping::fixedPitch(
+                    static_cast<float>(voice.midiNote)))
+            : std::nullopt;
+        const int cvChannel = static_cast<int>(index) * cvChannelsPerPlayer;
+        const bool cvConfigured = cvRouteId.has_value()
+            && cvRenderer_->configureRoute(
+                *cvRouteId,
+                { cvChannel, cvChannel + 1, cvChannel + 2 });
+        jassert(cvConfigured);
+        (void) cvConfigured;
 
         PlayerBundle bundle;
         bundle.descriptor = { voice.name, voice.midiNote, true };
@@ -138,6 +157,20 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         : std::nullopt;
     jassert(pulseRoute.has_value());
     (void) pulseRoute;
+    const auto pulseCvRoute = pulseId.has_value()
+        ? engine_->connect(
+            *pulseId,
+            *cvRenderer_,
+            lps::RouteMapping::fixedPitch(static_cast<float>(pulseMidiNote)))
+        : std::nullopt;
+    const int pulseCvChannel = static_cast<int>(defaultDrumVoices.size())
+        * cvChannelsPerPlayer;
+    const bool pulseCvConfigured = pulseCvRoute.has_value()
+        && cvRenderer_->configureRoute(
+            *pulseCvRoute,
+            { pulseCvChannel, pulseCvChannel + 1, pulseCvChannel + 2 });
+    jassert(pulseCvConfigured);
+    (void) pulseCvConfigured;
 
     PlayerBundle pulseBundle;
     pulseBundle.descriptor = { "Pulse", pulseMidiNote, false };
@@ -158,6 +191,14 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
 const juce::String LivePatternSequencerProcessor::getName() const
 {
     return JucePlugin_Name;
+}
+
+bool LivePatternSequencerProcessor::isBusesLayoutSupported(
+    const BusesLayout& layouts) const
+{
+    return layouts.getMainInputChannelSet().isDisabled()
+        && layouts.getMainOutputChannelSet()
+            == juce::AudioChannelSet::discreteChannels(cvOutputChannelCount);
 }
 
 void LivePatternSequencerProcessor::prepareToPlay(
@@ -231,7 +272,9 @@ void LivePatternSequencerProcessor::processBlock(
 
     wasPlaying_ = block.playing;
     drumRenderer_->setMidiBuffer(midi);
+    cvRenderer_->setAudioBuffer(audio);
     engine_->run(block);
+    cvRenderer_->clearAudioBuffer();
     drumRenderer_->clearMidiBuffer();
 
     updateUiSnapshot();

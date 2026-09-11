@@ -5,6 +5,7 @@
 #include "core/PatternPlayer.h"
 #include "core/PulsePlayer.h"
 #include "core/VelocityModulationLibrary.h"
+#include "plugin/CvBufferRenderer.h"
 #include "plugin/MidiBufferRenderer.h"
 #include "plugin/PatternLibraryFileStore.h"
 #include "plugin/VelocityModulationLibraryFileStore.h"
@@ -65,7 +66,9 @@ public:
     [[nodiscard]] const juce::String getName() const override;
     [[nodiscard]] bool acceptsMidi() const override { return false; }
     [[nodiscard]] bool producesMidi() const override { return true; }
-    [[nodiscard]] bool isMidiEffect() const override { return true; }
+    [[nodiscard]] bool isMidiEffect() const override { return false; }
+    [[nodiscard]] bool isBusesLayoutSupported(
+        const BusesLayout& layouts) const override;
     [[nodiscard]] double getTailLengthSeconds() const override { return 0.0; }
 
     [[nodiscard]] int getNumPrograms() override { return 1; }
@@ -163,6 +166,10 @@ public:
 
 private:
     static constexpr int drumMidiChannel = 1;
+    static constexpr std::size_t cvPlayerCapacity = 11;
+    static constexpr int cvChannelsPerPlayer = 3;
+    static constexpr int cvOutputChannelCount =
+        static_cast<int>(cvPlayerCapacity) * cvChannelsPerPlayer;
 
     struct PlayerDescriptor
     {
@@ -194,6 +201,7 @@ private:
     VelocityModulationLibraryFileStore velocityModulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
+    std::unique_ptr<lps::CvBufferRenderer> cvRenderer_;
     std::unique_ptr<lps::SequencerEngine> engine_;
 
     std::optional<double> expectedNextPpq_;
