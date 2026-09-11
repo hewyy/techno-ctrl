@@ -27,6 +27,22 @@ lps::ModulationLaneState alternatingIntensity()
     return state;
 }
 
+lps::ModulationLaneDefinition laneDefinition(
+    std::uint16_t id,
+    lps::ModulationTarget target,
+    lps::ModulationAdvancePoint advance,
+    float minimum,
+    float maximum,
+    lps::ModulationCombineMode combine = lps::ModulationCombineMode::replace)
+{
+    lps::ModulationLaneDefinition definition;
+    definition.id = { id };
+    definition.target = target;
+    definition.advanceOn = advance;
+    definition.mapping = { minimum, maximum, combine };
+    return definition;
+}
+
 class CollectingRenderer final : public lps::IOutputRenderer
 {
 public:
@@ -106,12 +122,112 @@ void testPulsePlayerUsesTheNormalEngineRoute()
     CHECK(renderer.rendered[0].event.type
         == lps::SemanticEventType::triggerStart);
 }
+
+void testPitchGateProbabilityAndControlTargetsCompose()
+{
+    lps::PulsePlayer player { 0.5, 0.5 };
+    player.setBasePitch(60.0f);
+
+    lps::ModulationLaneState pitch;
+    pitch.length = 2;
+    pitch.values[0] = lps::NormalizedValue::fromUnipolar8(0);
+    pitch.values[1] = lps::NormalizedValue::fromUnipolar8(255);
+    CHECK(player.addModulationLane(
+        laneDefinition(2, lps::ModulationTarget::pitch,
+            lps::ModulationAdvancePoint::candidateTrigger,
+            -12.0f, 12.0f, lps::ModulationCombineMode::add),
+        pitch));
+
+    lps::ModulationLaneState gate;
+    gate.length = 1;
+    gate.values[0] = lps::NormalizedValue::fromUnipolar8(0);
+    CHECK(player.addModulationLane(
+        laneDefinition(3, lps::ModulationTarget::gateLength,
+            lps::ModulationAdvancePoint::sourceStep, 0.25f, 0.25f),
+        gate));
+
+    lps::ModulationLaneState control;
+    control.length = 1;
+    control.values[0] = lps::NormalizedValue::fromUnipolar8(128);
+    auto controlDefinition = laneDefinition(
+        4, lps::ModulationTarget::control,
+        lps::ModulationAdvancePoint::time, 0.0f, 1.0f);
+    controlDefinition.logicalControl = 74;
+    CHECK(player.addModulationLane(controlDefinition, control));
+
+    lps::SequencerEventBuffer events;
+    lps::TimelineBlock block;
+    block.ppqEnd = 0.6;
+    block.playing = true;
+    block.transportDiscontinuity = true;
+    (void) player.process(block, {}, events);
+
+    std::vector<lps::SequencerEvent> starts;
+    std::vector<lps::SequencerEvent> ends;
+    std::vector<lps::SequencerEvent> controls;
+    for (const auto& event : events)
+    {
+        if (event.type == lps::SemanticEventType::triggerStart)
+            starts.push_back(event);
+        else if (event.type == lps::SemanticEventType::triggerEnd)
+            ends.push_back(event);
+        else
+            controls.push_back(event);
+    }
+    CHECK(starts.size() == 2);
+    CHECK(starts[0].hasMusicalPitch && starts[0].musicalPitchSemitones == 48.0f);
+    CHECK(starts[1].hasMusicalPitch && starts[1].musicalPitchSemitones == 72.0f);
+    CHECK(ends.size() == 1);
+    CHECK(std::abs(ends[0].ppqPosition - 0.125) < 1.0e-9);
+    CHECK(controls.size() == 2);
+    CHECK(controls[0].logicalControl == 74);
+}
+
+void testRejectedCandidatesDoNotAdvanceEmittedTriggerLanes()
+{
+    lps::PulsePlayer player { 0.5, 0.5 };
+
+    lps::ModulationLaneState probability;
+    probability.length = 2;
+    probability.values[0] = lps::NormalizedValue::fromUnipolar8(0);
+    probability.values[1] = lps::NormalizedValue::fromUnipolar8(255);
+    CHECK(player.addModulationLane(
+        laneDefinition(2, lps::ModulationTarget::probability,
+            lps::ModulationAdvancePoint::candidateTrigger, 0.0f, 1.0f),
+        probability));
+
+    lps::ModulationLaneState emittedIntensity;
+    emittedIntensity.length = 2;
+    emittedIntensity.values[0] = lps::NormalizedValue::fromUnipolar8(100);
+    emittedIntensity.values[1] = lps::NormalizedValue::fromUnipolar8(200);
+    CHECK(player.addModulationLane(
+        laneDefinition(3, lps::ModulationTarget::intensity,
+            lps::ModulationAdvancePoint::emittedTrigger, 0.0f, 1.0f),
+        emittedIntensity));
+
+    lps::SequencerEventBuffer events;
+    lps::TimelineBlock block;
+    block.ppqEnd = 1.1;
+    block.playing = true;
+    block.transportDiscontinuity = true;
+    (void) player.process(block, {}, events);
+
+    std::vector<lps::SequencerEvent> starts;
+    for (const auto& event : events)
+        if (event.type == lps::SemanticEventType::triggerStart)
+            starts.push_back(event);
+    CHECK(starts.size() == 1);
+    CHECK(std::abs(starts[0].ppqPosition - 0.5) < 1.0e-9);
+    CHECK(std::abs(starts[0].normalizedValue - 100.0f / 255.0f) < 1.0e-7f);
+}
 } // namespace
 
 int main()
 {
     testPulsePlayerReusesLaneForTriggerIntensity();
     testPulsePlayerUsesTheNormalEngineRoute();
+    testPitchGateProbabilityAndControlTargetsCompose();
+    testRejectedCandidatesDoNotAdvanceEmittedTriggerLanes();
     std::cout << "All pulse player tests passed.\n";
     return EXIT_SUCCESS;
 }

@@ -120,6 +120,7 @@ struct ModulationSample
     NormalizedValue normalized;
     float mappedValue = 0.0f;
     std::uint8_t sourceStep = 0;
+    ModulationCombineMode combine = ModulationCombineMode::replace;
 };
 
 class ModulationLaneRuntime
@@ -153,6 +154,9 @@ public:
         ModulationLaneDefinition definition) noexcept;
     [[nodiscard]] ModulationLaneRuntime* lane(LaneId id) noexcept;
     [[nodiscard]] const ModulationLaneRuntime* lane(LaneId id) const noexcept;
+    [[nodiscard]] std::size_t advance(
+        ModulationAdvancePoint point,
+        std::array<ModulationSample, maximumLaneCount>& output) noexcept;
     void reset(ModulationResetReason reason) noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
 

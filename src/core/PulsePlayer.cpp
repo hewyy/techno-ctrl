@@ -11,12 +11,40 @@ PulsePlayer::PulsePlayer(double periodPpq, double gateRatio) noexcept
           ? periodPpq : 0.5),
       gateRatio_(std::clamp(gateRatio, 0.0, 1.0))
 {
+    (void) modulationBank_.addLane(makeIntensityLaneDefinition());
 }
 
 void PulsePlayer::publishModulationState(
     const ModulationLaneState& state) noexcept
 {
-    intensityLane_.publishState(state);
+    (void) publishModulationState({ 1 }, state);
+}
+
+bool PulsePlayer::addModulationLane(
+    ModulationLaneDefinition definition,
+    const ModulationLaneState& state) noexcept
+{
+    auto* lane = modulationBank_.addLane(definition);
+    if (lane == nullptr)
+        return false;
+    lane->publishState(state);
+    return true;
+}
+
+bool PulsePlayer::publishModulationState(
+    LaneId laneId,
+    const ModulationLaneState& state) noexcept
+{
+    auto* lane = modulationBank_.lane(laneId);
+    if (lane == nullptr)
+        return false;
+    lane->publishState(state);
+    return true;
+}
+
+void PulsePlayer::setBasePitch(std::optional<float> semitones) noexcept
+{
+    basePitchSemitones_ = semitones;
 }
 
 void PulsePlayer::prepare(const PrepareSpec& /*spec*/) noexcept
@@ -31,7 +59,7 @@ void PulsePlayer::reset() noexcept
     lastPulse_ = std::numeric_limits<std::int64_t>::min();
     activeTriggerId_ = {};
     triggerActive_ = false;
-    intensityLane_.reset(ModulationResetReason::transportDiscontinuity);
+    modulationBank_.reset(ModulationResetReason::transportDiscontinuity);
     modulationSnapshot_ = {};
 }
 
@@ -54,7 +82,7 @@ PlayerProcessResult PulsePlayer::process(
             emitEnd(block.ppqStart);
         originPpq_ = block.ppqStart;
         lastPulse_ = std::numeric_limits<std::int64_t>::min();
-        intensityLane_.reset(ModulationResetReason::transportDiscontinuity);
+        modulationBank_.reset(ModulationResetReason::transportDiscontinuity);
         modulationSnapshot_ = {};
     }
 
@@ -82,17 +110,79 @@ PlayerProcessResult PulsePlayer::process(
         {
             if (triggerActive_)
                 emitEnd(pulsePpq);
-            const auto modulation = intensityLane_.advance(
-                ModulationAdvancePoint::candidateTrigger);
+
+            float intensity = 1.0f;
+            float probability = 1.0f;
+            auto gateRatio = static_cast<float>(gateRatio_);
+            auto pitch = basePitchSemitones_;
+            std::array<ModulationSample, ModulationBank::maximumLaneCount> samples;
+            const auto applySamples = [&](ModulationAdvancePoint point)
+            {
+                const auto sampleCount = modulationBank_.advance(point, samples);
+                for (std::size_t index = 0; index < sampleCount; ++index)
+                {
+                    const auto& sample = samples[index];
+                    const auto combine = sample.combine;
+                    const auto combineValue = [combine](float current, float value)
+                    {
+                        if (combine == ModulationCombineMode::add)
+                            return current + value;
+                        if (combine == ModulationCombineMode::multiply)
+                            return current * value;
+                        return value;
+                    };
+
+                    switch (sample.target)
+                    {
+                        case ModulationTarget::intensity:
+                            intensity = combineValue(intensity, sample.mappedValue);
+                            break;
+                        case ModulationTarget::pitch:
+                            pitch = combineValue(pitch.value_or(0.0f), sample.mappedValue);
+                            break;
+                        case ModulationTarget::gateLength:
+                            gateRatio = combineValue(gateRatio, sample.mappedValue);
+                            break;
+                        case ModulationTarget::probability:
+                            probability = combineValue(probability, sample.mappedValue);
+                            break;
+                        case ModulationTarget::control:
+                            (void) output.push(SequencerEvent::controlPoint(
+                                pulsePpq,
+                                sample.logicalControl,
+                                NormalizedValue::fromFloat(
+                                    sample.mappedValue).toFloat()));
+                            break;
+                    }
+                }
+            };
+
+            applySamples(ModulationAdvancePoint::sourceStep);
+            applySamples(ModulationAdvancePoint::time);
+            applySamples(ModulationAdvancePoint::candidateTrigger);
+            const auto randomUnit = static_cast<float>(
+                (static_cast<std::uint64_t>(pulse) * 1'103'515'245u + 12'345u)
+                    & 0xffffu) / 65'535.0f;
+            if (std::clamp(probability, 0.0f, 1.0f) < randomUnit)
+            {
+                lastPulse_ = pulse;
+                ++pulse;
+                continue;
+            }
+
+            applySamples(ModulationAdvancePoint::emittedTrigger);
             activeTriggerId_ = { nextTriggerId_++ };
             (void) output.push(SequencerEvent::triggerStart(
                 pulsePpq,
                 activeTriggerId_,
-                modulation.has_value() ? modulation->mappedValue : 1.0f));
+                std::clamp(intensity, 0.0f, 1.0f),
+                pitch));
             triggerActive_ = true;
             lastPulse_ = pulse;
-            modulationSnapshot_.currentStep = intensityLane_.currentStep();
-            pendingEndPpq_ = pulsePpq + periodPpq_ * gateRatio_;
+            if (const auto* intensityLane = modulationBank_.lane({ 1 }))
+                modulationSnapshot_.currentStep = intensityLane->currentStep();
+            pendingEndPpq_ = pulsePpq + periodPpq_
+                * std::clamp(static_cast<double>(gateRatio), 0.0, 1.0);
             if (pendingEndPpq_ < block.ppqEnd)
                 emitEnd(pendingEndPpq_);
         }

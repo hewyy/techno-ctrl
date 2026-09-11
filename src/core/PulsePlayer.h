@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 
 namespace lps
 {
@@ -16,6 +17,13 @@ public:
     explicit PulsePlayer(double periodPpq = 0.5, double gateRatio = 0.5) noexcept;
 
     void publishModulationState(const ModulationLaneState& state) noexcept;
+    [[nodiscard]] bool addModulationLane(
+        ModulationLaneDefinition definition,
+        const ModulationLaneState& state) noexcept;
+    [[nodiscard]] bool publishModulationState(
+        LaneId laneId,
+        const ModulationLaneState& state) noexcept;
+    void setBasePitch(std::optional<float> semitones) noexcept;
 
     void prepare(const PrepareSpec& spec) noexcept override;
     void reset() noexcept override;
@@ -35,7 +43,8 @@ private:
     std::int64_t lastPulse_ = std::numeric_limits<std::int64_t>::min();
     std::uint64_t nextTriggerId_ = 1;
     TriggerId activeTriggerId_;
-    ModulationLaneRuntime intensityLane_ { makeIntensityLaneDefinition() };
+    ModulationBank modulationBank_;
+    std::optional<float> basePitchSemitones_;
     ModulationPlaybackSnapshot modulationSnapshot_;
     bool triggerActive_ = false;
 };

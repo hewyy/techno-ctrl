@@ -85,7 +85,8 @@ std::optional<ModulationSample> ModulationLaneRuntime::advance(
         definition_.logicalControl,
         normalized,
         definition_.mapping.map(normalized),
-        step
+        step,
+        definition_.mapping.combine
     };
 }
 
@@ -122,6 +123,17 @@ const ModulationLaneRuntime* ModulationBank::lane(LaneId id) const noexcept
         if (lanes_[index].definition().id == id)
             return &lanes_[index];
     return nullptr;
+}
+
+std::size_t ModulationBank::advance(
+    ModulationAdvancePoint point,
+    std::array<ModulationSample, maximumLaneCount>& output) noexcept
+{
+    std::size_t outputSize = 0;
+    for (std::size_t index = 0; index < size_; ++index)
+        if (const auto sample = lanes_[index].advance(point))
+            output[outputSize++] = *sample;
+    return outputSize;
 }
 
 void ModulationBank::reset(ModulationResetReason reason) noexcept
