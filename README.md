@@ -32,6 +32,9 @@ channel 1 and are distinguished by these fixed drum-machine note values:
 | Crash | 44 |
 | Ride | 45 |
 
+The current composition also adds one generic `PulsePlayer` on MIDI note 46.
+Every player is routed to MIDI and to an isolated gate/pitch/control CV triplet.
+
 The voice list is centralized in `PluginProcessor.cpp`. The processor, editor, sequencer
 engine, routing, and suppression matrix use runtime-sized collections, so the list can be
 expanded or reduced without changing those systems.
@@ -39,7 +42,11 @@ expanded or reduced without changing those systems.
 ## Architecture boundary
 
 `src/core` contains no JUCE, VST3, REAPER, or operating-system types. `IPlayer` and
-`ITransport` are the boundaries between the sequencer core and the plugin wrapper.
+`IOutputRenderer` are the real-time boundaries between the sequencer core and the
+plugin wrapper. See the detailed [core architecture and integration guide](docs/core-architecture.md)
+for component APIs, timing and threading contracts, safety mechanisms, examples,
+and a checklist for replacing JUCE or the VST3 wrapper.
+
 `PatternLibrary` and `VelocityModulationLibrary` own separate immutable, append-only
 catalog entries; each `PatternPlayer`
 copies the selected hits into its own unsaved 32-step draft before playback or editing. Saving
@@ -51,8 +58,9 @@ the same timing as other pattern selections: while playing, follower voices wait
 start of the master voice's loop, and the master waits for its own loop start. While stopped,
 selections apply immediately. Activation reloads canonical content and discards excluded edits.
 User entries are restored from the catalog whenever a new plugin instance starts. Catalog
-persistence is independent of the DAW's plugin-state persistence, which is not implemented
-in this MVP.
+persistence is independent of the DAW's versioned plugin-state persistence. Session state
+stores player drafts and stable catalog IDs, so moving a project to another machine also
+requires the referenced per-user catalogs when it contains user-created entries.
 
 Velocity modulation uses an 8-bit 0–255 editing scale, which is normalized to MIDI's 0–127
 velocity range at output. For example, `[255, 100, 225, 150]` produces MIDI velocities
@@ -111,11 +119,11 @@ catalog path and recovery action when this happens.
 REAPER clock
     -> PluginProcessor
     -> SequencerEngine
-    -> PatternPlayer(s)
+    -> IPlayer implementation(s)
     -> SequencerEventBuffer
-    -> shared MidiBufferTransport
-    -> JUCE MidiBuffer (one channel, distinct notes)
-    -> software synth
+    -> validated, frame-ordered RoutedEvent batches
+    -> shared MidiBufferRenderer and CvBufferRenderer
+    -> JUCE MIDI/CV buffers
 ```
 
 Every fixed-note pattern source is still a normal `IPlayer`, so it participates in the same

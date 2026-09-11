@@ -7,11 +7,13 @@ The result is not a precompiled application. It is a small C++/JUCE project with
 ## What the MVP does
 
 ```text
-Players:        10 independent drum voices by default
-Patterns:       32-step player drafts; library length sets the initial playback end
-Gate:           50 percent of the step
-MIDI output:    shared channel 1, fixed note per voice, modulated velocity
-Clock:          REAPER transport and tempo
+Pattern players: 10 independent drum voices by default
+Pulse players:    1 periodic source
+Patterns:         32-step player drafts; library length sets the initial playback end
+Gate:             50 percent of the step
+MIDI output:      shared channel 1, fixed note per voice, modulated velocity
+CV output:        33 discrete channels; gate/pitch/control per player
+Clock:            REAPER transport and tempo
 ```
 
 The built-in library contains ten patterns: Basic Kick, All Steps, Backbeat, Offbeat Hats,
@@ -109,6 +111,10 @@ If REAPER previously rejected an older copy of the plugin, remove the failed ent
 ## Architecture boundary
 
 The JUCE and VST3-specific code is under `src/plugin`. The replaceable sequencer implementation is under `src/core` and depends only on standard C++.
+
+See the detailed [core architecture and integration guide](docs/core-architecture.md)
+for component contracts, safety mechanisms, and the services another plugin
+framework must provide.
 
 Fixed-note `PatternPlayer` instances are normal `IPlayer` implementations. Any number can be
 added to `SequencerEngine`; they use the same lifecycle, routing, and suppression matrix.
