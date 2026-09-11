@@ -63,7 +63,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
       patternLibraryFileStore_(patternCatalogFile),
       velocityModulationLibraryFileStore_(
           patternCatalogFile.getSiblingFile("velocity-modulations.json")),
-      drumTransport_(std::make_unique<lps::MidiBufferTransport>(drumMidiChannel)),
+      drumRenderer_(std::make_unique<lps::MidiBufferRenderer>(drumMidiChannel)),
       engine_(std::make_unique<lps::SequencerEngine>())
 {
     // Catalog replacement is startup-only and must finish before PatternPlayer
@@ -92,7 +92,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         const auto routeId = playerId.has_value()
             ? engine_->connect(
                 *playerId,
-                *drumTransport_,
+                *drumRenderer_,
                 lps::RouteMapping::fixedPitch(
                     static_cast<float>(voice.midiNote)))
             : std::nullopt;
@@ -188,9 +188,9 @@ void LivePatternSequencerProcessor::processBlock(
     }
 
     wasPlaying_ = block.playing;
-    drumTransport_->setMidiBuffer(midi);
+    drumRenderer_->setMidiBuffer(midi);
     engine_->run(block);
-    drumTransport_->clearMidiBuffer();
+    drumRenderer_->clearMidiBuffer();
 
     updateUiSnapshot();
 }

@@ -25,7 +25,7 @@ endif()
 add_library(sequencer_core STATIC
     src/core/IPlayer.h
     src/core/IPlayerEditorModels.h
-    src/core/ITransport.h
+    src/core/IOutputRenderer.h
     src/core/PatternLibrary.cpp
     src/core/PatternLibrary.h
     src/core/PatternPlayer.cpp
@@ -58,8 +58,8 @@ add_executable(velocity_modulation_library_tests
 
 add_executable(midi_buffer_transport_tests
     tests/MidiBufferTransportTests.cpp
-    src/plugin/MidiBufferTransport.cpp
-    src/plugin/MidiBufferTransport.h
+    src/plugin/MidiBufferRenderer.cpp
+    src/plugin/MidiBufferRenderer.h
 )
 
 target_link_libraries(sequencer_core_tests PRIVATE sequencer_core)
@@ -96,8 +96,8 @@ juce_add_plugin(LivePatternSequencer
 )
 
 target_sources(LivePatternSequencer PRIVATE
-    src/plugin/MidiBufferTransport.cpp
-    src/plugin/MidiBufferTransport.h
+    src/plugin/MidiBufferRenderer.cpp
+    src/plugin/MidiBufferRenderer.h
     src/plugin/PatternLibraryFileStore.cpp
     src/plugin/PatternLibraryFileStore.h
     src/plugin/VelocityModulationLibraryFileStore.cpp

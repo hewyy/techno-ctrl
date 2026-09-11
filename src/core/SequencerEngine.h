@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/IPlayer.h"
-#include "core/ITransport.h"
+#include "core/IOutputRenderer.h"
 
 #include <array>
 #include <atomic>
@@ -17,12 +17,12 @@ namespace lps
 class SequencerEngine
 {
 public:
-    // Registered players and connected transports must outlive the engine.
+    // Registered players and connected renderers must outlive the engine.
     // Registration and connection are message-thread operations only.
     [[nodiscard]] std::optional<PlayerId> registerPlayer(IPlayer& player);
     [[nodiscard]] std::optional<RouteId> connect(
         PlayerId playerId,
-        ITransport& transport,
+        IOutputRenderer& renderer,
         RouteMapping mapping = {});
 
     void prepare(const PrepareSpec& spec) noexcept;
@@ -81,13 +81,20 @@ private:
     {
         RouteId id;
         PlayerId playerId;
-        ITransport* transport = nullptr;
+        IOutputRenderer* renderer = nullptr;
         RouteMapping mapping;
+    };
+
+    struct RendererSlot
+    {
+        IOutputRenderer* renderer = nullptr;
+        std::vector<RoutedEvent> events;
         bool resetThisBlock = false;
     };
 
     std::vector<PlayerSlot> playerSlots_;
     std::vector<Route> routes_;
+    std::vector<RendererSlot> rendererSlots_;
     std::vector<RoutedEvent> routedEvents_;
     std::optional<PlayerId> masterPlayerId_;
     bool topologyFrozen_ = false;
@@ -98,10 +105,7 @@ private:
         PlayerId playerId,
         const SequencerEvent& event) const noexcept;
     [[nodiscard]] bool playerBlockFailed(PlayerId playerId) const noexcept;
-    [[nodiscard]] std::size_t firstRouteFor(ITransport* transport) const noexcept;
-    void resetPlayerOutputs(
-        PlayerId playerId,
-        const TimelineBlock& block) noexcept;
+    [[nodiscard]] RendererSlot* findRenderer(IOutputRenderer* renderer) noexcept;
     void validatePlayerEvents(
         PlayerSlot& slot,
         const TimelineBlock& block) noexcept;

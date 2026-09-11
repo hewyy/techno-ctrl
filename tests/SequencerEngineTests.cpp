@@ -111,22 +111,26 @@ struct DeliveredEvent
     };
 }
 
-class TestTransport final : public lps::ITransport
+class TestTransport final : public lps::IOutputRenderer
 {
 public:
-    void prepare(const lps::PrepareSpec& spec) noexcept override
+    void prepare(const lps::RenderSpec& spec) noexcept override
     {
         preparedRate = spec.sampleRate;
         preparedMaximumBlockSize = spec.maximumBlockSize;
         ++prepareCount;
     }
-    [[nodiscard]] bool send(const lps::RoutedEvent& event) noexcept override
+    [[nodiscard]] bool renderBlock(
+        const lps::TimelineBlock&,
+        lps::RoutedEventView events) noexcept override
     {
-        lastEvent = delivered(event);
-        ++sendCount;
+        ++renderBlockCount;
+        sendCount += static_cast<int>(events.size());
+        if (!events.empty())
+            lastEvent = delivered(events[events.size() - 1]);
         return deliverySucceeds;
     }
-    void resetOutputs(const lps::TimelineBlock&) noexcept override
+    void resetOutputs() noexcept override
     {
         ++resetCount;
     }
@@ -134,23 +138,29 @@ public:
     double preparedRate = 0.0;
     std::uint32_t preparedMaximumBlockSize = 0;
     int prepareCount = 0;
+    int renderBlockCount = 0;
     int sendCount = 0;
     int resetCount = 0;
     bool deliverySucceeds = true;
 };
 
-class CollectingTransport final : public lps::ITransport
+class CollectingTransport final : public lps::IOutputRenderer
 {
 public:
-    void prepare(const lps::PrepareSpec&) noexcept override {}
-    [[nodiscard]] bool send(const lps::RoutedEvent& event) noexcept override
+    void prepare(const lps::RenderSpec&) noexcept override {}
+    [[nodiscard]] bool renderBlock(
+        const lps::TimelineBlock&,
+        lps::RoutedEventView blockEvents) noexcept override
     {
-        events.push_back(delivered(event));
+        ++renderBlockCount;
+        for (const auto& event : blockEvents)
+            events.push_back(delivered(event));
         return true;
     }
-    void resetOutputs(const lps::TimelineBlock&) noexcept override { ++resetCount; }
+    void resetOutputs() noexcept override { ++resetCount; }
 
     std::vector<DeliveredEvent> events;
+    int renderBlockCount = 0;
     int resetCount = 0;
 };
 
@@ -255,7 +265,7 @@ void checkPositions(
 [[nodiscard]] lps::PlayerId registerAndConnect(
     lps::SequencerEngine& engine,
     lps::IPlayer& player,
-    lps::ITransport& transport,
+    lps::IOutputRenderer& transport,
     lps::RouteMapping mapping = {})
 {
     const auto playerId = engine.registerPlayer(player);
@@ -607,7 +617,9 @@ void testMutedPlayerStillParticipatesInSuppression()
     CHECK(mutedSuppressor.processCount == 1);
     CHECK(suppressedPlayer.processCount == 1);
     CHECK(mutedTransport.sendCount == 0);
+    CHECK(mutedTransport.renderBlockCount == 1);
     CHECK(suppressedTransport.sendCount == 0);
+    CHECK(suppressedTransport.renderBlockCount == 1);
 }
 
 void testMutedPlayerContinuesAndUnmutePreservesPhase()

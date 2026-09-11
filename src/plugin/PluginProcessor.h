@@ -4,7 +4,7 @@
 #include "core/SequencerEngine.h"
 #include "core/PatternPlayer.h"
 #include "core/VelocityModulationLibrary.h"
-#include "plugin/MidiBufferTransport.h"
+#include "plugin/MidiBufferRenderer.h"
 #include "plugin/PatternLibraryFileStore.h"
 #include "plugin/VelocityModulationLibraryFileStore.h"
 
@@ -169,7 +169,7 @@ private:
     VelocityModulationLibraryFileStore velocityModulationLibraryFileStore_;
     std::vector<juce::String> playerNames_;
     std::vector<std::unique_ptr<lps::PatternPlayer>> players_;
-    std::unique_ptr<lps::MidiBufferTransport> drumTransport_;
+    std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
     std::unique_ptr<lps::SequencerEngine> engine_;
 
     std::optional<double> expectedNextPpq_;

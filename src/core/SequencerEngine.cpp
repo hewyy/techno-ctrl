@@ -66,12 +66,11 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
         validatePlayerEvents(slot, block);
     }
 
-    for (auto& route : routes_)
-        route.resetThisBlock = false;
-
-    if (block.transportDiscontinuity)
-        for (const auto& route : routes_)
-            routes_[firstRouteFor(route.transport)].resetThisBlock = true;
+    for (auto& renderer : rendererSlots_)
+    {
+        renderer.events.clear();
+        renderer.resetThisBlock = block.transportDiscontinuity;
+    }
 
     for (auto& slot : playerSlots_)
     {
@@ -81,12 +80,13 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
         slot.player->reset();
         for (const auto& route : routes_)
             if (route.playerId == slot.id)
-                routes_[firstRouteFor(route.transport)].resetThisBlock = true;
+                if (auto* renderer = findRenderer(route.renderer))
+                    renderer->resetThisBlock = true;
     }
 
-    for (auto& route : routes_)
-        if (route.resetThisBlock)
-            route.transport->resetOutputs(block);
+    for (auto& renderer : rendererSlots_)
+        if (renderer.resetThisBlock)
+            renderer.renderer->resetOutputs();
 
     std::uint64_t stableOrder = 0;
     for (const auto& route : routes_)
@@ -151,17 +151,32 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
 
     for (const auto& routed : routedEvents_)
     {
-        auto* slot = findSlot(routed.sourcePlayerId);
-        if (slot == nullptr || slot->validation.failed)
+        const auto routeIndex = routed.routeId.value;
+        if (routeIndex >= routes_.size())
+            continue;
+        if (auto* renderer = findRenderer(routes_[routeIndex].renderer))
+            renderer->events.push_back(routed);
+    }
+
+    for (auto& renderer : rendererSlots_)
+    {
+        const RoutedEventView view {
+            renderer.events.data(), renderer.events.size()
+        };
+        if (renderer.renderer->renderBlock(block, view))
             continue;
 
-        const auto routeIndex = routed.routeId.value;
-        if (routeIndex >= routes_.size()
-            || !routes_[routeIndex].transport->send(routed))
+        renderer.renderer->resetOutputs();
+        for (const auto& route : routes_)
         {
-            resetPlayerOutputs(routed.sourcePlayerId, block);
-            slot->player->reset();
-            slot->validation.failed = true;
+            if (route.renderer != renderer.renderer)
+                continue;
+            if (auto* slot = findSlot(route.playerId);
+                slot != nullptr && !slot->validation.failed)
+            {
+                slot->player->reset();
+                slot->validation.failed = true;
+            }
         }
     }
 }
@@ -198,7 +213,7 @@ std::optional<PlayerId> SequencerEngine::registerPlayer(IPlayer& player)
 
 std::optional<RouteId> SequencerEngine::connect(
     PlayerId playerId,
-    ITransport& transport,
+    IOutputRenderer& renderer,
     RouteMapping mapping)
 {
     if (topologyFrozen_
@@ -207,17 +222,19 @@ std::optional<RouteId> SequencerEngine::connect(
         || std::any_of(
             routes_.begin(),
             routes_.end(),
-            [playerId, &transport](const Route& route)
+            [playerId, &renderer](const Route& route)
             {
                 return route.playerId == playerId
-                    && route.transport == &transport;
+                    && route.renderer == &renderer;
             }))
     {
         return std::nullopt;
     }
 
     const RouteId routeId { static_cast<std::uint32_t>(routes_.size()) };
-    routes_.push_back({ routeId, playerId, &transport, mapping, false });
+    routes_.push_back({ routeId, playerId, &renderer, mapping });
+    if (findRenderer(&renderer) == nullptr)
+        rendererSlots_.push_back({ &renderer, {}, false });
     return routeId;
 }
 
@@ -283,39 +300,17 @@ bool SequencerEngine::playerBlockFailed(PlayerId playerId) const noexcept
     return slot != nullptr && slot->validation.failed;
 }
 
-std::size_t SequencerEngine::firstRouteFor(ITransport* transport) const noexcept
+SequencerEngine::RendererSlot* SequencerEngine::findRenderer(
+    IOutputRenderer* renderer) noexcept
 {
-    for (std::size_t routeIndex = 0; routeIndex < routes_.size(); ++routeIndex)
-        if (routes_[routeIndex].transport == transport)
-            return routeIndex;
-
-    return routes_.size();
-}
-
-void SequencerEngine::resetPlayerOutputs(
-    PlayerId playerId,
-    const TimelineBlock& block) noexcept
-{
-    for (std::size_t routeIndex = 0; routeIndex < routes_.size(); ++routeIndex)
-    {
-        const auto& route = routes_[routeIndex];
-        if (route.playerId != playerId)
-            continue;
-
-        bool alreadyReset = false;
-        for (std::size_t earlier = 0; earlier < routeIndex; ++earlier)
+    const auto found = std::find_if(
+        rendererSlots_.begin(),
+        rendererSlots_.end(),
+        [renderer](const RendererSlot& slot)
         {
-            if (routes_[earlier].playerId == playerId
-                && routes_[earlier].transport == route.transport)
-            {
-                alreadyReset = true;
-                break;
-            }
-        }
-
-        if (!alreadyReset)
-            route.transport->resetOutputs(block);
-    }
+            return slot.renderer == renderer;
+        });
+    return found != rendererSlots_.end() ? &*found : nullptr;
 }
 
 bool SequencerEngine::isSuppressed(
@@ -448,12 +443,13 @@ void SequencerEngine::prepare(const PrepareSpec& spec) noexcept
 {
     topologyFrozen_ = true;
     routedEvents_.reserve(routes_.size() * SequencerEventBuffer::capacity);
+    for (auto& renderer : rendererSlots_)
+        renderer.events.reserve(routes_.size() * SequencerEventBuffer::capacity);
     for (auto& slot : playerSlots_)
         slot.player->prepare(spec);
 
-    for (std::size_t routeIndex = 0; routeIndex < routes_.size(); ++routeIndex)
-        if (firstRouteFor(routes_[routeIndex].transport) == routeIndex)
-            routes_[routeIndex].transport->prepare(spec);
+    for (auto& renderer : rendererSlots_)
+        renderer.renderer->prepare({ spec.sampleRate, spec.maximumBlockSize });
 }
 
 std::optional<std::uint32_t> SequencerEngine::frameOffsetFor(
@@ -498,10 +494,8 @@ void SequencerEngine::reset() noexcept
         slot.player->reset();
     }
 
-    const TimelineBlock emptyBlock;
-    for (std::size_t routeIndex = 0; routeIndex < routes_.size(); ++routeIndex)
-        if (firstRouteFor(routes_[routeIndex].transport) == routeIndex)
-            routes_[routeIndex].transport->resetOutputs(emptyBlock);
+    for (auto& renderer : rendererSlots_)
+        renderer.renderer->resetOutputs();
 }
 
 bool SequencerEngine::topologyFrozen() const noexcept

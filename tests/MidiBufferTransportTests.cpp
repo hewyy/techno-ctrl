@@ -1,4 +1,4 @@
-#include "plugin/MidiBufferTransport.h"
+#include "plugin/MidiBufferRenderer.h"
 
 #include <array>
 #include <cstdint>
@@ -37,21 +37,20 @@ namespace
 void testDistinctDrumNotesUseOneTransportChannel()
 {
     constexpr int drumChannel = 1;
-    lps::MidiBufferTransport transport { drumChannel };
+    lps::MidiBufferRenderer transport { drumChannel };
     transport.prepare({ 48'000.0, 512 });
     juce::MidiBuffer midi;
     transport.setMidiBuffer(midi);
 
-    CHECK(transport.send(routedTrigger(
-        lps::SemanticEventType::triggerStart, 1, 36.0f,
-        100.0f / 127.0f, 0)));
-    CHECK(transport.send(routedTrigger(
-        lps::SemanticEventType::triggerStart, 2, 39.0f,
-        100.0f / 127.0f, 120)));
-    CHECK(transport.send(routedTrigger(
-        lps::SemanticEventType::triggerEnd, 1, 36.0f, 0.0f, 240)));
-    CHECK(transport.send(routedTrigger(
-        lps::SemanticEventType::triggerEnd, 2, 39.0f, 0.0f, 360)));
+    const std::array events {
+        routedTrigger(lps::SemanticEventType::triggerStart, 1, 36.0f,
+            100.0f / 127.0f, 0),
+        routedTrigger(lps::SemanticEventType::triggerStart, 2, 39.0f,
+            100.0f / 127.0f, 120),
+        routedTrigger(lps::SemanticEventType::triggerEnd, 1, 36.0f, 0.0f, 240),
+        routedTrigger(lps::SemanticEventType::triggerEnd, 2, 39.0f, 0.0f, 360)
+    };
+    CHECK(transport.renderBlock({}, { events.data(), events.size() }));
 
     std::vector<juce::MidiMessage> messages;
     std::vector<int> samplePositions;
@@ -81,20 +80,23 @@ void testDistinctDrumNotesUseOneTransportChannel()
 
 void testEightBitVelocityLevelsMapAcrossTheMidiRange()
 {
-    lps::MidiBufferTransport transport;
+    lps::MidiBufferRenderer transport;
     juce::MidiBuffer midi;
     transport.setMidiBuffer(midi);
 
     constexpr std::array<std::uint8_t, 4> levels {255, 100, 225, 150};
-    for (const auto level : levels)
+    std::array<lps::RoutedEvent, levels.size()> events;
+    for (std::size_t index = 0; index < levels.size(); ++index)
     {
-        CHECK(transport.send(routedTrigger(
+        const auto level = levels[index];
+        events[index] = routedTrigger(
             lps::SemanticEventType::triggerStart,
             static_cast<std::uint64_t>(level),
             36.0f,
             static_cast<float>(level) / 255.0f,
-            0)));
+            0);
     }
+    CHECK(transport.renderBlock({}, { events.data(), events.size() }));
 
     constexpr std::array<int, 4> expectedMidiVelocities {127, 50, 112, 75};
     std::size_t index = 0;
@@ -111,7 +113,7 @@ void testEightBitVelocityLevelsMapAcrossTheMidiRange()
 void testResetOutputsSendsMidiPanicAtBlockStart()
 {
     constexpr int midiChannel = 7;
-    lps::MidiBufferTransport transport { midiChannel };
+    lps::MidiBufferRenderer transport { midiChannel };
     juce::MidiBuffer midi;
     transport.setMidiBuffer(midi);
 
@@ -119,10 +121,11 @@ void testResetOutputsSendsMidiPanicAtBlockStart()
     block.tempoBpm = 120.0;
     block.sampleRate = 48'000.0;
     block.sampleCount = 512;
-    CHECK(transport.send(routedTrigger(
-        lps::SemanticEventType::triggerStart, 1, 60.0f, 1.0f, 0)));
+    const auto start = routedTrigger(
+        lps::SemanticEventType::triggerStart, 1, 60.0f, 1.0f, 0);
+    CHECK(transport.renderBlock({}, { &start, 1 }));
 
-    transport.resetOutputs(block);
+    transport.resetOutputs();
 
     CHECK(midi.getNumEvents() == 2);
     auto event = midi.begin();
@@ -133,10 +136,37 @@ void testResetOutputsSendsMidiPanicAtBlockStart()
     CHECK((*event).getMessage().getChannel() == midiChannel);
 }
 
-void testSendReportsMissingDestination()
+void testTriggerEndUsesThePitchRememberedForItsStart()
 {
-    lps::MidiBufferTransport transport;
-    CHECK(!transport.send({}));
+    lps::MidiBufferRenderer renderer;
+    juce::MidiBuffer midi;
+    renderer.setMidiBuffer(midi);
+
+    auto start = routedTrigger(
+        lps::SemanticEventType::triggerStart, 42, 73.0f, 1.0f, 5);
+    auto end = routedTrigger(
+        lps::SemanticEventType::triggerEnd, 42, 0.0f, 0.0f, 9);
+    start.sourcePlayerId = { 3 };
+    start.routeId = { 7 };
+    end.sourcePlayerId = start.sourcePlayerId;
+    end.routeId = start.routeId;
+    end.hasMappedPitch = false;
+    const std::array events { start, end };
+
+    CHECK(renderer.renderBlock({}, { events.data(), events.size() }));
+    CHECK(midi.getNumEvents() == 2);
+    auto event = midi.begin();
+    CHECK((*event).getMessage().isNoteOn());
+    CHECK((*event).getMessage().getNoteNumber() == 73);
+    ++event;
+    CHECK((*event).getMessage().isNoteOff());
+    CHECK((*event).getMessage().getNoteNumber() == 73);
+}
+
+void testRenderReportsMissingDestination()
+{
+    lps::MidiBufferRenderer transport;
+    CHECK(!transport.renderBlock({}, {}));
 }
 }
 
@@ -145,7 +175,8 @@ int main()
     testDistinctDrumNotesUseOneTransportChannel();
     testEightBitVelocityLevelsMapAcrossTheMidiRange();
     testResetOutputsSendsMidiPanicAtBlockStart();
-    testSendReportsMissingDestination();
+    testTriggerEndUsesThePitchRememberedForItsStart();
+    testRenderReportsMissingDestination();
     std::cout << "All MIDI buffer transport tests passed.\n";
     return 0;
 }
