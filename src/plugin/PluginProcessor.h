@@ -3,6 +3,7 @@
 #include "core/PatternLibrary.h"
 #include "core/SequencerEngine.h"
 #include "core/PatternPlayer.h"
+#include "core/PulsePlayer.h"
 #include "core/VelocityModulationLibrary.h"
 #include "plugin/MidiBufferRenderer.h"
 #include "plugin/PatternLibraryFileStore.h"
@@ -88,6 +89,12 @@ public:
     [[nodiscard]] bool playingForUi() const noexcept;
     [[nodiscard]] lps::PatternView patternForUi(std::size_t playerIndex = 0) const noexcept;
     [[nodiscard]] juce::String playerNameForUi(std::size_t playerIndex) const;
+    [[nodiscard]] bool playerSupportsPatternEditingForUi(
+        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] bool playerSupportsVelocityEditingForUi(
+        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] bool playerCanResetToMasterForUi(
+        std::size_t playerIndex) const noexcept;
     [[nodiscard]] int playerMidiNoteForUi(std::size_t playerIndex) const noexcept;
     [[nodiscard]] int drumMidiChannelForUi() const noexcept;
     [[nodiscard]] std::size_t patternCountForUi() const noexcept;
@@ -157,9 +164,27 @@ public:
 private:
     static constexpr int drumMidiChannel = 1;
 
+    struct PlayerDescriptor
+    {
+        juce::String name;
+        int midiNote = -1;
+        bool supportsVelocityEditing = false;
+    };
+
+    struct PlayerBundle
+    {
+        std::unique_ptr<lps::IPlayer> realtime;
+        PlayerDescriptor descriptor;
+        lps::PatternPlayer* patternController = nullptr;
+        lps::IPatternEditorModel* patternModel = nullptr;
+        lps::IModulationEditorModel* modulationModel = nullptr;
+    };
+
     void updateUiSnapshot() noexcept;
-    [[nodiscard]] lps::PatternPlayer* playerAt(std::size_t playerIndex) noexcept;
-    [[nodiscard]] const lps::PatternPlayer* playerAt(std::size_t playerIndex) const noexcept;
+    [[nodiscard]] lps::PatternPlayer* patternPlayerAt(
+        std::size_t playerIndex) noexcept;
+    [[nodiscard]] const lps::PatternPlayer* patternPlayerAt(
+        std::size_t playerIndex) const noexcept;
 
     // The library must outlive every player because players keep a read-only
     // reference to its immutable, append-only entries.
@@ -167,8 +192,7 @@ private:
     lps::VelocityModulationLibrary velocityModulationLibrary_;
     PatternLibraryFileStore patternLibraryFileStore_;
     VelocityModulationLibraryFileStore velocityModulationLibraryFileStore_;
-    std::vector<juce::String> playerNames_;
-    std::vector<std::unique_ptr<lps::PatternPlayer>> players_;
+    std::vector<PlayerBundle> players_;
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
     std::unique_ptr<lps::SequencerEngine> engine_;
 

@@ -125,6 +125,10 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
 
     for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
     {
+        const bool supportsPattern =
+            processor_.playerSupportsPatternEditingForUi(playerIndex);
+        const bool supportsVelocity =
+            processor_.playerSupportsVelocityEditingForUi(playerIndex);
         patternSelectors_.push_back(std::make_unique<juce::ComboBox>());
         auto& selector = *patternSelectors_.back();
         for (std::size_t patternIndex = 0;
@@ -162,7 +166,8 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         auto& resetButton = *resetToMasterButtons_.back();
         const bool isMaster = processor_.playerIsMasterForUi(playerIndex);
         resetButton.setButtonText(isMaster ? "MASTER" : "Reset");
-        resetButton.setEnabled(!isMaster);
+        resetButton.setEnabled(!isMaster
+            && processor_.playerCanResetToMasterForUi(playerIndex));
         if (isMaster)
         {
             resetButton.setTooltip(
@@ -399,8 +404,18 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
                     content_.repaint();
                 };
             content_.addAndMakeVisible(slider);
-            slider.setVisible(step < modulation.length);
+            slider.setVisible(supportsVelocity && step < modulation.length);
         }
+
+        selector.setVisible(supportsPattern);
+        saveButton.setVisible(supportsPattern);
+        speedSelector.setVisible(supportsPattern);
+        offsetLeftButton.setVisible(supportsPattern);
+        offsetRightButton.setVisible(supportsPattern);
+        velocitySelector.setVisible(supportsVelocity);
+        velocitySaveButton.setVisible(supportsVelocity);
+        decreaseLengthButton.setVisible(supportsVelocity);
+        increaseLengthButton.setVisible(supportsVelocity);
     }
 
     for (std::size_t row = 0; row < playerCount_; ++row)
@@ -823,6 +838,8 @@ void LivePatternSequencerEditor::refreshPatternSelectors()
          playerIndex < patternSelectors_.size();
          ++playerIndex)
     {
+        if (!processor_.playerSupportsPatternEditingForUi(playerIndex))
+            continue;
         auto& selector = *patternSelectors_[playerIndex];
         selector.clear(juce::dontSendNotification);
         for (std::size_t patternIndex = 0;
@@ -846,6 +863,8 @@ void LivePatternSequencerEditor::refreshVelocityModulationSelectors()
          playerIndex < velocityModulationSelectors_.size();
          ++playerIndex)
     {
+        if (!processor_.playerSupportsVelocityEditingForUi(playerIndex))
+            continue;
         auto& selector = *velocityModulationSelectors_[playerIndex];
         selector.clear(juce::dontSendNotification);
         for (std::size_t modulationIndex = 0;
@@ -869,6 +888,7 @@ void LivePatternSequencerEditor::refreshVelocityModulationControls(
     bool force)
 {
     if (playerIndex >= playerCount_
+        || !processor_.playerSupportsVelocityEditingForUi(playerIndex)
         || playerIndex >= decreaseVelocityModulationLengthButtons_.size()
         || playerIndex >= increaseVelocityModulationLengthButtons_.size())
     {
@@ -913,6 +933,8 @@ void LivePatternSequencerEditor::updatePatternModifiedIndicators(bool force)
          playerIndex < savePatternButtons_.size();
          ++playerIndex)
     {
+        if (!processor_.playerSupportsPatternEditingForUi(playerIndex))
+            continue;
         const bool modified = processor_.playerPatternModifiedForUi(playerIndex);
         if (!force && displayedPatternModified_[playerIndex] == modified)
             continue;
@@ -952,6 +974,8 @@ void LivePatternSequencerEditor::updateVelocityModulationModifiedIndicators(
          playerIndex < saveVelocityModulationButtons_.size();
          ++playerIndex)
     {
+        if (!processor_.playerSupportsVelocityEditingForUi(playerIndex))
+            continue;
         const bool modified =
             processor_.playerVelocityModulationModifiedForUi(playerIndex);
         if (!force
@@ -1167,6 +1191,8 @@ void LivePatternSequencerEditor::contentMouseDown(const juce::MouseEvent& event)
 {
     for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
     {
+        if (!processor_.playerSupportsPatternEditingForUi(playerIndex))
+            continue;
         const auto cells = cellsAreaForPlayer(playerIndex);
         const int pitch = cellWidth() + patternCellGap;
         const int startX = cells.getX()
@@ -1310,39 +1336,53 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
         const int currentStep = processor_.currentStepForUi(playerIndex);
         graphics.setFont(juce::Font(juce::FontOptions(8.5f, juce::Font::bold)));
 
-        for (std::uint16_t step = 0;
-             step < static_cast<std::uint16_t>(lps::Pattern::maxLength);
-             ++step)
+        const bool supportsPattern =
+            processor_.playerSupportsPatternEditingForUi(playerIndex);
+        if (!supportsPattern)
         {
-            auto cell = cellsArea.removeFromLeft(patternCellWidth);
-            const bool isCurrent = playing && static_cast<int>(step) == currentStep;
-            const bool isHit = pattern.isHit(step);
-            const bool isInsideWindow = pattern.isInsidePlaybackWindow(step);
-            auto fillColour = juce::Colour(isHit ? cyan : inactive);
-            if (!isInsideWindow)
-                fillColour = fillColour.withMultipliedAlpha(0.28f);
-            graphics.setColour(fillColour);
-            graphics.fillRoundedRectangle(cell.toFloat(), 2.0f);
-            const auto cellBorder = step % 4 == 0
-                ? juce::Colour(border).brighter(0.22f)
-                : juce::Colour(border);
-            graphics.setColour(cellBorder);
-            graphics.drawRoundedRectangle(cell.toFloat(), 2.0f, 1.0f);
-
-            if (isCurrent)
+            graphics.setColour(juce::Colour(secondaryText));
+            graphics.drawFittedText(
+                "PERIODIC PULSE — NO PATTERN EDITOR",
+                cellsArea,
+                juce::Justification::centredLeft,
+                1);
+        }
+        else
+        {
+            for (std::uint16_t step = 0;
+                 step < static_cast<std::uint16_t>(lps::Pattern::maxLength);
+                 ++step)
             {
-                const auto playheadBar = cell.reduced(3, 0).removeFromBottom(3);
-                graphics.setColour(juce::Colour(amber));
-                graphics.fillRoundedRectangle(playheadBar.toFloat(), 1.5f);
-            }
+                auto cell = cellsArea.removeFromLeft(patternCellWidth);
+                const bool isCurrent = playing && static_cast<int>(step) == currentStep;
+                const bool isHit = pattern.isHit(step);
+                const bool isInsideWindow = pattern.isInsidePlaybackWindow(step);
+                auto fillColour = juce::Colour(isHit ? cyan : inactive);
+                if (!isInsideWindow)
+                    fillColour = fillColour.withMultipliedAlpha(0.28f);
+                graphics.setColour(fillColour);
+                graphics.fillRoundedRectangle(cell.toFloat(), 2.0f);
+                const auto cellBorder = step % 4 == 0
+                    ? juce::Colour(border).brighter(0.22f)
+                    : juce::Colour(border);
+                graphics.setColour(cellBorder);
+                graphics.drawRoundedRectangle(cell.toFloat(), 2.0f, 1.0f);
 
-            auto textColour = juce::Colour(isHit ? primaryText : secondaryText);
-            if (!isInsideWindow)
-                textColour = textColour.withMultipliedAlpha(0.38f);
-            graphics.setColour(textColour);
-            graphics.drawText(juce::String(static_cast<int>(step + 1)), cell,
-                juce::Justification::centred);
-            cellsArea.removeFromLeft(patternCellGap);
+                if (isCurrent)
+                {
+                    const auto playheadBar = cell.reduced(3, 0).removeFromBottom(3);
+                    graphics.setColour(juce::Colour(amber));
+                    graphics.fillRoundedRectangle(playheadBar.toFloat(), 1.5f);
+                }
+
+                auto textColour = juce::Colour(isHit ? primaryText : secondaryText);
+                if (!isInsideWindow)
+                    textColour = textColour.withMultipliedAlpha(0.38f);
+                graphics.setColour(textColour);
+                graphics.drawText(juce::String(static_cast<int>(step + 1)), cell,
+                    juce::Justification::centred);
+                cellsArea.removeFromLeft(patternCellGap);
+            }
         }
 
         graphics.setColour(juce::Colour(panel));
@@ -1350,12 +1390,15 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
         graphics.setColour(juce::Colour(border));
         graphics.drawRoundedRectangle(velocityPanel.toFloat(), 3.0f, 1.0f);
 
-        const auto velocityModulation =
-            processor_.velocityModulationForUi(playerIndex);
+        const bool supportsVelocity =
+            processor_.playerSupportsVelocityEditingForUi(playerIndex);
+        const auto velocityModulation = supportsVelocity
+            ? processor_.velocityModulationForUi(playerIndex)
+            : lps::VelocityModulation {};
         graphics.setColour(juce::Colour(cyan));
         graphics.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
         graphics.drawFittedText(
-            "VELOCITY",
+            supportsVelocity ? "VELOCITY" : "MODULATION",
             velocityPanel.getX() + playerPanelHorizontalPadding,
             velocityPanel.getY() + 12,
             64,
@@ -1366,8 +1409,10 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
         graphics.setColour(juce::Colour(secondaryText));
         graphics.setFont(juce::Font(juce::FontOptions(9.0f)));
         graphics.drawFittedText(
-            juce::String(static_cast<int>(velocityModulation.length))
-                + (velocityModulation.length == 1 ? " HIT" : " HITS"),
+            supportsVelocity
+                ? juce::String(static_cast<int>(velocityModulation.length))
+                    + (velocityModulation.length == 1 ? " HIT" : " HITS")
+                : juce::String("RUNTIME LANE"),
             velocityPanel.getX() + playerPanelHorizontalPadding,
             velocityPanel.getY() + 35,
             64,
@@ -1400,7 +1445,7 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
             graphics.fillRoundedRectangle(playheadBar.toFloat(), 1.5f);
         }
 
-        if (pattern.stepCount == 0)
+        if (!supportsPattern || pattern.stepCount == 0)
             continue;
 
         const auto bracketArea = cellsAreaForPlayer(playerIndex);

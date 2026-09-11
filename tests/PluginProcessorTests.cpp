@@ -678,6 +678,28 @@ void testOversizedInt64SchemaVersionIsRejectedAndPreserved()
     CHECK(processor.patternCatalogErrorForUi().isNotEmpty());
     CHECK(catalog.file().loadFileAsString() == originalContents);
 }
+
+void testMixedPlayerCapabilitiesAreExposedWithoutConcreteAssumptions()
+{
+    TemporaryPatternCatalog catalog;
+    LivePatternSequencerProcessor processor(catalog.file());
+    CHECK(processor.playerCountForUi() > 1);
+
+    const auto patternIndex = std::size_t { 0 };
+    const auto pulseIndex = processor.playerCountForUi() - 1;
+    CHECK(processor.playerSupportsPatternEditingForUi(patternIndex));
+    CHECK(processor.playerSupportsVelocityEditingForUi(patternIndex));
+    CHECK(processor.playerCanResetToMasterForUi(patternIndex));
+
+    CHECK(processor.playerNameForUi(pulseIndex) == "Pulse");
+    CHECK(!processor.playerSupportsPatternEditingForUi(pulseIndex));
+    CHECK(!processor.playerSupportsVelocityEditingForUi(pulseIndex));
+    CHECK(!processor.playerCanResetToMasterForUi(pulseIndex));
+    CHECK(processor.patternForUi(pulseIndex).stepCount == 0);
+    CHECK(processor.savePlayerPattern(pulseIndex).status
+        == LivePatternSequencerProcessor::SavePatternStatus::failed);
+    CHECK(!processor.resetPlayerToMaster(pulseIndex));
+}
 } // namespace
 
 int main()
@@ -697,6 +719,7 @@ int main()
     testConcurrentProcessorSnapshotsMergeDistinctSavesWithoutLoss();
     testSimultaneousDistinctSavesFromStaleProcessorsAreBothRestored();
     testOversizedInt64SchemaVersionIsRejectedAndPreserved();
+    testMixedPlayerCapabilitiesAreExposedWithoutConcreteAssumptions();
     std::cout << "All plugin processor tests passed.\n";
     return EXIT_SUCCESS;
 }

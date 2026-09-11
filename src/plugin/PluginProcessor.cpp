@@ -72,10 +72,11 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     (void) velocityModulationLibraryFileStore_.loadOrCreate(
         velocityModulationLibrary_);
 
-    playerNames_.reserve(defaultDrumVoices.size());
-    players_.reserve(defaultDrumVoices.size());
-    currentSteps_.reserve(defaultDrumVoices.size());
-    currentVelocityModulationSteps_.reserve(defaultDrumVoices.size());
+    constexpr std::size_t additionalPulsePlayers = 1;
+    const auto totalPlayerCount = defaultDrumVoices.size() + additionalPulsePlayers;
+    players_.reserve(totalPlayerCount);
+    currentSteps_.reserve(totalPlayerCount);
+    currentVelocityModulationSteps_.reserve(totalPlayerCount);
 
     for (std::size_t index = 0; index < defaultDrumVoices.size(); ++index)
     {
@@ -87,7 +88,8 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))
                 player->selectPattern(pattern->id);
         }
-        const auto playerId = engine_->registerPlayer(*player);
+        auto* patternController = player.get();
+        const auto playerId = engine_->registerPlayer(*patternController);
         jassert(playerId.has_value());
         const auto routeId = playerId.has_value()
             ? engine_->connect(
@@ -99,12 +101,52 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         jassert(routeId.has_value());
         (void) routeId;
 
-        playerNames_.emplace_back(voice.name);
-        players_.push_back(std::move(player));
+        PlayerBundle bundle;
+        bundle.descriptor = { voice.name, voice.midiNote, true };
+        bundle.patternController = patternController;
+        bundle.patternModel = patternController;
+        bundle.modulationModel = patternController;
+        bundle.realtime = std::move(player);
+        players_.push_back(std::move(bundle));
         currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
         currentVelocityModulationSteps_.push_back(
             std::make_unique<std::atomic<int>>(-1));
     }
+
+    auto pulse = std::make_unique<lps::PulsePlayer>(0.5, 0.5);
+    lps::ModulationLaneState pulseIntensity;
+    if (const auto* modulation = velocityModulationLibrary_.recordAt(0))
+    {
+        pulseIntensity.length = static_cast<std::uint8_t>(std::min<std::size_t>(
+            modulation->modulation.length, pulseIntensity.values.size()));
+        for (std::size_t step = 0; step < pulseIntensity.length; ++step)
+        {
+            pulseIntensity.values[step] = lps::NormalizedValue::fromUnipolar8(
+                modulation->modulation.values[step]);
+        }
+    }
+    pulse->publishModulationState(pulseIntensity);
+    auto* pulseController = pulse.get();
+    const auto pulseId = engine_->registerPlayer(*pulseController);
+    jassert(pulseId.has_value());
+    constexpr int pulseMidiNote = 46;
+    const auto pulseRoute = pulseId.has_value()
+        ? engine_->connect(
+            *pulseId,
+            *drumRenderer_,
+            lps::RouteMapping::fixedPitch(static_cast<float>(pulseMidiNote)))
+        : std::nullopt;
+    jassert(pulseRoute.has_value());
+    (void) pulseRoute;
+
+    PlayerBundle pulseBundle;
+    pulseBundle.descriptor = { "Pulse", pulseMidiNote, false };
+    pulseBundle.modulationModel = pulseController;
+    pulseBundle.realtime = std::move(pulse);
+    players_.push_back(std::move(pulseBundle));
+    currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
+    currentVelocityModulationSteps_.push_back(
+        std::make_unique<std::atomic<int>>(-1));
 
     const auto masterId = engine_->playerIdAt(configuredMasterIndex());
     const bool masterConfigured = masterId.has_value()
@@ -273,21 +315,46 @@ bool LivePatternSequencerProcessor::playingForUi() const noexcept
 
 lps::PatternView LivePatternSequencerProcessor::patternForUi(std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
-    return player != nullptr ? player->patternView() : lps::PatternView {};
+    const auto* model = playerIndex < players_.size()
+        ? players_[playerIndex].patternModel
+        : nullptr;
+    return model != nullptr ? model->patternView() : lps::PatternView {};
 }
 
 juce::String LivePatternSequencerProcessor::playerNameForUi(std::size_t playerIndex) const
 {
-    return playerIndex < playerNames_.size()
-        ? playerNames_[playerIndex]
+    return playerIndex < players_.size()
+        ? players_[playerIndex].descriptor.name
         : juce::String {};
+}
+
+bool LivePatternSequencerProcessor::playerSupportsPatternEditingForUi(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        && players_[playerIndex].patternController != nullptr
+        && players_[playerIndex].patternModel != nullptr;
+}
+
+bool LivePatternSequencerProcessor::playerSupportsVelocityEditingForUi(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        && players_[playerIndex].descriptor.supportsVelocityEditing;
+}
+
+bool LivePatternSequencerProcessor::playerCanResetToMasterForUi(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        && players_[playerIndex].realtime != nullptr
+        && players_[playerIndex].realtime->syncCapabilities().acceptsExternalRestart;
 }
 
 int LivePatternSequencerProcessor::playerMidiNoteForUi(std::size_t playerIndex) const noexcept
 {
-    return playerIndex < defaultDrumVoices.size()
-        ? static_cast<int>(defaultDrumVoices[playerIndex].midiNote)
+    return playerIndex < players_.size()
+        ? players_[playerIndex].descriptor.midiNote
         : -1;
 }
 
@@ -316,7 +383,7 @@ juce::String LivePatternSequencerProcessor::patternCatalogErrorForUi() const
 bool LivePatternSequencerProcessor::playerPatternModifiedForUi(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr && player->hasUnsavedPatternChanges();
 }
 
@@ -325,7 +392,7 @@ LivePatternSequencerProcessor::savePlayerPattern(
     std::size_t playerIndex,
     const juce::String& name)
 {
-    auto* player = playerAt(playerIndex);
+    auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr)
         return {};
 
@@ -338,7 +405,7 @@ LivePatternSequencerProcessor::savePlayerPattern(
     const lps::Pattern& candidatePattern,
     const juce::String& name)
 {
-    auto* player = playerAt(playerIndex);
+    auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr
         || candidatePattern.length == 0
         || candidatePattern.length > lps::Pattern::maxLength)
@@ -400,22 +467,26 @@ LivePatternSequencerProcessor::savePlayerPattern(
     }
 }
 
-lps::PatternPlayer* LivePatternSequencerProcessor::playerAt(std::size_t playerIndex) noexcept
+lps::PatternPlayer* LivePatternSequencerProcessor::patternPlayerAt(std::size_t playerIndex) noexcept
 {
-    return playerIndex < players_.size() ? players_[playerIndex].get() : nullptr;
+    return playerIndex < players_.size()
+        ? players_[playerIndex].patternController
+        : nullptr;
 }
 
-const lps::PatternPlayer* LivePatternSequencerProcessor::playerAt(
+const lps::PatternPlayer* LivePatternSequencerProcessor::patternPlayerAt(
     std::size_t playerIndex) const noexcept
 {
-    return playerIndex < players_.size() ? players_[playerIndex].get() : nullptr;
+    return playerIndex < players_.size()
+        ? players_[playerIndex].patternController
+        : nullptr;
 }
 
 void LivePatternSequencerProcessor::selectPatternForPlayer(
     std::size_t playerIndex,
     std::size_t patternIndex) noexcept
 {
-    auto* player = playerAt(playerIndex);
+    auto* player = patternPlayerAt(playerIndex);
     const auto* pattern = patternLibrary_.recordAt(patternIndex);
     if (player != nullptr && pattern != nullptr)
         player->selectPattern(pattern->id);
@@ -424,7 +495,7 @@ void LivePatternSequencerProcessor::selectPatternForPlayer(
 std::size_t LivePatternSequencerProcessor::selectedPatternForPlayer(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr)
         return 0;
 
@@ -433,30 +504,30 @@ std::size_t LivePatternSequencerProcessor::selectedPatternForPlayer(
 
 void LivePatternSequencerProcessor::offsetPlayerPatternLeft(std::size_t playerIndex) noexcept
 {
-    if (auto* player = playerAt(playerIndex)) player->offsetPatternLeft();
+    if (auto* player = patternPlayerAt(playerIndex)) player->offsetPatternLeft();
 }
 
 void LivePatternSequencerProcessor::offsetPlayerPatternRight(std::size_t playerIndex) noexcept
 {
-    if (auto* player = playerAt(playerIndex)) player->offsetPatternRight();
+    if (auto* player = patternPlayerAt(playerIndex)) player->offsetPatternRight();
 }
 
 int LivePatternSequencerProcessor::playerPatternOffset(std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr ? player->patternOffset() : 0;
 }
 
 void LivePatternSequencerProcessor::setPlayerPlaybackSpeed(
     std::size_t playerIndex, std::size_t speedIndex) noexcept
 {
-    if (auto* player = playerAt(playerIndex)) player->setPlaybackSpeed(speedIndex);
+    if (auto* player = patternPlayerAt(playerIndex)) player->setPlaybackSpeed(speedIndex);
 }
 
 std::size_t LivePatternSequencerProcessor::playerPlaybackSpeed(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr ? player->playbackSpeed() : 1;
 }
 
@@ -465,20 +536,20 @@ void LivePatternSequencerProcessor::setPlayerPlaybackWindow(
     std::size_t startStep,
     std::size_t endStep) noexcept
 {
-    if (auto* player = playerAt(playerIndex)) player->setPlaybackWindow(startStep, endStep);
+    if (auto* player = patternPlayerAt(playerIndex)) player->setPlaybackWindow(startStep, endStep);
 }
 
 std::size_t LivePatternSequencerProcessor::playerPlaybackStart(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr ? player->requestedPlaybackStart() : 0;
 }
 
 std::size_t LivePatternSequencerProcessor::playerPlaybackEnd(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr ? player->requestedPlaybackEnd() : 0;
 }
 
@@ -486,7 +557,7 @@ void LivePatternSequencerProcessor::togglePlayerStep(
     std::size_t playerIndex,
     std::size_t step) noexcept
 {
-    if (auto* player = playerAt(playerIndex))
+    if (auto* player = patternPlayerAt(playerIndex))
         player->toggleStep(step);
 }
 
@@ -513,7 +584,7 @@ LivePatternSequencerProcessor::velocityModulationCatalogErrorForUi() const
 lps::VelocityModulation LivePatternSequencerProcessor::velocityModulationForUi(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr
         ? player->velocityModulationForUi()
         : lps::VelocityModulation {};
@@ -522,7 +593,7 @@ lps::VelocityModulation LivePatternSequencerProcessor::velocityModulationForUi(
 bool LivePatternSequencerProcessor::playerVelocityModulationModifiedForUi(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr
         && player->hasUnsavedVelocityModulationChanges();
 }
@@ -532,7 +603,7 @@ LivePatternSequencerProcessor::savePlayerVelocityModulation(
     std::size_t playerIndex,
     const juce::String& name)
 {
-    auto* player = playerAt(playerIndex);
+    auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr)
         return {};
 
@@ -546,7 +617,7 @@ LivePatternSequencerProcessor::savePlayerVelocityModulation(
     const lps::VelocityModulation& candidateModulation,
     const juce::String& name)
 {
-    auto* player = playerAt(playerIndex);
+    auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr
         || candidateModulation.length == 0
         || candidateModulation.length > lps::VelocityModulation::maxLength)
@@ -615,7 +686,7 @@ void LivePatternSequencerProcessor::selectVelocityModulationForPlayer(
     std::size_t playerIndex,
     std::size_t modulationIndex) noexcept
 {
-    auto* player = playerAt(playerIndex);
+    auto* player = patternPlayerAt(playerIndex);
     const auto* modulation = velocityModulationLibrary_.recordAt(modulationIndex);
     if (player != nullptr && modulation != nullptr)
         player->selectVelocityModulation(modulation->id);
@@ -624,7 +695,7 @@ void LivePatternSequencerProcessor::selectVelocityModulationForPlayer(
 std::size_t LivePatternSequencerProcessor::selectedVelocityModulationForPlayer(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = playerAt(playerIndex);
+    const auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr)
         return 0;
 
@@ -637,7 +708,7 @@ void LivePatternSequencerProcessor::setPlayerVelocityModulationValue(
     std::size_t step,
     std::uint8_t value) noexcept
 {
-    if (auto* player = playerAt(playerIndex))
+    if (auto* player = patternPlayerAt(playerIndex))
         player->setVelocityModulationValue(step, value);
 }
 
@@ -645,7 +716,7 @@ void LivePatternSequencerProcessor::setPlayerVelocityModulationLength(
     std::size_t playerIndex,
     std::size_t length) noexcept
 {
-    if (auto* player = playerAt(playerIndex))
+    if (auto* player = patternPlayerAt(playerIndex))
         player->setVelocityModulationLength(length);
 }
 
@@ -691,12 +762,14 @@ void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
 
     for (std::size_t index = 0; index < currentSteps_.size(); ++index)
     {
-        const auto* player = playerAt(index);
-        if (player == nullptr)
-            continue;
-
-        const auto patternSnapshot = player->patternPlaybackSnapshot();
-        const auto modulationSnapshot = player->modulationPlaybackSnapshot();
+        const auto* pattern = players_[index].patternModel;
+        const auto* modulation = players_[index].modulationModel;
+        const auto patternSnapshot = pattern != nullptr
+            ? pattern->patternPlaybackSnapshot()
+            : lps::PatternPlaybackSnapshot {};
+        const auto modulationSnapshot = modulation != nullptr
+            ? modulation->modulationPlaybackSnapshot()
+            : lps::ModulationPlaybackSnapshot {};
         currentSteps_[index]->store(
             patternSnapshot.currentStep, std::memory_order_relaxed);
         currentVelocityModulationSteps_[index]->store(
