@@ -11,6 +11,19 @@
 namespace lps
 {
 
+struct PulsePlayerPersistentState
+{
+    double periodPpq = 0.5;
+    double gateRatio = 0.5;
+    bool hasBasePitch = false;
+    float basePitchSemitones = 0.0f;
+    std::array<ModulationLaneDefinition, ModulationBank::maximumLaneCount>
+        laneDefinitions {};
+    std::array<ModulationLaneState, ModulationBank::maximumLaneCount>
+        laneStates {};
+    std::uint8_t laneCount = 0;
+};
+
 class PulsePlayer final : public IPlayer, public IModulationEditorModel
 {
 public:
@@ -24,6 +37,10 @@ public:
         LaneId laneId,
         const ModulationLaneState& state) noexcept;
     void setBasePitch(std::optional<float> semitones) noexcept;
+    [[nodiscard]] PulsePlayerPersistentState capturePersistentState()
+        const noexcept;
+    [[nodiscard]] bool restorePersistentState(
+        const PulsePlayerPersistentState& state) noexcept;
 
     void prepare(const PrepareSpec& spec) noexcept override;
     void reset() noexcept override;

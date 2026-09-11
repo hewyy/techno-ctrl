@@ -173,9 +173,12 @@ private:
 
     struct PlayerDescriptor
     {
+        enum class Type { pattern, pulse };
+
         juce::String name;
         int midiNote = -1;
         bool supportsVelocityEditing = false;
+        Type type = Type::pattern;
     };
 
     struct PlayerBundle
@@ -183,8 +186,11 @@ private:
         std::unique_ptr<lps::IPlayer> realtime;
         PlayerDescriptor descriptor;
         lps::PatternPlayer* patternController = nullptr;
+        lps::PulsePlayer* pulseController = nullptr;
         lps::IPatternEditorModel* patternModel = nullptr;
         lps::IModulationEditorModel* modulationModel = nullptr;
+        lps::RouteId midiRouteId;
+        lps::RouteId cvRouteId;
     };
 
     void updateUiSnapshot() noexcept;

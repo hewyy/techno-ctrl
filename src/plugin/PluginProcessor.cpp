@@ -121,10 +121,17 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         (void) cvConfigured;
 
         PlayerBundle bundle;
-        bundle.descriptor = { voice.name, voice.midiNote, true };
+        bundle.descriptor = {
+            voice.name,
+            voice.midiNote,
+            true,
+            PlayerDescriptor::Type::pattern
+        };
         bundle.patternController = patternController;
         bundle.patternModel = patternController;
         bundle.modulationModel = patternController;
+        bundle.midiRouteId = routeId.value_or(lps::RouteId {});
+        bundle.cvRouteId = cvRouteId.value_or(lps::RouteId {});
         bundle.realtime = std::move(player);
         players_.push_back(std::move(bundle));
         currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
@@ -173,8 +180,16 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     (void) pulseCvConfigured;
 
     PlayerBundle pulseBundle;
-    pulseBundle.descriptor = { "Pulse", pulseMidiNote, false };
+    pulseBundle.descriptor = {
+        "Pulse",
+        pulseMidiNote,
+        false,
+        PlayerDescriptor::Type::pulse
+    };
+    pulseBundle.pulseController = pulseController;
     pulseBundle.modulationModel = pulseController;
+    pulseBundle.midiRouteId = pulseRoute.value_or(lps::RouteId {});
+    pulseBundle.cvRouteId = pulseCvRoute.value_or(lps::RouteId {});
     pulseBundle.realtime = std::move(pulse);
     players_.push_back(std::move(pulseBundle));
     currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
@@ -285,14 +300,557 @@ juce::AudioProcessorEditor* LivePatternSequencerProcessor::createEditor()
     return new LivePatternSequencerEditor(*this);
 }
 
-void LivePatternSequencerProcessor::getStateInformation(juce::MemoryBlock&)
+void LivePatternSequencerProcessor::getStateInformation(juce::MemoryBlock& destination)
 {
-    // Plugin state persistence is not implemented in this MVP.
+    auto root = juce::DynamicObject::Ptr(new juce::DynamicObject());
+    root->setProperty("format", "live-pattern-sequencer-state");
+    root->setProperty("schemaVersion", 2);
+    root->setProperty(
+        "masterPlayerId",
+        static_cast<juce::int64>(engine_->masterPlayerId().value_or(
+            lps::PlayerId {}).value));
+
+    juce::Array<juce::var> serializedPlayers;
+    for (std::size_t index = 0; index < players_.size(); ++index)
+    {
+        const auto& bundle = players_[index];
+        auto object = juce::DynamicObject::Ptr(new juce::DynamicObject());
+        object->setProperty("id", static_cast<juce::int64>(index));
+        object->setProperty(
+            "type",
+            bundle.descriptor.type == PlayerDescriptor::Type::pattern
+                ? "pattern" : "pulse");
+        object->setProperty("name", bundle.descriptor.name);
+        object->setProperty("midiNote", bundle.descriptor.midiNote);
+        object->setProperty("muted", playerMutedForUi(index));
+
+        juce::Array<juce::var> routes;
+        auto midiRoute = juce::DynamicObject::Ptr(new juce::DynamicObject());
+        midiRoute->setProperty("renderer", "midi");
+        midiRoute->setProperty(
+            "routeId", static_cast<juce::int64>(bundle.midiRouteId.value));
+        midiRoute->setProperty("fixedPitch", bundle.descriptor.midiNote);
+        routes.add(juce::var(midiRoute.get()));
+        auto cvRoute = juce::DynamicObject::Ptr(new juce::DynamicObject());
+        cvRoute->setProperty("renderer", "cv");
+        cvRoute->setProperty(
+            "routeId", static_cast<juce::int64>(bundle.cvRouteId.value));
+        const auto channel = static_cast<int>(index) * cvChannelsPerPlayer;
+        cvRoute->setProperty("gateChannel", channel);
+        cvRoute->setProperty("pitchChannel", channel + 1);
+        cvRoute->setProperty("controlChannel", channel + 2);
+        routes.add(juce::var(cvRoute.get()));
+        object->setProperty("routes", routes);
+
+        juce::Array<juce::var> lanes;
+        const auto serializeLane = [&lanes](
+            const lps::ModulationLaneDefinition& definition,
+            const lps::ModulationLaneState& state,
+            std::optional<lps::VelocityModulationId> legacyPreset)
+        {
+            auto lane = juce::DynamicObject::Ptr(new juce::DynamicObject());
+            lane->setProperty("id", static_cast<int>(definition.id.value));
+            lane->setProperty("target", static_cast<int>(definition.target));
+            lane->setProperty("advanceOn", static_cast<int>(definition.advanceOn));
+            lane->setProperty("resetOn", static_cast<int>(definition.resetOn));
+            lane->setProperty("minimum", definition.mapping.minimum);
+            lane->setProperty("maximum", definition.mapping.maximum);
+            lane->setProperty("combine", static_cast<int>(definition.mapping.combine));
+            lane->setProperty("logicalControl", definition.logicalControl);
+            lane->setProperty("length", static_cast<int>(state.length));
+            if (legacyPreset.has_value())
+            {
+                lane->setProperty(
+                    "legacyVelocityPresetId",
+                    static_cast<juce::int64>(legacyPreset->value()));
+            }
+            juce::Array<juce::var> values;
+            for (std::size_t step = 0; step < state.length; ++step)
+                values.add(static_cast<int>(state.values[step].raw));
+            lane->setProperty("values", values);
+            lanes.add(juce::var(lane.get()));
+        };
+
+        if (bundle.patternController != nullptr)
+        {
+            const auto state = bundle.patternController->capturePersistentState();
+            auto pattern = juce::DynamicObject::Ptr(new juce::DynamicObject());
+            pattern->setProperty(
+                "patternId", static_cast<juce::int64>(state.patternId.value()));
+            pattern->setProperty("hitMask", static_cast<juce::int64>(state.hitMask));
+            pattern->setProperty("offset", state.patternOffset);
+            pattern->setProperty("playbackStart", state.playbackStart);
+            pattern->setProperty("playbackEnd", state.playbackEnd);
+            pattern->setProperty("playbackSpeed", state.playbackSpeed);
+            object->setProperty("pattern", juce::var(pattern.get()));
+
+            lps::ModulationLaneState laneState;
+            laneState.length = static_cast<std::uint8_t>(state.velocityModulation.length);
+            for (std::size_t step = 0; step < laneState.length; ++step)
+            {
+                laneState.values[step] = lps::NormalizedValue::fromUnipolar8(
+                    state.velocityModulation.values[step]);
+            }
+            serializeLane(
+                lps::makeIntensityLaneDefinition(),
+                laneState,
+                state.velocityModulationId);
+        }
+        else if (bundle.pulseController != nullptr)
+        {
+            const auto state = bundle.pulseController->capturePersistentState();
+            object->setProperty("periodPpq", state.periodPpq);
+            object->setProperty("gateRatio", state.gateRatio);
+            if (state.hasBasePitch)
+                object->setProperty("basePitch", state.basePitchSemitones);
+            for (std::size_t lane = 0; lane < state.laneCount; ++lane)
+                serializeLane(
+                    state.laneDefinitions[lane], state.laneStates[lane], std::nullopt);
+        }
+        object->setProperty("lanes", lanes);
+        serializedPlayers.add(juce::var(object.get()));
+    }
+    root->setProperty("players", serializedPlayers);
+
+    juce::Array<juce::var> suppressions;
+    for (std::size_t from = 0; from < players_.size(); ++from)
+        for (std::size_t to = 0; to < players_.size(); ++to)
+            if (suppression(from, to))
+            {
+                auto edge = juce::DynamicObject::Ptr(new juce::DynamicObject());
+                edge->setProperty("from", static_cast<juce::int64>(from));
+                edge->setProperty("to", static_cast<juce::int64>(to));
+                suppressions.add(juce::var(edge.get()));
+            }
+    root->setProperty("suppressions", suppressions);
+
+    const auto json = juce::JSON::toString(juce::var(root.get()), true);
+    destination.replaceWith(json.toRawUTF8(), json.getNumBytesAsUTF8());
 }
 
-void LivePatternSequencerProcessor::setStateInformation(const void*, int)
+void LivePatternSequencerProcessor::setStateInformation(
+    const void* data,
+    int sizeInBytes)
 {
-    // Plugin state persistence is not implemented in this MVP.
+    if (data == nullptr || sizeInBytes <= 0)
+        return;
+
+    const auto parsed = juce::JSON::parse(
+        juce::String::fromUTF8(static_cast<const char*>(data), sizeInBytes));
+    const auto* root = parsed.getDynamicObject();
+    if (root == nullptr
+        || root->getProperty("format").toString()
+            != "live-pattern-sequencer-state")
+    {
+        return;
+    }
+
+    const auto integer = [](const juce::DynamicObject* object,
+                            const juce::Identifier& property,
+                            juce::int64 minimum,
+                            juce::int64 maximum,
+                            juce::int64& result)
+    {
+        if (object == nullptr || !object->hasProperty(property))
+            return false;
+        const auto value = object->getProperty(property);
+        if (!value.isInt() && !value.isInt64())
+            return false;
+        result = static_cast<juce::int64>(value);
+        return result >= minimum && result <= maximum;
+    };
+    const auto number = [](const juce::DynamicObject* object,
+                           const juce::Identifier& property,
+                           double& result)
+    {
+        if (object == nullptr || !object->hasProperty(property))
+            return false;
+        const auto value = object->getProperty(property);
+        if (!value.isInt() && !value.isInt64() && !value.isDouble())
+            return false;
+        result = static_cast<double>(value);
+        return std::isfinite(result);
+    };
+
+    juce::int64 schemaVersion = 0;
+    if (!integer(root, "schemaVersion", 1, 2, schemaVersion))
+        return;
+    const auto* serializedPlayers = root->getProperty("players").getArray();
+    if (serializedPlayers == nullptr)
+        return;
+
+    if (schemaVersion == 1)
+    {
+        if (serializedPlayers->size() > static_cast<int>(players_.size()))
+            return;
+        struct LegacySelection
+        {
+            std::size_t index = 0;
+            lps::PatternPlayerPersistentState state;
+        };
+        std::vector<LegacySelection> selections;
+        selections.reserve(static_cast<std::size_t>(serializedPlayers->size()));
+        for (int index = 0; index < serializedPlayers->size(); ++index)
+        {
+            auto* player = patternPlayerAt(static_cast<std::size_t>(index));
+            const auto* object = serializedPlayers->getReference(index).getDynamicObject();
+            juce::int64 patternId = 0;
+            juce::int64 modulationId = 0;
+            if (player == nullptr
+                || !integer(object, "patternId", 1,
+                    static_cast<juce::int64>(lps::PatternLibrary::maxEntryCount),
+                    patternId)
+                || !integer(object, "velocityModulationId", 1,
+                    static_cast<juce::int64>(
+                        lps::VelocityModulationLibrary::maxEntryCount),
+                    modulationId))
+            {
+                return;
+            }
+
+            const auto* pattern = patternLibrary_.find(
+                lps::PatternId { static_cast<std::uint64_t>(patternId) });
+            const auto* modulation = velocityModulationLibrary_.find(
+                lps::VelocityModulationId {
+                    static_cast<std::uint64_t>(modulationId) });
+            if (pattern == nullptr || modulation == nullptr)
+                return;
+
+            auto state = player->capturePersistentState();
+            state.patternId = pattern->id;
+            state.hitMask = 0;
+            const auto patternLength = std::min(
+                pattern->pattern.length, lps::Pattern::maxLength);
+            if (patternLength == 0)
+                return;
+            for (std::size_t step = 0; step < patternLength; ++step)
+                if (pattern->pattern.hits[step])
+                    state.hitMask |= std::uint32_t { 1 } << step;
+            state.patternOffset = 0;
+            state.playbackStart = 0;
+            state.playbackEnd = static_cast<std::uint16_t>(patternLength - 1);
+            state.velocityModulationId = modulation->id;
+            state.velocityModulation = modulation->modulation;
+            selections.push_back({ static_cast<std::size_t>(index), state });
+        }
+        for (const auto& selection : selections)
+            (void) patternPlayerAt(selection.index)->restorePersistentState(
+                selection.state);
+        return;
+    }
+
+    if (serializedPlayers->size() != static_cast<int>(players_.size()))
+        return;
+
+    struct RestoredPlayer
+    {
+        bool muted = false;
+        std::optional<lps::PatternPlayerPersistentState> pattern;
+        std::optional<lps::PulsePlayerPersistentState> pulse;
+    };
+    std::vector<RestoredPlayer> restored(players_.size());
+
+    const auto parseLane = [&](const juce::var& value,
+                               lps::ModulationLaneDefinition& definition,
+                               lps::ModulationLaneState& state,
+                               std::optional<lps::VelocityModulationId>& legacyId)
+    {
+        const auto* lane = value.getDynamicObject();
+        juce::int64 id = 0;
+        juce::int64 target = 0;
+        juce::int64 advance = 0;
+        juce::int64 reset = 0;
+        juce::int64 combine = 0;
+        juce::int64 control = 0;
+        juce::int64 length = 0;
+        double minimum = 0.0;
+        double maximum = 0.0;
+        if (!integer(lane, "id", 1, std::numeric_limits<std::uint16_t>::max(), id)
+            || !integer(lane, "target", 0,
+                static_cast<int>(lps::ModulationTarget::control), target)
+            || !integer(lane, "advanceOn", 0,
+                static_cast<int>(lps::ModulationAdvancePoint::time), advance)
+            || !integer(lane, "resetOn", 0, 255, reset)
+            || !integer(lane, "combine", 0,
+                static_cast<int>(lps::ModulationCombineMode::multiply), combine)
+            || !integer(lane, "logicalControl", 0,
+                std::numeric_limits<std::uint16_t>::max(), control)
+            || !integer(lane, "length", 1,
+                lps::ModulationLaneState::maximumStepCount, length)
+            || !number(lane, "minimum", minimum)
+            || !number(lane, "maximum", maximum))
+        {
+            return false;
+        }
+        const auto* values = lane->getProperty("values").getArray();
+        if (values == nullptr || values->size() != static_cast<int>(length))
+            return false;
+
+        definition.id = { static_cast<std::uint16_t>(id) };
+        definition.target = static_cast<lps::ModulationTarget>(target);
+        definition.advanceOn = static_cast<lps::ModulationAdvancePoint>(advance);
+        definition.resetOn = static_cast<lps::ModulationResetMask>(reset);
+        definition.mapping = {
+            static_cast<float>(minimum),
+            static_cast<float>(maximum),
+            static_cast<lps::ModulationCombineMode>(combine)
+        };
+        definition.logicalControl = static_cast<std::uint16_t>(control);
+        state.length = static_cast<std::uint8_t>(length);
+        for (int step = 0; step < values->size(); ++step)
+        {
+            const auto raw = values->getReference(step);
+            if ((!raw.isInt() && !raw.isInt64())
+                || static_cast<juce::int64>(raw) < 0
+                || static_cast<juce::int64>(raw)
+                    > lps::NormalizedValue::maximum)
+            {
+                return false;
+            }
+            state.values[static_cast<std::size_t>(step)].raw =
+                static_cast<std::uint16_t>(static_cast<juce::int64>(raw));
+        }
+        if (lane->hasProperty("legacyVelocityPresetId"))
+        {
+            juce::int64 preset = 0;
+            if (!integer(lane, "legacyVelocityPresetId", 1,
+                lps::VelocityModulationLibrary::maxEntryCount, preset))
+            {
+                return false;
+            }
+            legacyId = lps::VelocityModulationId {
+                static_cast<std::uint64_t>(preset) };
+        }
+        return true;
+    };
+
+    for (int index = 0; index < serializedPlayers->size(); ++index)
+    {
+        const auto playerIndex = static_cast<std::size_t>(index);
+        const auto& bundle = players_[playerIndex];
+        const auto* object = serializedPlayers->getReference(index).getDynamicObject();
+        juce::int64 id = 0;
+        juce::int64 midiNote = 0;
+        if (!integer(object, "id", index, index, id)
+            || !integer(object, "midiNote", 0, 127, midiNote)
+            || midiNote != bundle.descriptor.midiNote
+            || object->getProperty("type").toString()
+                != (bundle.descriptor.type == PlayerDescriptor::Type::pattern
+                    ? "pattern" : "pulse")
+            || !object->getProperty("muted").isBool())
+        {
+            return;
+        }
+        restored[playerIndex].muted = static_cast<bool>(
+            object->getProperty("muted"));
+
+        const auto* routes = object->getProperty("routes").getArray();
+        if (routes == nullptr || routes->size() != 2)
+            return;
+        bool foundMidi = false;
+        bool foundCv = false;
+        for (const auto& routeValue : *routes)
+        {
+            const auto* route = routeValue.getDynamicObject();
+            const auto renderer = route != nullptr
+                ? route->getProperty("renderer").toString()
+                : juce::String {};
+            juce::int64 routeId = 0;
+            if (!integer(route, "routeId", 0,
+                std::numeric_limits<std::uint32_t>::max(), routeId))
+            {
+                return;
+            }
+            if (renderer == "midi")
+            {
+                juce::int64 fixedPitch = 0;
+                if (foundMidi
+                    || routeId != bundle.midiRouteId.value
+                    || !integer(route, "fixedPitch", 0, 127, fixedPitch)
+                    || fixedPitch != bundle.descriptor.midiNote)
+                {
+                    return;
+                }
+                foundMidi = true;
+            }
+            else if (renderer == "cv")
+            {
+                juce::int64 gate = 0;
+                juce::int64 pitch = 0;
+                juce::int64 control = 0;
+                const auto channel = static_cast<juce::int64>(playerIndex)
+                    * cvChannelsPerPlayer;
+                if (foundCv
+                    || routeId != bundle.cvRouteId.value
+                    || !integer(route, "gateChannel", channel, channel, gate)
+                    || !integer(route, "pitchChannel", channel + 1,
+                        channel + 1, pitch)
+                    || !integer(route, "controlChannel", channel + 2,
+                        channel + 2, control))
+                {
+                    return;
+                }
+                foundCv = true;
+            }
+            else
+            {
+                return;
+            }
+        }
+        if (!foundMidi || !foundCv)
+            return;
+
+        const auto* lanes = object->getProperty("lanes").getArray();
+        if (lanes == nullptr || lanes->isEmpty()
+            || lanes->size() > static_cast<int>(lps::ModulationBank::maximumLaneCount))
+        {
+            return;
+        }
+
+        if (bundle.descriptor.type == PlayerDescriptor::Type::pattern)
+        {
+            if (lanes->size() != 1)
+                return;
+            const auto* pattern = object->getProperty("pattern").getDynamicObject();
+            juce::int64 patternId = 0;
+            juce::int64 hitMask = 0;
+            juce::int64 offset = 0;
+            juce::int64 playbackStart = 0;
+            juce::int64 playbackEnd = 0;
+            juce::int64 playbackSpeed = 0;
+            if (!integer(pattern, "patternId", 1,
+                    lps::PatternLibrary::maxEntryCount, patternId)
+                || !integer(pattern, "hitMask", 0,
+                    std::numeric_limits<std::uint32_t>::max(), hitMask)
+                || !integer(pattern, "offset",
+                    std::numeric_limits<int>::min(),
+                    std::numeric_limits<int>::max(), offset)
+                || !integer(pattern, "playbackStart", 0,
+                    lps::Pattern::maxLength - 1, playbackStart)
+                || !integer(pattern, "playbackEnd", playbackStart,
+                    lps::Pattern::maxLength - 1, playbackEnd)
+                || !integer(pattern, "playbackSpeed", 0,
+                    lps::PatternPlayer::playbackSpeedCount - 1, playbackSpeed))
+            {
+                return;
+            }
+
+            lps::ModulationLaneDefinition definition;
+            lps::ModulationLaneState laneState;
+            std::optional<lps::VelocityModulationId> legacyId;
+            if (!parseLane(lanes->getReference(0), definition, laneState, legacyId)
+                || definition.target != lps::ModulationTarget::intensity
+                || !legacyId.has_value()
+                || velocityModulationLibrary_.find(*legacyId) == nullptr
+                || laneState.length > lps::VelocityModulation::maxLength
+                || patternLibrary_.find(lps::PatternId {
+                    static_cast<std::uint64_t>(patternId) }) == nullptr)
+            {
+                return;
+            }
+
+            lps::PatternPlayerPersistentState state;
+            state.patternId = lps::PatternId {
+                static_cast<std::uint64_t>(patternId) };
+            state.hitMask = static_cast<std::uint32_t>(hitMask);
+            state.patternOffset = static_cast<int>(offset);
+            state.playbackStart = static_cast<std::uint16_t>(playbackStart);
+            state.playbackEnd = static_cast<std::uint16_t>(playbackEnd);
+            state.playbackSpeed = static_cast<std::uint8_t>(playbackSpeed);
+            state.velocityModulationId = *legacyId;
+            state.velocityModulation.length = laneState.length;
+            for (std::size_t step = 0; step < laneState.length; ++step)
+            {
+                if (laneState.values[step].raw % 257u != 0)
+                    return;
+                state.velocityModulation.values[step] =
+                    static_cast<std::uint8_t>(laneState.values[step].raw / 257u);
+            }
+            restored[playerIndex].pattern = state;
+        }
+        else
+        {
+            lps::PulsePlayerPersistentState state;
+            if (!number(object, "periodPpq", state.periodPpq)
+                || !number(object, "gateRatio", state.gateRatio))
+            {
+                return;
+            }
+            if (object->hasProperty("basePitch"))
+            {
+                double pitch = 0.0;
+                if (!number(object, "basePitch", pitch))
+                    return;
+                state.hasBasePitch = true;
+                state.basePitchSemitones = static_cast<float>(pitch);
+            }
+            state.laneCount = static_cast<std::uint8_t>(lanes->size());
+            for (int laneIndex = 0; laneIndex < lanes->size(); ++laneIndex)
+            {
+                std::optional<lps::VelocityModulationId> legacyId;
+                if (!parseLane(
+                    lanes->getReference(laneIndex),
+                    state.laneDefinitions[static_cast<std::size_t>(laneIndex)],
+                    state.laneStates[static_cast<std::size_t>(laneIndex)],
+                    legacyId)
+                    || legacyId.has_value())
+                {
+                    return;
+                }
+            }
+            restored[playerIndex].pulse = state;
+        }
+    }
+
+    std::vector<std::pair<std::size_t, std::size_t>> suppressionEdges;
+    const auto* suppressions = root->getProperty("suppressions").getArray();
+    if (suppressions == nullptr)
+        return;
+    suppressionEdges.reserve(static_cast<std::size_t>(suppressions->size()));
+    for (const auto& edgeValue : *suppressions)
+    {
+        const auto* edge = edgeValue.getDynamicObject();
+        juce::int64 from = 0;
+        juce::int64 to = 0;
+        if (!integer(edge, "from", 0, players_.size() - 1, from)
+            || !integer(edge, "to", 0, players_.size() - 1, to)
+            || from == to)
+        {
+            return;
+        }
+        suppressionEdges.emplace_back(
+            static_cast<std::size_t>(from), static_cast<std::size_t>(to));
+    }
+
+    juce::int64 master = 0;
+    if (!integer(root, "masterPlayerId", 0, players_.size() - 1, master))
+        return;
+
+    for (std::size_t index = 0; index < restored.size(); ++index)
+    {
+        bool restoredSuccessfully = false;
+        if (restored[index].pattern.has_value())
+        {
+            restoredSuccessfully = players_[index].patternController
+                ->restorePersistentState(*restored[index].pattern);
+        }
+        else if (restored[index].pulse.has_value())
+        {
+            restoredSuccessfully = players_[index].pulseController
+                ->restorePersistentState(*restored[index].pulse);
+        }
+        if (!restoredSuccessfully)
+            return;
+        setPlayerMuted(index, restored[index].muted);
+    }
+    for (std::size_t from = 0; from < players_.size(); ++from)
+        for (std::size_t to = 0; to < players_.size(); ++to)
+            if (from != to)
+                setSuppression(from, to, false);
+    for (const auto& edge : suppressionEdges)
+        setSuppression(edge.first, edge.second, true);
+    (void) engine_->setMasterPlayer(lps::PlayerId {
+        static_cast<std::uint32_t>(master) });
 }
 
 std::size_t LivePatternSequencerProcessor::playerCountForUi() const noexcept

@@ -14,6 +14,18 @@
 namespace lps
 {
 
+struct PatternPlayerPersistentState
+{
+    PatternId patternId;
+    std::uint32_t hitMask = 0;
+    int patternOffset = 0;
+    std::uint16_t playbackStart = 0;
+    std::uint16_t playbackEnd = 0;
+    std::uint8_t playbackSpeed = 1;
+    VelocityModulationId velocityModulationId;
+    VelocityModulation velocityModulation;
+};
+
 class PatternPlayer final
     : public IPlayer,
       public IPatternEditorModel,
@@ -54,6 +66,10 @@ public:
     [[nodiscard]] VelocityModulation velocityModulationForUi() const noexcept;
     [[nodiscard]] VelocityModulation velocityModulationForSave() const noexcept;
     [[nodiscard]] bool hasUnsavedVelocityModulationChanges() const noexcept;
+    [[nodiscard]] PatternPlayerPersistentState capturePersistentState()
+        const noexcept;
+    [[nodiscard]] bool restorePersistentState(
+        const PatternPlayerPersistentState& state) noexcept;
 
     void prepare(const PrepareSpec& spec) noexcept override;
     void reset() noexcept override;

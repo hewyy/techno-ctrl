@@ -95,6 +95,11 @@ const ModulationLaneDefinition& ModulationLaneRuntime::definition() const noexce
     return definition_;
 }
 
+const ModulationLaneState& ModulationLaneRuntime::state() const noexcept
+{
+    return state_;
+}
+
 int ModulationLaneRuntime::currentStep() const noexcept
 {
     return currentStep_;
@@ -123,6 +128,17 @@ const ModulationLaneRuntime* ModulationBank::lane(LaneId id) const noexcept
         if (lanes_[index].definition().id == id)
             return &lanes_[index];
     return nullptr;
+}
+
+ModulationLaneRuntime* ModulationBank::laneAt(std::size_t index) noexcept
+{
+    return index < size_ ? &lanes_[index] : nullptr;
+}
+
+const ModulationLaneRuntime* ModulationBank::laneAt(
+    std::size_t index) const noexcept
+{
+    return index < size_ ? &lanes_[index] : nullptr;
 }
 
 std::size_t ModulationBank::advance(

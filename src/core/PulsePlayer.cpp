@@ -47,6 +47,62 @@ void PulsePlayer::setBasePitch(std::optional<float> semitones) noexcept
     basePitchSemitones_ = semitones;
 }
 
+PulsePlayerPersistentState PulsePlayer::capturePersistentState() const noexcept
+{
+    PulsePlayerPersistentState state;
+    state.periodPpq = periodPpq_;
+    state.gateRatio = gateRatio_;
+    state.hasBasePitch = basePitchSemitones_.has_value();
+    state.basePitchSemitones = basePitchSemitones_.value_or(0.0f);
+    state.laneCount = static_cast<std::uint8_t>(modulationBank_.size());
+    for (std::size_t index = 0; index < state.laneCount; ++index)
+    {
+        const auto* lane = modulationBank_.laneAt(index);
+        state.laneDefinitions[index] = lane->definition();
+        state.laneStates[index] = lane->state();
+    }
+    return state;
+}
+
+bool PulsePlayer::restorePersistentState(
+    const PulsePlayerPersistentState& state) noexcept
+{
+    if (!std::isfinite(state.periodPpq)
+        || state.periodPpq <= 0.0
+        || !std::isfinite(state.gateRatio)
+        || state.gateRatio < 0.0
+        || state.gateRatio > 1.0
+        || state.laneCount == 0
+        || state.laneCount > ModulationBank::maximumLaneCount
+        || (state.hasBasePitch && !std::isfinite(state.basePitchSemitones)))
+    {
+        return false;
+    }
+
+    ModulationBank restored;
+    for (std::size_t index = 0; index < state.laneCount; ++index)
+    {
+        auto* lane = restored.addLane(state.laneDefinitions[index]);
+        if (lane == nullptr
+            || state.laneStates[index].length == 0
+            || state.laneStates[index].length
+                > ModulationLaneState::maximumStepCount)
+        {
+            return false;
+        }
+        lane->publishState(state.laneStates[index]);
+    }
+
+    periodPpq_ = state.periodPpq;
+    gateRatio_ = state.gateRatio;
+    basePitchSemitones_ = state.hasBasePitch
+        ? std::optional<float> { state.basePitchSemitones }
+        : std::nullopt;
+    modulationBank_ = restored;
+    reset();
+    return true;
+}
+
 void PulsePlayer::prepare(const PrepareSpec& /*spec*/) noexcept
 {
     reset();

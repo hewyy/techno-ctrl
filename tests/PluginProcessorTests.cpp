@@ -711,6 +711,116 @@ void testPluginDeclaresIsolatedCvOutputsAlongsideMidi()
     CHECK(processor.producesMidi());
     CHECK(!processor.isMidiEffect());
 }
+
+void testVersionTwoProcessorStateRoundTripsAllPlayerConfiguration()
+{
+    TemporaryPatternCatalog catalog;
+    LivePatternSequencerProcessor source(catalog.file());
+
+    source.selectPatternForPlayer(0, 1);
+    source.selectVelocityModulationForPlayer(0, 1);
+    source.prepareToPlay(48'000.0, 512);
+    source.offsetPlayerPatternRight(0);
+    source.offsetPlayerPatternRight(0);
+    source.setPlayerPlaybackWindow(0, 1, 3);
+    source.setPlayerPlaybackSpeed(0, 2);
+    source.togglePlayerStep(0, 2);
+    source.setPlayerVelocityModulationLength(0, 3);
+    source.setPlayerVelocityModulationValue(0, 0, 12);
+    source.setPlayerVelocityModulationValue(0, 1, 128);
+    source.setPlayerVelocityModulationValue(0, 2, 244);
+    source.setPlayerMuted(1, true);
+    source.setSuppression(0, 1, true);
+    const auto sourcePattern = source.patternForUi(0);
+    const auto sourceModulation = source.velocityModulationForUi(0);
+
+    juce::MemoryBlock serialized;
+    source.getStateInformation(serialized);
+    CHECK(serialized.getSize() > 0);
+
+    const auto json = juce::JSON::parse(juce::String::fromUTF8(
+        static_cast<const char*>(serialized.getData()),
+        static_cast<int>(serialized.getSize())));
+    const auto* root = json.getDynamicObject();
+    CHECK(root != nullptr);
+    CHECK(static_cast<int>(root->getProperty("schemaVersion")) == 2);
+    const auto* players = root->getProperty("players").getArray();
+    CHECK(players != nullptr);
+    CHECK(players->size() == static_cast<int>(source.playerCountForUi()));
+    const auto* pulse = players->getReference(players->size() - 1).getDynamicObject();
+    CHECK(pulse != nullptr);
+    CHECK(pulse->getProperty("type").toString() == "pulse");
+    CHECK(pulse->getProperty("routes").getArray()->size() == 2);
+    CHECK(!pulse->getProperty("lanes").getArray()->isEmpty());
+
+    LivePatternSequencerProcessor restored(catalog.file());
+    restored.setStateInformation(
+        serialized.getData(), static_cast<int>(serialized.getSize()));
+
+    CHECK(restored.selectedPatternForPlayer(0) == 1);
+    CHECK(restored.selectedVelocityModulationForPlayer(0) == 1);
+    CHECK(restored.playerPatternOffset(0) == 2);
+    CHECK(restored.playerPlaybackStart(0) == 1);
+    CHECK(restored.playerPlaybackEnd(0) == 3);
+    CHECK(restored.playerPlaybackSpeed(0) == 2);
+    const auto pattern = restored.patternForUi(0);
+    CHECK(pattern.stepCount == sourcePattern.stepCount);
+    CHECK(pattern.playbackStart == sourcePattern.playbackStart);
+    CHECK(pattern.playbackEnd == sourcePattern.playbackEnd);
+    for (std::size_t step = 0; step < pattern.stepCount; ++step)
+    {
+        const auto visibleStep = static_cast<std::uint16_t>(step);
+        CHECK(pattern.isHit(visibleStep) == sourcePattern.isHit(visibleStep));
+    }
+    const auto modulation = restored.velocityModulationForUi(0);
+    CHECK(lps::velocityModulationsEqual(modulation, sourceModulation));
+    CHECK(restored.playerMutedForUi(1));
+    CHECK(restored.suppression(0, 1));
+
+    juce::MemoryBlock reserialized;
+    restored.getStateInformation(reserialized);
+    CHECK(serialized == reserialized);
+}
+
+void testVersionOneProcessorStateMigratesStableSelections()
+{
+    TemporaryPatternCatalog catalog;
+    LivePatternSequencerProcessor processor(catalog.file());
+    const juce::String versionOne = R"json({
+  "format": "live-pattern-sequencer-state",
+  "schemaVersion": 1,
+  "players": [
+    { "patternId": 3, "velocityModulationId": 2 }
+  ]
+})json";
+
+    processor.setStateInformation(
+        versionOne.toRawUTF8(),
+        static_cast<int>(versionOne.getNumBytesAsUTF8()));
+
+    CHECK(processor.selectedPatternForPlayer(0) == 2);
+    CHECK(processor.selectedVelocityModulationForPlayer(0) == 1);
+    const auto pattern = processor.patternForUi(0);
+    CHECK(pattern.stepCount == lps::Pattern::maxLength);
+    CHECK(pattern.playbackStart == 0);
+    CHECK(pattern.playbackEnd == 15);
+    CHECK(pattern.isHit(4));
+    CHECK(pattern.isHit(12));
+    const auto modulation = processor.velocityModulationForUi(0);
+    CHECK(modulation.length == 4);
+    CHECK(modulation.values[0] == 255);
+    CHECK(modulation.values[1] == 100);
+    CHECK(modulation.values[2] == 225);
+    CHECK(modulation.values[3] == 150);
+
+    juce::MemoryBlock migrated;
+    processor.getStateInformation(migrated);
+    const auto json = juce::JSON::parse(juce::String::fromUTF8(
+        static_cast<const char*>(migrated.getData()),
+        static_cast<int>(migrated.getSize())));
+    CHECK(static_cast<int>(
+        json.getDynamicObject()->getProperty("schemaVersion")) == 2);
+}
 } // namespace
 
 int main()
@@ -732,6 +842,8 @@ int main()
     testOversizedInt64SchemaVersionIsRejectedAndPreserved();
     testMixedPlayerCapabilitiesAreExposedWithoutConcreteAssumptions();
     testPluginDeclaresIsolatedCvOutputsAlongsideMidi();
+    testVersionTwoProcessorStateRoundTripsAllPlayerConfiguration();
+    testVersionOneProcessorStateMigratesStableSelections();
     std::cout << "All plugin processor tests passed.\n";
     return EXIT_SUCCESS;
 }

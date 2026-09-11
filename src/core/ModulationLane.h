@@ -136,6 +136,7 @@ public:
         ModulationAdvancePoint point) noexcept;
 
     [[nodiscard]] const ModulationLaneDefinition& definition() const noexcept;
+    [[nodiscard]] const ModulationLaneState& state() const noexcept;
     [[nodiscard]] int currentStep() const noexcept;
 
 private:
@@ -154,6 +155,9 @@ public:
         ModulationLaneDefinition definition) noexcept;
     [[nodiscard]] ModulationLaneRuntime* lane(LaneId id) noexcept;
     [[nodiscard]] const ModulationLaneRuntime* lane(LaneId id) const noexcept;
+    [[nodiscard]] ModulationLaneRuntime* laneAt(std::size_t index) noexcept;
+    [[nodiscard]] const ModulationLaneRuntime* laneAt(
+        std::size_t index) const noexcept;
     [[nodiscard]] std::size_t advance(
         ModulationAdvancePoint point,
         std::array<ModulationSample, maximumLaneCount>& output) noexcept;

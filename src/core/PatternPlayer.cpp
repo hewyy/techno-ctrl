@@ -533,6 +533,71 @@ bool PatternPlayer::hasUnsavedVelocityModulationChanges() const noexcept
         && !velocityModulationsEqual(draft.modulation, activeEntry->modulation);
 }
 
+PatternPlayerPersistentState PatternPlayer::capturePersistentState() const noexcept
+{
+    const auto pattern = draftSnapshot();
+    const auto modulation = velocityModulationSnapshot();
+    return {
+        pattern.activePatternId,
+        pattern.hitMask,
+        pattern.patternOffset,
+        static_cast<std::uint16_t>(pattern.playbackStart),
+        static_cast<std::uint16_t>(pattern.playbackEnd),
+        static_cast<std::uint8_t>(playbackSpeed()),
+        modulation.activeModulationId,
+        modulation.modulation
+    };
+}
+
+bool PatternPlayer::restorePersistentState(
+    const PatternPlayerPersistentState& state) noexcept
+{
+    if (patternLibrary_.find(state.patternId) == nullptr
+        || velocityModulationLibrary_.find(state.velocityModulationId) == nullptr
+        || state.playbackStart > state.playbackEnd
+        || state.playbackEnd >= longestPatternLength
+        || state.playbackSpeed >= playbackSpeedCount
+        || state.velocityModulation.length == 0
+        || state.velocityModulation.length > VelocityModulation::maxLength)
+    {
+        return false;
+    }
+
+    if (!activatePattern(state.patternId, false)
+        || !activateVelocityModulation(state.velocityModulationId))
+    {
+        return false;
+    }
+
+    {
+        const DraftWriteGuard guard { *this, true };
+        editableHitMask_.store(state.hitMask, std::memory_order_relaxed);
+        patternOffset_.store(state.patternOffset, std::memory_order_relaxed);
+        const auto window = packPlaybackWindow(
+            state.playbackStart, state.playbackEnd);
+        requestedPlaybackWindow_.store(window, std::memory_order_relaxed);
+        activePlaybackWindow_.store(window, std::memory_order_relaxed);
+    }
+    {
+        const VelocityModulationWriteGuard guard { *this, true };
+        for (std::size_t step = 0; step < VelocityModulation::maxLength; ++step)
+        {
+            editableVelocityValues_[step].store(
+                state.velocityModulation.values[step],
+                std::memory_order_relaxed);
+        }
+        editableVelocityLength_.store(
+            state.velocityModulation.length, std::memory_order_relaxed);
+    }
+    playbackSpeed_.store(state.playbackSpeed, std::memory_order_relaxed);
+    requestedPatternSelection_.store(
+        state.patternId.value(), std::memory_order_release);
+    requestedVelocityModulationId_.store(
+        state.velocityModulationId.value(), std::memory_order_release);
+    reset();
+    return true;
+}
+
 void PatternPlayer::prepare(const PrepareSpec& /*spec*/) noexcept
 {
     const auto selection = requestedPatternSelection();
