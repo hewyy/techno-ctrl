@@ -43,6 +43,8 @@ add_library(sequencer_core STATIC
     src/core/ModulationLibrary.h
     src/core/ModulationPlayer.cpp
     src/core/ModulationPlayer.h
+    src/core/Voice.cpp
+    src/core/Voice.h
 )
 
 target_include_directories(sequencer_core PUBLIC src)
@@ -66,6 +68,10 @@ add_executable(modulation_library_tests
 
 add_executable(modulation_player_tests
     tests/ModulationPlayerTests.cpp
+)
+
+add_executable(voice_tests
+    tests/VoiceTests.cpp
 )
 
 add_executable(modulation_lane_tests
@@ -93,6 +99,7 @@ target_link_libraries(pattern_player_tests PRIVATE sequencer_core)
 target_link_libraries(pattern_library_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_library_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_player_tests PRIVATE sequencer_core)
+target_link_libraries(voice_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_lane_tests PRIVATE sequencer_core)
 target_link_libraries(pulse_player_tests PRIVATE sequencer_core)
 target_include_directories(midi_buffer_transport_tests PRIVATE src)
@@ -114,6 +121,7 @@ add_test(NAME pattern_player_tests COMMAND pattern_player_tests)
 add_test(NAME pattern_library_tests COMMAND pattern_library_tests)
 add_test(NAME modulation_library_tests COMMAND modulation_library_tests)
 add_test(NAME modulation_player_tests COMMAND modulation_player_tests)
+add_test(NAME voice_tests COMMAND voice_tests)
 add_test(NAME modulation_lane_tests COMMAND modulation_lane_tests)
 add_test(NAME pulse_player_tests COMMAND pulse_player_tests)
 add_test(NAME midi_buffer_transport_tests COMMAND midi_buffer_transport_tests)

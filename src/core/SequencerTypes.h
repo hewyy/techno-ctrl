@@ -188,6 +188,11 @@ struct TriggerId
     {
         return left.value == right.value;
     }
+
+    friend constexpr bool operator!=(TriggerId left, TriggerId right) noexcept
+    {
+        return !(left == right);
+    }
 };
 
 enum class PlayerSignalType : std::uint8_t
@@ -321,6 +326,7 @@ struct SequencerEvent
     float musicalPitchSemitones = 0.0f;
     float normalizedValue = 0.0f;
     std::uint16_t logicalControl = 0;
+    VoiceParameterId voiceParameterId;
     SemanticEventType type = SemanticEventType::triggerEnd;
     InterpolationPolicy interpolation = InterpolationPolicy::step;
     bool hasMusicalPitch = false;
@@ -362,6 +368,22 @@ struct SequencerEvent
         SequencerEvent event;
         event.ppqPosition = ppq;
         event.logicalControl = control;
+        event.normalizedValue = value;
+        event.type = SemanticEventType::controlPoint;
+        event.interpolation = interpolationPolicy;
+        return event;
+    }
+
+    [[nodiscard]] static SequencerEvent voiceControlPoint(
+        double ppq,
+        VoiceParameterId parameter,
+        float value,
+        InterpolationPolicy interpolationPolicy =
+            InterpolationPolicy::step) noexcept
+    {
+        SequencerEvent event;
+        event.ppqPosition = ppq;
+        event.voiceParameterId = parameter;
         event.normalizedValue = value;
         event.type = SemanticEventType::controlPoint;
         event.interpolation = interpolationPolicy;
