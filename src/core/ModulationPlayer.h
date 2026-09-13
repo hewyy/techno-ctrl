@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/IPlayer.h"
 #include "core/IPlayerEditorModels.h"
 #include "core/ModulationLibrary.h"
 #include "core/SequencerTypes.h"
@@ -23,7 +24,7 @@ struct ModulationPlayerStatus
 
 // Runtime cursor for a reusable, meaning-free modulation sequence. Parameter
 // mapping belongs to Voice; this player only emits exact normalized values.
-class ModulationPlayer final : public IModulationEditorModel
+class ModulationPlayer final : public IPlayer, public IModulationEditorModel
 {
 public:
     explicit ModulationPlayer(
@@ -32,6 +33,14 @@ public:
 
     void setId(ModulationPlayerId id) noexcept { id_ = id; }
     [[nodiscard]] ModulationPlayerId id() const noexcept { return id_; }
+    [[nodiscard]] PlayerRef playerRef() const noexcept override
+    {
+        return PlayerRef::modulation(id_);
+    }
+    void setRuntimeId(std::uint32_t id) noexcept override
+    {
+        id_ = ModulationPlayerId {id};
+    }
 
     void setAdvanceSource(AdvanceSource source) noexcept;
     [[nodiscard]] const AdvanceSource& advanceSource() const noexcept;
@@ -48,12 +57,16 @@ public:
     [[nodiscard]] Modulation modulationForSave() const noexcept;
     [[nodiscard]] bool hasUnsavedChanges() const noexcept;
 
-    void prepare(const PrepareSpec&) noexcept;
-    void reset() noexcept;
+    void prepare(const PrepareSpec&) noexcept override;
+    void reset() noexcept override;
     void command(
         PlayerCommand command,
         double ppqPosition,
-        PlayerSignalBuffer& output) noexcept;
+        PlayerSignalBuffer& output) noexcept override;
+    [[nodiscard]] PlayerProcessResult process(
+        const TimelineBlock& block,
+        const PlayerDirectives& directives,
+        PlayerSignalBuffer& output) noexcept override;
     void processClock(
         const TimelineBlock& block,
         PlayerSignalBuffer& output) noexcept;
@@ -61,6 +74,13 @@ public:
         PatternPlayerId source,
         double ppqPosition,
         PlayerSignalBuffer& output) noexcept;
+    void advanceFromPatternHit(
+        const PlayerSignal& hit,
+        PlayerSignalBuffer& output) noexcept override;
+    [[nodiscard]] PlayerSyncCapabilities syncCapabilities() const noexcept override
+    {
+        return {};
+    }
 
     [[nodiscard]] ModulationPlayerStatus status() const noexcept;
     [[nodiscard]] ModulationPlaybackSnapshot modulationPlaybackSnapshot()

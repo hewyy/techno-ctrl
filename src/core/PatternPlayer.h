@@ -2,9 +2,7 @@
 
 #include "core/IPlayer.h"
 #include "core/IPlayerEditorModels.h"
-#include "core/ModulationLane.h"
 #include "core/PatternLibrary.h"
-#include "core/ModulationLibrary.h"
 
 #include <array>
 #include <atomic>
@@ -22,23 +20,30 @@ struct PatternPlayerPersistentState
     std::uint16_t playbackStart = 0;
     std::uint16_t playbackEnd = 0;
     std::uint8_t playbackSpeed = 1;
-    ModulationId velocityModulationId;
-    Modulation velocityModulation;
 };
 
 class PatternPlayer final
     : public IPlayer,
-      public IPatternEditorModel,
-      public IModulationEditorModel
+      public IPatternEditorModel
 {
 public:
     static constexpr std::size_t longestPatternLength = Pattern::maxLength;
     static constexpr std::size_t playbackSpeedCount = 3;
 
     explicit PatternPlayer(const PatternLibrary& patternLibrary) noexcept;
-    PatternPlayer(
-        const PatternLibrary& patternLibrary,
-        const ModulationLibrary& velocityModulationLibrary) noexcept;
+
+    [[nodiscard]] PlayerRef playerRef() const noexcept override
+    {
+        return PlayerRef::pattern(id_);
+    }
+    void setRuntimeId(std::uint32_t id) noexcept override
+    {
+        id_ = PatternPlayerId {id};
+    }
+    void setAdvanceSource(AdvanceSource source) noexcept;
+    [[nodiscard]] const AdvanceSource& advanceSource() const noexcept;
+    void setPlayMode(PlayMode mode) noexcept { playMode_ = mode; }
+    [[nodiscard]] PlayMode playMode() const noexcept { return playMode_; }
 
     void selectPattern(PatternId patternId) noexcept;
     void selectSavedPattern(PatternId patternId) noexcept;
@@ -57,15 +62,6 @@ public:
     [[nodiscard]] Pattern patternForSave() const noexcept;
     [[nodiscard]] bool hasUnsavedPatternChanges() const noexcept;
 
-    void selectModulation(ModulationId modulationId) noexcept;
-    [[nodiscard]] ModulationId selectedModulationId() const noexcept;
-    [[nodiscard]] ModulationId activeModulationId() const noexcept;
-    void setModulationValue(
-        std::size_t step, std::uint8_t value) noexcept;
-    void setModulationLength(std::size_t length) noexcept;
-    [[nodiscard]] Modulation velocityModulationForUi() const noexcept;
-    [[nodiscard]] Modulation velocityModulationForSave() const noexcept;
-    [[nodiscard]] bool hasUnsavedModulationChanges() const noexcept;
     [[nodiscard]] PatternPlayerPersistentState capturePersistentState()
         const noexcept;
     [[nodiscard]] bool restorePersistentState(
@@ -76,24 +72,30 @@ public:
     [[nodiscard]] PlayerProcessResult process(
         const TimelineBlock& block,
         const PlayerDirectives& directives,
-        SequencerEventBuffer& output) noexcept override;
-    void process(
+        PlayerSignalBuffer& output) noexcept override;
+    [[nodiscard]] PlayerProcessResult process(
         const TimelineBlock& block,
-        SequencerEventBuffer& output) noexcept
+        PlayerSignalBuffer& output) noexcept
     {
-        (void) process(block, {}, output);
+        return process(block, {}, output);
     }
+    void command(
+        PlayerCommand command,
+        double ppqPosition,
+        PlayerSignalBuffer& output) noexcept override;
+    void advanceFromPatternHit(
+        const PlayerSignal& hit,
+        PlayerSignalBuffer& output) noexcept override;
     [[nodiscard]] PlayerSyncCapabilities syncCapabilities() const noexcept override;
 
     [[nodiscard]] PatternView patternView() const noexcept override;
     [[nodiscard]] PatternPlaybackSnapshot patternPlaybackSnapshot()
         const noexcept override;
-    [[nodiscard]] ModulationPlaybackSnapshot modulationPlaybackSnapshot()
-        const noexcept override;
-
 private:
     const PatternLibrary& patternLibrary_;
-    const ModulationLibrary& modulationLibrary_;
+    PatternPlayerId id_;
+    AdvanceSource advanceSource_ { ClockAdvance {0.25} };
+    PlayMode playMode_ = PlayMode::continuous;
     // PatternLibrary IDs are bounded by its fixed capacity. The otherwise
     // unused high bit makes the selection and its activation behavior one
     // atomic request, so the audio thread cannot observe a torn pair.
@@ -114,25 +116,18 @@ private:
     std::atomic<std::size_t> playbackSpeed_ { 1 };
     std::atomic<std::uint32_t> requestedPlaybackWindow_ { 0x001f0000 };
     std::atomic<std::uint32_t> activePlaybackWindow_ { 0x001f0000 };
-    std::atomic<std::uint64_t> requestedModulationId_ { 0 };
-    std::atomic<std::uint64_t> velocityModulationRevision_ { 0 };
-    std::atomic<std::uint64_t> activeModulationId_ { 0 };
-    std::array<std::atomic<std::uint16_t>, Modulation::maxLength>
-        editableVelocityValues_ {};
-    std::atomic<std::size_t> editableVelocityLength_ { 0 };
     PatternPlaybackSnapshot patternPlaybackSnapshot_;
-    ModulationPlaybackSnapshot modulationPlaybackSnapshot_;
 
     static constexpr double baseStepLengthPpq = 0.25;
-    static constexpr double gateRatio = 0.5;
-    double pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
     double playbackOriginPpq_ = 0.0;
     std::int64_t lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
     std::int64_t playbackWindowOriginStep_ = 0;
-    ModulationLaneRuntime velocityLane_;
     std::uint64_t nextTriggerId_ = 1;
-    TriggerId activeTriggerId_;
-    bool triggerIsOn_ = false;
+    bool commandPlaying_ = true;
+    bool completed_ = false;
+    bool processingExternalAdvance_ = false;
+    std::uint64_t externalAdvanceCount_ = 0;
+    double lastResetAndPlayPpq_ = -std::numeric_limits<double>::infinity();
 
     [[nodiscard]] static std::uint32_t packPlaybackWindow(
         std::size_t startStep, std::size_t endStep) noexcept;
@@ -146,8 +141,6 @@ private:
     [[nodiscard]] static bool selectionResetsOffset(std::uint64_t selection) noexcept;
     void consumeSaveSelectionRequest(std::uint64_t selection) noexcept;
     [[nodiscard]] bool activatePattern(PatternId patternId, bool resetOffset) noexcept;
-    [[nodiscard]] bool activateModulation(
-        ModulationId modulationId) noexcept;
 
     class DraftWriteGuard
     {
@@ -168,27 +161,6 @@ private:
         std::uint64_t previousRevision_ = 0;
     };
 
-    class ModulationWriteGuard
-    {
-    public:
-        ModulationWriteGuard(
-            PatternPlayer& owner, bool waitForAccess) noexcept;
-        ~ModulationWriteGuard();
-
-        ModulationWriteGuard(const ModulationWriteGuard&) = delete;
-        ModulationWriteGuard& operator=(
-            const ModulationWriteGuard&) = delete;
-
-        [[nodiscard]] explicit operator bool() const noexcept
-        {
-            return owner_ != nullptr;
-        }
-
-    private:
-        PatternPlayer* owner_ = nullptr;
-        std::uint64_t previousRevision_ = 0;
-    };
-
     struct DraftSnapshot
     {
         PatternId activePatternId;
@@ -198,17 +170,9 @@ private:
         std::size_t playbackEnd = 0;
     };
 
-    struct ModulationDraftSnapshot
-    {
-        ModulationId activeModulationId;
-        Modulation modulation;
-    };
-
     [[nodiscard]] DraftSnapshot draftSnapshot() const noexcept;
     [[nodiscard]] static Pattern makePatternForSave(
         const DraftSnapshot& draft) noexcept;
-    [[nodiscard]] ModulationDraftSnapshot
-        velocityModulationSnapshot() const noexcept;
 };
 
 } // namespace lps

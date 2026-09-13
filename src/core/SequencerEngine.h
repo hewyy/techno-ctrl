@@ -67,6 +67,7 @@ private:
     {
         PlayerId id;
         IPlayer* player = nullptr;
+        PlayerSignalBuffer signals;
         SequencerEventBuffer events;
         PlayerProcessResult processResult;
         EventValidation validation;
@@ -107,6 +108,9 @@ private:
     [[nodiscard]] bool playerBlockFailed(PlayerId playerId) const noexcept;
     [[nodiscard]] RendererSlot* findRenderer(IOutputRenderer* renderer) noexcept;
     void validatePlayerEvents(
+        PlayerSlot& slot,
+        const TimelineBlock& block) noexcept;
+    static void translateSignals(
         PlayerSlot& slot,
         const TimelineBlock& block) noexcept;
     [[nodiscard]] static std::optional<std::uint32_t> frameOffsetFor(

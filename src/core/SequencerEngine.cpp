@@ -11,6 +11,7 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
     routedEvents_.clear();
     for (auto& slot : playerSlots_)
     {
+        slot.signals.clear();
         slot.events.clear();
         slot.sequenceResetRequestSnapshot =
             slot.sequenceResetRequested->load(std::memory_order_acquire)
@@ -26,7 +27,8 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
     if (masterSlot != nullptr)
     {
         masterSlot->processResult = masterSlot->player->process(
-            block, directives, masterSlot->events);
+            block, directives, masterSlot->signals);
+        translateSignals(*masterSlot, block);
         validatePlayerEvents(*masterSlot, block);
         masterBoundaryPpq = masterSlot->processResult.firstCycleBoundaryPpq;
 
@@ -62,7 +64,8 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
         }
 
         slot.processResult = slot.player->process(
-            block, directives, slot.events);
+            block, directives, slot.signals);
+        translateSignals(slot, block);
         validatePlayerEvents(slot, block);
     }
 
@@ -196,6 +199,7 @@ std::optional<PlayerId> SequencerEngine::registerPlayer(IPlayer& player)
     PlayerSlot newSlot;
     newSlot.id = PlayerId { static_cast<std::uint32_t>(playerSlots_.size()) };
     newSlot.player = &player;
+    player.setRuntimeId(newSlot.id.value);
     newSlot.diagnostics = std::make_unique<EventDiagnostics>();
     newSlot.muted = std::make_unique<std::atomic_bool>(false);
     newSlot.sequenceResetRequested = std::make_unique<std::atomic_bool>(false);
@@ -209,6 +213,26 @@ std::optional<PlayerId> SequencerEngine::registerPlayer(IPlayer& player)
         playerSlots_[index].suppresses.push_back(
             std::make_unique<std::atomic_bool>(false));
     return playerId;
+}
+
+void SequencerEngine::translateSignals(
+    PlayerSlot& slot,
+    const TimelineBlock& block) noexcept
+{
+    for (const auto& signal : slot.signals)
+    {
+        if (signal.type != PlayerSignalType::patternHit)
+            continue;
+        (void) slot.events.push(SequencerEvent::triggerStart(
+            signal.ppqPosition,
+            signal.triggerId,
+            NormalizedValue::fromUnipolar8(201).toFloat()));
+        const auto endPpq = signal.ppqPosition
+            + signal.nominalStepLengthPpq * 0.5;
+        if (endPpq < block.ppqEnd)
+            (void) slot.events.push(SequencerEvent::triggerEnd(
+                endPpq, signal.triggerId));
+    }
 }
 
 std::optional<RouteId> SequencerEngine::connect(

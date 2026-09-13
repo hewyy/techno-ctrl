@@ -277,6 +277,19 @@ void ModulationPlayer::processClock(
     }
 }
 
+PlayerProcessResult ModulationPlayer::process(
+    const TimelineBlock& block,
+    const PlayerDirectives&,
+    PlayerSignalBuffer& output) noexcept
+{
+    processClock(block, output);
+    return {
+        playing_.load(std::memory_order_acquire),
+        std::nullopt,
+        output.overflowed()
+    };
+}
+
 void ModulationPlayer::advanceFromPatternHit(
     PatternPlayerId source,
     double ppqPosition,
@@ -291,6 +304,14 @@ void ModulationPlayer::advanceFromPatternHit(
         return;
     }
     (void) evaluateStep(ppqPosition, output);
+}
+
+void ModulationPlayer::advanceFromPatternHit(
+    const PlayerSignal& hit,
+    PlayerSignalBuffer& output) noexcept
+{
+    if (hit.type == PlayerSignalType::patternHit)
+        advanceFromPatternHit(hit.patternPlayerId, hit.ppqPosition, output);
 }
 
 ModulationPlayerStatus ModulationPlayer::status() const noexcept

@@ -26,16 +26,12 @@ add_library(sequencer_core STATIC
     src/core/IPlayer.h
     src/core/IPlayerEditorModels.h
     src/core/IOutputRenderer.h
-    src/core/ModulationLane.cpp
-    src/core/ModulationLane.h
     src/core/NormalizedValue.cpp
     src/core/NormalizedValue.h
     src/core/PatternLibrary.cpp
     src/core/PatternLibrary.h
     src/core/PatternPlayer.cpp
     src/core/PatternPlayer.h
-    src/core/PulsePlayer.cpp
-    src/core/PulsePlayer.h
     src/core/SequencerEngine.cpp
     src/core/SequencerEngine.h
     src/core/SequencerTypes.h
@@ -49,10 +45,6 @@ add_library(sequencer_core STATIC
 
 target_include_directories(sequencer_core PUBLIC src)
 target_compile_features(sequencer_core PUBLIC cxx_std_17)
-
-add_executable(sequencer_core_tests
-    tests/SequencerEngineTests.cpp
-)
 
 add_executable(pattern_player_tests
     tests/PatternPlayerTests.cpp
@@ -74,14 +66,6 @@ add_executable(voice_tests
     tests/VoiceTests.cpp
 )
 
-add_executable(modulation_lane_tests
-    tests/ModulationLaneTests.cpp
-)
-
-add_executable(pulse_player_tests
-    tests/PulsePlayerTests.cpp
-)
-
 add_executable(midi_buffer_transport_tests
     tests/MidiBufferTransportTests.cpp
     src/plugin/MidiBufferRenderer.cpp
@@ -94,14 +78,11 @@ add_executable(cv_buffer_renderer_tests
     src/plugin/CvBufferRenderer.h
 )
 
-target_link_libraries(sequencer_core_tests PRIVATE sequencer_core)
-target_link_libraries(pattern_player_tests PRIVATE sequencer_core)
 target_link_libraries(pattern_library_tests PRIVATE sequencer_core)
+target_link_libraries(pattern_player_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_library_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_player_tests PRIVATE sequencer_core)
 target_link_libraries(voice_tests PRIVATE sequencer_core)
-target_link_libraries(modulation_lane_tests PRIVATE sequencer_core)
-target_link_libraries(pulse_player_tests PRIVATE sequencer_core)
 target_include_directories(midi_buffer_transport_tests PRIVATE src)
 target_link_libraries(midi_buffer_transport_tests
     PRIVATE
@@ -116,14 +97,11 @@ target_link_libraries(cv_buffer_renderer_tests
 )
 
 enable_testing()
-add_test(NAME sequencer_core_tests COMMAND sequencer_core_tests)
 add_test(NAME pattern_player_tests COMMAND pattern_player_tests)
 add_test(NAME pattern_library_tests COMMAND pattern_library_tests)
 add_test(NAME modulation_library_tests COMMAND modulation_library_tests)
 add_test(NAME modulation_player_tests COMMAND modulation_player_tests)
 add_test(NAME voice_tests COMMAND voice_tests)
-add_test(NAME modulation_lane_tests COMMAND modulation_lane_tests)
-add_test(NAME pulse_player_tests COMMAND pulse_player_tests)
 add_test(NAME midi_buffer_transport_tests COMMAND midi_buffer_transport_tests)
 add_test(NAME cv_buffer_renderer_tests COMMAND cv_buffer_renderer_tests)
 

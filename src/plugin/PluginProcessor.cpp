@@ -77,8 +77,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     (void) modulationLibraryFileStore_.loadOrCreate(
         modulationLibrary_);
 
-    constexpr std::size_t additionalPulsePlayers = 1;
-    const auto totalPlayerCount = defaultDrumVoices.size() + additionalPulsePlayers;
+    const auto totalPlayerCount = defaultDrumVoices.size();
     players_.reserve(totalPlayerCount);
     currentSteps_.reserve(totalPlayerCount);
     currentModulationSteps_.reserve(totalPlayerCount);
@@ -86,8 +85,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     for (std::size_t index = 0; index < defaultDrumVoices.size(); ++index)
     {
         const auto& voice = defaultDrumVoices[index];
-        auto player = std::make_unique<lps::PatternPlayer>(
-            patternLibrary_, modulationLibrary_);
+        auto player = std::make_unique<lps::PatternPlayer>(patternLibrary_);
         if (patternLibrary_.size() != 0)
         {
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))
@@ -96,6 +94,14 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         auto* patternController = player.get();
         const auto playerId = engine_->registerPlayer(*patternController);
         jassert(playerId.has_value());
+        auto velocityPlayer = std::make_unique<lps::ModulationPlayer>(
+            modulationLibrary_,
+            lps::ModulationPlayerId {static_cast<std::uint32_t>(index)});
+        if (playerId.has_value())
+        {
+            velocityPlayer->setAdvanceSource(lps::PatternHitAdvance {
+                lps::PatternPlayerId {playerId->value}});
+        }
         const auto routeId = playerId.has_value()
             ? engine_->connect(
                 *playerId,
@@ -124,12 +130,12 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         bundle.descriptor = {
             voice.name,
             voice.midiNote,
-            true,
-            PlayerDescriptor::Type::pattern
+            true
         };
         bundle.patternController = patternController;
         bundle.patternModel = patternController;
-        bundle.modulationModel = patternController;
+        bundle.modulationModel = velocityPlayer.get();
+        bundle.velocityPlayer = std::move(velocityPlayer);
         bundle.midiRouteId = routeId.value_or(lps::RouteId {});
         bundle.cvRouteId = cvRouteId.value_or(lps::RouteId {});
         bundle.realtime = std::move(player);
@@ -138,62 +144,6 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         currentModulationSteps_.push_back(
             std::make_unique<std::atomic<int>>(-1));
     }
-
-    auto pulse = std::make_unique<lps::PulsePlayer>(0.5, 0.5);
-    lps::ModulationLaneState pulseIntensity;
-    if (const auto* modulation = modulationLibrary_.recordAt(0))
-    {
-        pulseIntensity.length = static_cast<std::uint8_t>(std::min<std::size_t>(
-            modulation->modulation.length, pulseIntensity.values.size()));
-        for (std::size_t step = 0; step < pulseIntensity.length; ++step)
-        {
-            pulseIntensity.values[step] = modulation->modulation.values[step];
-        }
-    }
-    pulse->publishModulationState(pulseIntensity);
-    auto* pulseController = pulse.get();
-    const auto pulseId = engine_->registerPlayer(*pulseController);
-    jassert(pulseId.has_value());
-    constexpr int pulseMidiNote = 46;
-    const auto pulseRoute = pulseId.has_value()
-        ? engine_->connect(
-            *pulseId,
-            *drumRenderer_,
-            lps::RouteMapping::fixedPitch(static_cast<float>(pulseMidiNote)))
-        : std::nullopt;
-    jassert(pulseRoute.has_value());
-    (void) pulseRoute;
-    const auto pulseCvRoute = pulseId.has_value()
-        ? engine_->connect(
-            *pulseId,
-            *cvRenderer_,
-            lps::RouteMapping::fixedPitch(static_cast<float>(pulseMidiNote)))
-        : std::nullopt;
-    const int pulseCvChannel = static_cast<int>(defaultDrumVoices.size())
-        * cvChannelsPerPlayer;
-    const bool pulseCvConfigured = pulseCvRoute.has_value()
-        && cvRenderer_->configureRoute(
-            *pulseCvRoute,
-            { pulseCvChannel, pulseCvChannel + 1, pulseCvChannel + 2 });
-    jassert(pulseCvConfigured);
-    (void) pulseCvConfigured;
-
-    PlayerBundle pulseBundle;
-    pulseBundle.descriptor = {
-        "Pulse",
-        pulseMidiNote,
-        false,
-        PlayerDescriptor::Type::pulse
-    };
-    pulseBundle.pulseController = pulseController;
-    pulseBundle.modulationModel = pulseController;
-    pulseBundle.midiRouteId = pulseRoute.value_or(lps::RouteId {});
-    pulseBundle.cvRouteId = pulseCvRoute.value_or(lps::RouteId {});
-    pulseBundle.realtime = std::move(pulse);
-    players_.push_back(std::move(pulseBundle));
-    currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
-    currentModulationSteps_.push_back(
-        std::make_unique<std::atomic<int>>(-1));
 
     const auto masterId = engine_->playerIdAt(configuredMasterIndex());
     const bool masterConfigured = masterId.has_value()
@@ -299,6 +249,7 @@ juce::AudioProcessorEditor* LivePatternSequencerProcessor::createEditor()
     return new LivePatternSequencerEditor(*this);
 }
 
+#if 0 // Removed legacy player/lane state schema.
 void LivePatternSequencerProcessor::getStateInformation(juce::MemoryBlock& destination)
 {
     auto root = juce::DynamicObject::Ptr(new juce::DynamicObject());
@@ -848,6 +799,153 @@ void LivePatternSequencerProcessor::setStateInformation(
         static_cast<std::uint32_t>(master) });
 }
 
+#endif
+
+void LivePatternSequencerProcessor::getStateInformation(
+    juce::MemoryBlock& destination)
+{
+    auto root = juce::DynamicObject::Ptr(new juce::DynamicObject());
+    root->setProperty("format", "live-pattern-sequencer-graph-state");
+    root->setProperty("schemaVersion", 1);
+
+    juce::Array<juce::var> serializedPlayers;
+    for (std::size_t index = 0; index < players_.size(); ++index)
+    {
+        const auto pattern = players_[index].patternController
+            ->capturePersistentState();
+        const auto modulation = players_[index].velocityPlayer
+            ->modulationForSave();
+        auto object = juce::DynamicObject::Ptr(new juce::DynamicObject());
+        object->setProperty("patternId",
+            static_cast<juce::int64>(pattern.patternId.value()));
+        object->setProperty("hitMask",
+            static_cast<juce::int64>(pattern.hitMask));
+        object->setProperty("offset", pattern.patternOffset);
+        object->setProperty("playbackStart", pattern.playbackStart);
+        object->setProperty("playbackEnd", pattern.playbackEnd);
+        object->setProperty("playbackSpeed", pattern.playbackSpeed);
+        object->setProperty("modulationId", static_cast<juce::int64>(
+            players_[index].velocityPlayer->selectedModulationId().value()));
+        juce::Array<juce::var> values;
+        for (std::size_t step = 0; step < modulation.length; ++step)
+            values.add(static_cast<int>(modulation.values[step].raw));
+        object->setProperty("modulationValues", values);
+        object->setProperty("muted", playerMutedForUi(index));
+        serializedPlayers.add(juce::var(object.get()));
+    }
+    root->setProperty("players", serializedPlayers);
+
+    juce::Array<juce::var> suppressions;
+    for (std::size_t from = 0; from < players_.size(); ++from)
+        for (std::size_t to = 0; to < players_.size(); ++to)
+            if (suppression(from, to))
+            {
+                auto edge = juce::DynamicObject::Ptr(new juce::DynamicObject());
+                edge->setProperty("from", static_cast<juce::int64>(from));
+                edge->setProperty("to", static_cast<juce::int64>(to));
+                suppressions.add(juce::var(edge.get()));
+            }
+    root->setProperty("suppressions", suppressions);
+
+    const auto json = juce::JSON::toString(juce::var(root.get()), true);
+    destination.replaceAll(json.toRawUTF8(), json.getNumBytesAsUTF8());
+}
+
+void LivePatternSequencerProcessor::setStateInformation(
+    const void* data,
+    int sizeInBytes)
+{
+    if (data == nullptr || sizeInBytes <= 0)
+        return;
+    const auto parsed = juce::JSON::parse(juce::String::fromUTF8(
+        static_cast<const char*>(data), sizeInBytes));
+    const auto* root = parsed.getDynamicObject();
+    if (root == nullptr
+        || root->getProperty("format").toString()
+            != "live-pattern-sequencer-graph-state"
+        || static_cast<int>(root->getProperty("schemaVersion")) != 1)
+        return;
+
+    const auto* serializedPlayers = root->getProperty("players").getArray();
+    if (serializedPlayers == nullptr
+        || serializedPlayers->size() != static_cast<int>(players_.size()))
+        return;
+
+    for (int index = 0; index < serializedPlayers->size(); ++index)
+    {
+        const auto* object = serializedPlayers->getReference(index)
+            .getDynamicObject();
+        const auto* values = object != nullptr
+            ? object->getProperty("modulationValues").getArray()
+            : nullptr;
+        if (object == nullptr || values == nullptr || values->isEmpty()
+            || values->size() > static_cast<int>(lps::Modulation::maxLength))
+            return;
+
+        lps::PatternPlayerPersistentState pattern;
+        pattern.patternId = lps::PatternId {static_cast<std::uint64_t>(
+            static_cast<juce::int64>(object->getProperty("patternId")))};
+        pattern.hitMask = static_cast<std::uint32_t>(
+            static_cast<juce::int64>(object->getProperty("hitMask")));
+        pattern.patternOffset = static_cast<int>(object->getProperty("offset"));
+        pattern.playbackStart = static_cast<std::uint16_t>(
+            static_cast<int>(object->getProperty("playbackStart")));
+        pattern.playbackEnd = static_cast<std::uint16_t>(
+            static_cast<int>(object->getProperty("playbackEnd")));
+        pattern.playbackSpeed = static_cast<std::uint8_t>(
+            static_cast<int>(object->getProperty("playbackSpeed")));
+        const auto modulationId = lps::ModulationId {
+            static_cast<std::uint64_t>(static_cast<juce::int64>(
+                object->getProperty("modulationId")))};
+        if (patternLibrary_.find(pattern.patternId) == nullptr
+            || modulationLibrary_.find(modulationId) == nullptr
+            || !object->getProperty("muted").isBool())
+            return;
+        for (const auto& value : *values)
+            if ((!value.isInt() && !value.isInt64())
+                || static_cast<juce::int64>(value) < 0
+                || static_cast<juce::int64>(value)
+                    > lps::NormalizedValue::maximum)
+                return;
+
+        const auto playerIndex = static_cast<std::size_t>(index);
+        if (!players_[playerIndex].patternController
+                ->restorePersistentState(pattern))
+            return;
+        auto& modulation = *players_[playerIndex].velocityPlayer;
+        modulation.selectModulation(modulationId);
+        modulation.prepare({});
+        modulation.setLength(static_cast<std::size_t>(values->size()));
+        for (int step = 0; step < values->size(); ++step)
+            modulation.setValue(static_cast<std::size_t>(step), {
+                static_cast<std::uint16_t>(static_cast<juce::int64>(
+                    values->getReference(step))) });
+        setPlayerMuted(playerIndex,
+            static_cast<bool>(object->getProperty("muted")));
+    }
+
+    for (std::size_t from = 0; from < players_.size(); ++from)
+        for (std::size_t to = 0; to < players_.size(); ++to)
+            if (from != to)
+                setSuppression(from, to, false);
+    if (const auto* suppressions = root->getProperty("suppressions").getArray())
+        for (const auto& value : *suppressions)
+            if (const auto* edge = value.getDynamicObject())
+            {
+                const auto from = static_cast<juce::int64>(
+                    edge->getProperty("from"));
+                const auto to = static_cast<juce::int64>(
+                    edge->getProperty("to"));
+                if (from >= 0 && to >= 0
+                    && from < static_cast<juce::int64>(players_.size())
+                    && to < static_cast<juce::int64>(players_.size())
+                    && from != to)
+                    setSuppression(
+                        static_cast<std::size_t>(from),
+                        static_cast<std::size_t>(to), true);
+            }
+}
+
 std::size_t LivePatternSequencerProcessor::playerCountForUi() const noexcept
 {
     return engine_->playerCount();
@@ -1085,6 +1183,22 @@ const lps::PatternPlayer* LivePatternSequencerProcessor::patternPlayerAt(
         : nullptr;
 }
 
+lps::ModulationPlayer* LivePatternSequencerProcessor::modulationPlayerAt(
+    std::size_t playerIndex) noexcept
+{
+    return playerIndex < players_.size()
+        ? players_[playerIndex].velocityPlayer.get()
+        : nullptr;
+}
+
+const lps::ModulationPlayer* LivePatternSequencerProcessor::modulationPlayerAt(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        ? players_[playerIndex].velocityPlayer.get()
+        : nullptr;
+}
+
 void LivePatternSequencerProcessor::selectPatternForPlayer(
     std::size_t playerIndex,
     std::size_t patternIndex) noexcept
@@ -1187,18 +1301,18 @@ LivePatternSequencerProcessor::velocityModulationCatalogErrorForUi() const
 lps::Modulation LivePatternSequencerProcessor::velocityModulationForUi(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = patternPlayerAt(playerIndex);
+    const auto* player = modulationPlayerAt(playerIndex);
     return player != nullptr
-        ? player->velocityModulationForUi()
+        ? player->modulationForUi()
         : lps::Modulation {};
 }
 
 bool LivePatternSequencerProcessor::playerModulationModifiedForUi(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = patternPlayerAt(playerIndex);
+    const auto* player = modulationPlayerAt(playerIndex);
     return player != nullptr
-        && player->hasUnsavedModulationChanges();
+        && player->hasUnsavedChanges();
 }
 
 LivePatternSequencerProcessor::SaveModulationResult
@@ -1206,12 +1320,12 @@ LivePatternSequencerProcessor::savePlayerModulation(
     std::size_t playerIndex,
     const juce::String& name)
 {
-    auto* player = patternPlayerAt(playerIndex);
+    auto* player = modulationPlayerAt(playerIndex);
     if (player == nullptr)
         return {};
 
     return savePlayerModulation(
-        playerIndex, player->velocityModulationForSave(), name);
+        playerIndex, player->modulationForSave(), name);
 }
 
 LivePatternSequencerProcessor::SaveModulationResult
@@ -1220,7 +1334,7 @@ LivePatternSequencerProcessor::savePlayerModulation(
     const lps::Modulation& candidateModulation,
     const juce::String& name)
 {
-    auto* player = patternPlayerAt(playerIndex);
+    auto* player = modulationPlayerAt(playerIndex);
     if (player == nullptr
         || candidateModulation.length == 0
         || candidateModulation.length > lps::Modulation::maxLength)
@@ -1289,7 +1403,7 @@ void LivePatternSequencerProcessor::selectModulationForPlayer(
     std::size_t playerIndex,
     std::size_t modulationIndex) noexcept
 {
-    auto* player = patternPlayerAt(playerIndex);
+    auto* player = modulationPlayerAt(playerIndex);
     const auto* modulation = modulationLibrary_.recordAt(modulationIndex);
     if (player != nullptr && modulation != nullptr)
         player->selectModulation(modulation->id);
@@ -1298,7 +1412,7 @@ void LivePatternSequencerProcessor::selectModulationForPlayer(
 std::size_t LivePatternSequencerProcessor::selectedModulationForPlayer(
     std::size_t playerIndex) const noexcept
 {
-    const auto* player = patternPlayerAt(playerIndex);
+    const auto* player = modulationPlayerAt(playerIndex);
     if (player == nullptr)
         return 0;
 
@@ -1311,16 +1425,16 @@ void LivePatternSequencerProcessor::setPlayerModulationValue(
     std::size_t step,
     std::uint8_t value) noexcept
 {
-    if (auto* player = patternPlayerAt(playerIndex))
-        player->setModulationValue(step, value);
+    if (auto* player = modulationPlayerAt(playerIndex))
+        player->setUnipolar8Value(step, value);
 }
 
 void LivePatternSequencerProcessor::setPlayerModulationLength(
     std::size_t playerIndex,
     std::size_t length) noexcept
 {
-    if (auto* player = patternPlayerAt(playerIndex))
-        player->setModulationLength(length);
+    if (auto* player = modulationPlayerAt(playerIndex))
+        player->setLength(length);
 }
 
 void LivePatternSequencerProcessor::setPlayerMuted(

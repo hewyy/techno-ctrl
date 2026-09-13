@@ -3,8 +3,8 @@
 #include "core/PatternLibrary.h"
 #include "core/SequencerEngine.h"
 #include "core/PatternPlayer.h"
-#include "core/PulsePlayer.h"
 #include "core/ModulationLibrary.h"
+#include "core/ModulationPlayer.h"
 #include "plugin/CvBufferRenderer.h"
 #include "plugin/MidiBufferRenderer.h"
 #include "plugin/PatternLibraryFileStore.h"
@@ -168,27 +168,24 @@ public:
 
 private:
     static constexpr int drumMidiChannel = 1;
-    static constexpr std::size_t cvPlayerCapacity = 11;
+    static constexpr std::size_t cvPlayerCapacity = 10;
     static constexpr int cvChannelsPerPlayer = 3;
     static constexpr int cvOutputChannelCount =
         static_cast<int>(cvPlayerCapacity) * cvChannelsPerPlayer;
 
     struct PlayerDescriptor
     {
-        enum class Type { pattern, pulse };
-
         juce::String name;
         int midiNote = -1;
         bool supportsVelocityEditing = false;
-        Type type = Type::pattern;
     };
 
     struct PlayerBundle
     {
         std::unique_ptr<lps::IPlayer> realtime;
+        std::unique_ptr<lps::ModulationPlayer> velocityPlayer;
         PlayerDescriptor descriptor;
         lps::PatternPlayer* patternController = nullptr;
-        lps::PulsePlayer* pulseController = nullptr;
         lps::IPatternEditorModel* patternModel = nullptr;
         lps::IModulationEditorModel* modulationModel = nullptr;
         lps::RouteId midiRouteId;
@@ -199,6 +196,10 @@ private:
     [[nodiscard]] lps::PatternPlayer* patternPlayerAt(
         std::size_t playerIndex) noexcept;
     [[nodiscard]] const lps::PatternPlayer* patternPlayerAt(
+        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] lps::ModulationPlayer* modulationPlayerAt(
+        std::size_t playerIndex) noexcept;
+    [[nodiscard]] const lps::ModulationPlayer* modulationPlayerAt(
         std::size_t playerIndex) const noexcept;
 
     // The library must outlive every player because players keep a read-only

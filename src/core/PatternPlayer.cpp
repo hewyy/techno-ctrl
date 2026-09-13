@@ -5,36 +5,9 @@
 
 namespace lps
 {
-namespace
-{
-const ModulationLibrary& defaultModulationLibrary() noexcept
-{
-    static const ModulationLibrary library;
-    return library;
-}
-
-ModulationLaneState laneStateFrom(const Modulation& modulation) noexcept
-{
-    ModulationLaneState state;
-    state.length = static_cast<std::uint8_t>(std::min<std::size_t>(
-        modulation.length, state.values.size()));
-    for (std::size_t step = 0; step < state.length; ++step)
-        state.values[step] = modulation.values[step];
-    return state;
-}
-} // namespace
 
 PatternPlayer::PatternPlayer(const PatternLibrary& patternLibrary) noexcept
-    : PatternPlayer(patternLibrary, defaultModulationLibrary())
-{
-}
-
-PatternPlayer::PatternPlayer(
-    const PatternLibrary& patternLibrary,
-    const ModulationLibrary& velocityModulationLibrary) noexcept
-    : patternLibrary_(patternLibrary),
-      modulationLibrary_(velocityModulationLibrary),
-      velocityLane_(makeIntensityLaneDefinition())
+    : patternLibrary_(patternLibrary)
 {
     if (const auto* initialPattern = patternLibrary_.recordAt(0))
     {
@@ -42,13 +15,20 @@ PatternPlayer::PatternPlayer(
             initialPattern->id.value(), std::memory_order_relaxed);
         (void) activatePattern(initialPattern->id, false);
     }
+}
 
-    if (const auto* initialModulation = modulationLibrary_.recordAt(0))
-    {
-        requestedModulationId_.store(
-            initialModulation->id.value(), std::memory_order_relaxed);
-        (void) activateModulation(initialModulation->id);
-    }
+void PatternPlayer::setAdvanceSource(AdvanceSource source) noexcept
+{
+    if (const auto* clock = std::get_if<ClockAdvance>(&source);
+        clock != nullptr
+        && (!std::isfinite(clock->stepLengthPpq) || clock->stepLengthPpq <= 0.0))
+        return;
+    advanceSource_ = source;
+}
+
+const AdvanceSource& PatternPlayer::advanceSource() const noexcept
+{
+    return advanceSource_;
 }
 
 void PatternPlayer::selectPattern(PatternId patternId) noexcept
@@ -357,196 +337,16 @@ bool PatternPlayer::hasUnsavedPatternChanges() const noexcept
             || !patternsEqual(makePatternForSave(draft), activeRecord->pattern));
 }
 
-void PatternPlayer::selectModulation(
-    ModulationId modulationId) noexcept
-{
-    if (modulationLibrary_.find(modulationId) != nullptr)
-    {
-        requestedModulationId_.store(
-            modulationId.value(), std::memory_order_release);
-    }
-}
-
-ModulationId PatternPlayer::selectedModulationId() const noexcept
-{
-    return ModulationId {
-        requestedModulationId_.load(std::memory_order_acquire)
-    };
-}
-
-ModulationId PatternPlayer::activeModulationId() const noexcept
-{
-    return ModulationId {
-        activeModulationId_.load(std::memory_order_acquire)
-    };
-}
-
-PatternPlayer::ModulationWriteGuard::ModulationWriteGuard(
-    PatternPlayer& owner,
-    bool waitForAccess) noexcept
-{
-    for (;;)
-    {
-        auto revision = owner.velocityModulationRevision_.load(
-            std::memory_order_acquire);
-        if ((revision & 1u) == 0)
-        {
-            auto expected = revision;
-            if (owner.velocityModulationRevision_.compare_exchange_strong(
-                    expected,
-                    revision + 1,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire))
-            {
-                owner_ = &owner;
-                previousRevision_ = revision;
-                return;
-            }
-        }
-
-        if (!waitForAccess)
-            return;
-    }
-}
-
-PatternPlayer::ModulationWriteGuard::~ModulationWriteGuard()
-{
-    if (owner_ != nullptr)
-    {
-        owner_->velocityModulationRevision_.store(
-            previousRevision_ + 2,
-            std::memory_order_release);
-    }
-}
-
-bool PatternPlayer::activateModulation(
-    ModulationId modulationId) noexcept
-{
-    const auto* entry = modulationLibrary_.find(modulationId);
-    if (entry == nullptr
-        || entry->modulation.length == 0
-        || entry->modulation.length > Modulation::maxLength)
-    {
-        return false;
-    }
-
-    const ModulationWriteGuard guard { *this, false };
-    if (!guard)
-        return false;
-
-    for (std::size_t step = 0; step < Modulation::maxLength; ++step)
-    {
-        editableVelocityValues_[step].store(
-            entry->modulation.values[step].raw, std::memory_order_relaxed);
-    }
-    editableVelocityLength_.store(
-        entry->modulation.length, std::memory_order_relaxed);
-    activeModulationId_.store(
-        modulationId.value(), std::memory_order_release);
-    return true;
-}
-
-void PatternPlayer::setModulationValue(
-    std::size_t step,
-    std::uint8_t value) noexcept
-{
-    const ModulationWriteGuard guard { *this, true };
-    if (step >= editableVelocityLength_.load(std::memory_order_relaxed))
-        return;
-
-    editableVelocityValues_[step].store(
-        NormalizedValue::fromUnipolar8(value).raw,
-        std::memory_order_relaxed);
-}
-
-void PatternPlayer::setModulationLength(std::size_t length) noexcept
-{
-    if (length == 0 || length > Modulation::maxLength)
-        return;
-
-    const ModulationWriteGuard guard { *this, true };
-    const auto oldLength = std::min(
-        editableVelocityLength_.load(std::memory_order_relaxed),
-        Modulation::maxLength);
-    if (length > oldLength)
-    {
-        const auto fillValue = oldLength == 0
-            ? NormalizedValue::maximum
-            : editableVelocityValues_[oldLength - 1].load(
-                std::memory_order_relaxed);
-        for (auto step = oldLength; step < length; ++step)
-        {
-            editableVelocityValues_[step].store(
-                fillValue, std::memory_order_relaxed);
-        }
-    }
-
-    editableVelocityLength_.store(length, std::memory_order_relaxed);
-}
-
-PatternPlayer::ModulationDraftSnapshot
-PatternPlayer::velocityModulationSnapshot() const noexcept
-{
-    for (;;)
-    {
-        const auto revisionBefore = velocityModulationRevision_.load(
-            std::memory_order_acquire);
-        if ((revisionBefore & 1u) != 0)
-            continue;
-
-        ModulationDraftSnapshot draft;
-        draft.activeModulationId = ModulationId {
-            activeModulationId_.load(std::memory_order_relaxed)
-        };
-        draft.modulation.length = std::min(
-            editableVelocityLength_.load(std::memory_order_relaxed),
-            Modulation::maxLength);
-        for (std::size_t step = 0; step < Modulation::maxLength; ++step)
-        {
-            draft.modulation.values[step].raw =
-                editableVelocityValues_[step].load(std::memory_order_relaxed);
-        }
-
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const auto revisionAfter = velocityModulationRevision_.load(
-            std::memory_order_acquire);
-        if (revisionBefore == revisionAfter && (revisionAfter & 1u) == 0)
-            return draft;
-    }
-}
-
-Modulation PatternPlayer::velocityModulationForUi() const noexcept
-{
-    return velocityModulationSnapshot().modulation;
-}
-
-Modulation PatternPlayer::velocityModulationForSave() const noexcept
-{
-    return velocityModulationSnapshot().modulation;
-}
-
-bool PatternPlayer::hasUnsavedModulationChanges() const noexcept
-{
-    const auto draft = velocityModulationSnapshot();
-    const auto* activeEntry = modulationLibrary_.find(
-        draft.activeModulationId);
-    return activeEntry != nullptr
-        && !modulationsEqual(draft.modulation, activeEntry->modulation);
-}
-
 PatternPlayerPersistentState PatternPlayer::capturePersistentState() const noexcept
 {
     const auto pattern = draftSnapshot();
-    const auto modulation = velocityModulationSnapshot();
     return {
         pattern.activePatternId,
         pattern.hitMask,
         pattern.patternOffset,
         static_cast<std::uint16_t>(pattern.playbackStart),
         static_cast<std::uint16_t>(pattern.playbackEnd),
-        static_cast<std::uint8_t>(playbackSpeed()),
-        modulation.activeModulationId,
-        modulation.modulation
+        static_cast<std::uint8_t>(playbackSpeed())
     };
 }
 
@@ -554,18 +354,14 @@ bool PatternPlayer::restorePersistentState(
     const PatternPlayerPersistentState& state) noexcept
 {
     if (patternLibrary_.find(state.patternId) == nullptr
-        || modulationLibrary_.find(state.velocityModulationId) == nullptr
         || state.playbackStart > state.playbackEnd
         || state.playbackEnd >= longestPatternLength
-        || state.playbackSpeed >= playbackSpeedCount
-        || state.velocityModulation.length == 0
-        || state.velocityModulation.length > Modulation::maxLength)
+        || state.playbackSpeed >= playbackSpeedCount)
     {
         return false;
     }
 
-    if (!activatePattern(state.patternId, false)
-        || !activateModulation(state.velocityModulationId))
+    if (!activatePattern(state.patternId, false))
     {
         return false;
     }
@@ -579,22 +375,9 @@ bool PatternPlayer::restorePersistentState(
         requestedPlaybackWindow_.store(window, std::memory_order_relaxed);
         activePlaybackWindow_.store(window, std::memory_order_relaxed);
     }
-    {
-        const ModulationWriteGuard guard { *this, true };
-        for (std::size_t step = 0; step < Modulation::maxLength; ++step)
-        {
-            editableVelocityValues_[step].store(
-                state.velocityModulation.values[step].raw,
-                std::memory_order_relaxed);
-        }
-        editableVelocityLength_.store(
-            state.velocityModulation.length, std::memory_order_relaxed);
-    }
     playbackSpeed_.store(state.playbackSpeed, std::memory_order_relaxed);
     requestedPatternSelection_.store(
         state.patternId.value(), std::memory_order_release);
-    requestedModulationId_.store(
-        state.velocityModulationId.value(), std::memory_order_release);
     reset();
     return true;
 }
@@ -609,24 +392,16 @@ void PatternPlayer::prepare(const PrepareSpec& /*spec*/) noexcept
         consumeSaveSelectionRequest(selection);
     }
 
-    const auto requestedModulation = selectedModulationId();
-    if (requestedModulation != activeModulationId())
-        (void) activateModulation(requestedModulation);
-
     reset();
 }
 
 void PatternPlayer::reset() noexcept
 {
-    pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
     playbackOriginPpq_ = 0.0;
     lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
     playbackWindowOriginStep_ = 0;
-    velocityLane_.reset(ModulationResetReason::transportDiscontinuity);
-    triggerIsOn_ = false;
-    activeTriggerId_ = {};
     patternPlaybackSnapshot_ = {};
-    modulationPlaybackSnapshot_ = {};
+    completed_ = false;
 }
 
 PatternView PatternPlayer::patternView() const noexcept
@@ -652,11 +427,6 @@ PatternPlaybackSnapshot PatternPlayer::patternPlaybackSnapshot() const noexcept
     return patternPlaybackSnapshot_;
 }
 
-ModulationPlaybackSnapshot PatternPlayer::modulationPlaybackSnapshot() const noexcept
-{
-    return modulationPlaybackSnapshot_;
-}
-
 PlayerSyncCapabilities PatternPlayer::syncCapabilities() const noexcept
 {
     return { true, true, true };
@@ -665,42 +435,23 @@ PlayerSyncCapabilities PatternPlayer::syncCapabilities() const noexcept
 PlayerProcessResult PatternPlayer::process(
     const TimelineBlock& block,
     const PlayerDirectives& directives,
-    SequencerEventBuffer& output) noexcept
+    PlayerSignalBuffer& output) noexcept
 {
     output.clear();
     PlayerProcessResult result;
 
-    const auto requestedModulation = selectedModulationId();
-    if (requestedModulation != activeModulationId()
-        && activateModulation(requestedModulation))
+    if (std::holds_alternative<PatternHitAdvance>(advanceSource_)
+        && !processingExternalAdvance_)
     {
-        velocityLane_.reset(ModulationResetReason::sourceSelection);
-        modulationPlaybackSnapshot_.currentStep = -1;
+        result.active = commandPlaying_ && !completed_;
+        return result;
     }
-    velocityLane_.publishState(
-        laneStateFrom(velocityModulationSnapshot().modulation));
-
-    const auto emitStart = [this, &output](double ppq, float intensity)
-    {
-        activeTriggerId_ = TriggerId { nextTriggerId_++ };
-        (void) output.push(SequencerEvent::triggerStart(
-            ppq, activeTriggerId_, intensity));
-    };
-    const auto emitEnd = [this, &output](double ppq)
-    {
-        (void) output.push(SequencerEvent::triggerEnd(ppq, activeTriggerId_));
-    };
 
     if (block.transportDiscontinuity)
     {
-        if (triggerIsOn_)
-            emitEnd(block.ppqStart);
-
-        pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
         lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
-        velocityLane_.reset(ModulationResetReason::transportDiscontinuity);
-        triggerIsOn_ = false;
-        modulationPlaybackSnapshot_.currentStep = -1;
+        completed_ = false;
+        commandPlaying_ = block.playing;
 
         if (block.playing)
         {
@@ -744,15 +495,10 @@ PlayerProcessResult PatternPlayer::process(
     unpackPlaybackWindow(
         activePlaybackWindow_.load(std::memory_order_relaxed), playbackStart, playbackEnd);
 
-    if (!block.playing || block.ppqEnd <= block.ppqStart || currentDraftStepCount == 0)
+    if (!block.playing || !commandPlaying_ || completed_
+        || block.ppqEnd <= block.ppqStart || currentDraftStepCount == 0)
     {
-        if (triggerIsOn_)
-            emitEnd(block.ppqStart);
-
-        pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
-        triggerIsOn_ = false;
         patternPlaybackSnapshot_ = { -1, false };
-        modulationPlaybackSnapshot_ = { -1 };
         result.eventOverflow = output.overflowed();
         return result;
     }
@@ -840,22 +586,15 @@ PlayerProcessResult PatternPlayer::process(
             const double stepPpq = playbackOriginPpq_
                 + static_cast<double>(playbackStep) * stepLengthPpq;
 
-            // Speed can change between blocks. Keep a carried gate-off in
-            // timeline order instead of blindly placing it before a newly
-            // accelerated step that may now occur earlier.
-            if (triggerIsOn_ && pendingTriggerOffPpq_ <= stepPpq)
-            {
-                emitEnd(pendingTriggerOffPpq_);
-                triggerIsOn_ = false;
-                pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
-            }
-
-            if (!result.firstCycleBoundaryPpq.has_value()
-                && (atInitialPlaybackBoundary || atPlaybackBoundary)
+            if ((atInitialPlaybackBoundary || atPlaybackBoundary)
                 && stepPpq + stepBoundaryTolerance >= block.ppqStart
                 && stepPpq < block.ppqEnd)
             {
-                result.firstCycleBoundaryPpq = std::max(stepPpq, block.ppqStart);
+                const auto boundaryPpq = std::max(stepPpq, block.ppqStart);
+                if (!result.firstCycleBoundaryPpq.has_value())
+                    result.firstCycleBoundaryPpq = boundaryPpq;
+                (void) output.push(PlayerSignal::patternCycleBoundary(
+                    boundaryPpq, id_));
             }
 
             const auto activeLength = playbackEnd - playbackStart + 1;
@@ -874,43 +613,24 @@ PlayerProcessResult PatternPlayer::process(
             if (playbackStep > lastTriggeredPlaybackStep_
                 && effectivePattern.isHit(patternStep))
             {
-                if (triggerIsOn_)
-                {
-                    emitEnd(stepPpq);
-                    pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
-                }
-
-                const auto modulation = velocityLane_.advance(
-                    ModulationAdvancePoint::candidateTrigger);
-                emitStart(
+                (void) output.push(PlayerSignal::patternHit(
                     stepPpq,
-                    modulation.has_value() ? modulation->mappedValue : 1.0f);
-                modulationPlaybackSnapshot_.currentStep =
-                    velocityLane_.currentStep();
-                triggerIsOn_ = true;
+                    id_,
+                    TriggerId {nextTriggerId_++},
+                    stepLengthPpq));
                 lastTriggeredPlaybackStep_ = playbackStep;
-
-                const double offPpq = stepPpq + stepLengthPpq * gateRatio;
-                if (offPpq < rangeEnd)
-                {
-                    emitEnd(offPpq);
-                    triggerIsOn_ = false;
-                    pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
-                }
-                else
-                {
-                    pendingTriggerOffPpq_ = offPpq;
-                }
             }
 
             ++playbackStep;
-        }
-
-        if (triggerIsOn_ && pendingTriggerOffPpq_ < rangeEnd)
-        {
-            emitEnd(pendingTriggerOffPpq_);
-            triggerIsOn_ = false;
-            pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
+            if (playMode_ == PlayMode::oneShot
+                && stepsSinceWindowOrigin + 1
+                    >= static_cast<std::int64_t>(currentPlaybackLength))
+            {
+                completed_ = true;
+                commandPlaying_ = false;
+                patternPlaybackSnapshot_.playing = false;
+                break;
+            }
         }
     };
 
@@ -975,34 +695,98 @@ PlayerProcessResult PatternPlayer::process(
         }
     }
 
-    // End the old phase cleanly, including a gate whose normal off would have
-    // fallen after the transition, then make the active playback-window start
-    // step occur exactly at the master's loop boundary. A failed activation
-    // remains pending for the next master boundary unless a manual phase reset
-    // was also requested.
+    // Make the active playback-window start step occur exactly at the master's
+    // loop boundary. A failed activation remains pending for the next master
+    // boundary unless a manual phase reset was also requested.
     if (patternActivated || hasExternalReset)
     {
-        if (triggerIsOn_)
-            emitEnd(transitionPpq);
-        pendingTriggerOffPpq_ = std::numeric_limits<double>::infinity();
-        triggerIsOn_ = false;
         playbackOriginPpq_ = transitionPpq;
         playbackWindowOriginStep_ = 0;
         lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
-    }
-
-    // A modulation is independent of hit-pattern changes, but an explicit
-    // phase reset restarts both sequences together.
-    if (hasExternalReset)
-    {
-        velocityLane_.reset(ModulationResetReason::explicitRestart);
-        modulationPlaybackSnapshot_.currentStep = -1;
     }
 
     processRange(transitionPpq, block.ppqEnd);
     result.active = patternPlaybackSnapshot_.playing;
     result.eventOverflow = output.overflowed();
     return result;
+}
+
+void PatternPlayer::command(
+    PlayerCommand commandValue,
+    double ppqPosition,
+    PlayerSignalBuffer& output) noexcept
+{
+    if (commandValue == PlayerCommand::stop)
+    {
+        commandPlaying_ = false;
+        patternPlaybackSnapshot_.playing = false;
+        return;
+    }
+    if (commandValue == PlayerCommand::reset)
+    {
+        reset();
+        commandPlaying_ = false;
+        return;
+    }
+    if (commandValue == PlayerCommand::play && completed_)
+        return;
+
+    const bool resetFirst = commandValue == PlayerCommand::resetAndPlay;
+    if (resetFirst)
+    {
+        reset();
+        lastResetAndPlayPpq_ = ppqPosition;
+    }
+    commandPlaying_ = true;
+
+    if (resetFirst || patternPlaybackSnapshot_.currentStep < 0)
+    {
+        playbackOriginPpq_ = ppqPosition;
+        externalAdvanceCount_ = 0;
+        PlayerSignalBuffer immediate;
+        processingExternalAdvance_ = true;
+        const auto end = std::nextafter(
+            ppqPosition, std::numeric_limits<double>::infinity());
+        (void) process(
+            {ppqPosition, end, 120.0, 48'000.0, 1, true, false},
+            {},
+            immediate);
+        processingExternalAdvance_ = false;
+        for (const auto& signal : immediate)
+            (void) output.push(signal);
+        externalAdvanceCount_ = 1;
+    }
+}
+
+void PatternPlayer::advanceFromPatternHit(
+    const PlayerSignal& hit,
+    PlayerSignalBuffer& output) noexcept
+{
+    const auto* source = std::get_if<PatternHitAdvance>(&advanceSource_);
+    if (source == nullptr
+        || hit.type != PlayerSignalType::patternHit
+        || source->source != hit.patternPlayerId
+        || !commandPlaying_
+        || completed_
+        || std::abs(hit.ppqPosition - lastResetAndPlayPpq_) <= 1.0e-12)
+        return;
+
+    const auto stepLength = baseStepLengthPpq
+        / playbackSpeedMultiplier(playbackSpeed());
+    playbackOriginPpq_ = hit.ppqPosition
+        - static_cast<double>(externalAdvanceCount_) * stepLength;
+    PlayerSignalBuffer advanced;
+    processingExternalAdvance_ = true;
+    const auto end = std::nextafter(
+        hit.ppqPosition, std::numeric_limits<double>::infinity());
+    (void) process(
+        {hit.ppqPosition, end, 120.0, 48'000.0, 1, true, false},
+        {},
+        advanced);
+    processingExternalAdvance_ = false;
+    for (const auto& signal : advanced)
+        (void) output.push(signal);
+    ++externalAdvanceCount_;
 }
 
 } // namespace lps
