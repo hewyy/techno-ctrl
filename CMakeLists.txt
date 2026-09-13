@@ -32,6 +32,8 @@ add_library(sequencer_core STATIC
     src/core/PatternLibrary.h
     src/core/PatternPlayer.cpp
     src/core/PatternPlayer.h
+    src/core/RuntimeGraph.cpp
+    src/core/RuntimeGraph.h
     src/core/SequencerEngine.cpp
     src/core/SequencerEngine.h
     src/core/SequencerTypes.h
@@ -66,6 +68,10 @@ add_executable(voice_tests
     tests/VoiceTests.cpp
 )
 
+add_executable(runtime_graph_tests
+    tests/RuntimeGraphTests.cpp
+)
+
 add_executable(midi_buffer_transport_tests
     tests/MidiBufferTransportTests.cpp
     src/plugin/MidiBufferRenderer.cpp
@@ -83,6 +89,7 @@ target_link_libraries(pattern_player_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_library_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_player_tests PRIVATE sequencer_core)
 target_link_libraries(voice_tests PRIVATE sequencer_core)
+target_link_libraries(runtime_graph_tests PRIVATE sequencer_core)
 target_include_directories(midi_buffer_transport_tests PRIVATE src)
 target_link_libraries(midi_buffer_transport_tests
     PRIVATE
@@ -102,6 +109,7 @@ add_test(NAME pattern_library_tests COMMAND pattern_library_tests)
 add_test(NAME modulation_library_tests COMMAND modulation_library_tests)
 add_test(NAME modulation_player_tests COMMAND modulation_player_tests)
 add_test(NAME voice_tests COMMAND voice_tests)
+add_test(NAME runtime_graph_tests COMMAND runtime_graph_tests)
 add_test(NAME midi_buffer_transport_tests COMMAND midi_buffer_transport_tests)
 add_test(NAME cv_buffer_renderer_tests COMMAND cv_buffer_renderer_tests)
 
