@@ -123,6 +123,15 @@ public:
     [[nodiscard]] GraphValidationError validate(
         const RuntimeGraphConfig& candidate) const noexcept;
     [[nodiscard]] bool activate(const RuntimeGraphConfig& candidate) noexcept;
+    [[nodiscard]] bool publish(const RuntimeGraphConfig& candidate) noexcept;
+    [[nodiscard]] std::uint64_t publishedGeneration() const noexcept
+    {
+        return publishedGeneration_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint64_t activeGeneration() const noexcept
+    {
+        return activeGeneration_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] bool configureArmedCycleCommand(
         std::size_t slot,
         PatternPlayerId source,
@@ -178,6 +187,8 @@ private:
     void resolveTimestamp(double ppq, ResolvedVoiceEventBuffer& output) noexcept;
     [[nodiscard]] bool hasControlCycle(
         const RuntimeGraphConfig& candidate) const noexcept;
+    [[nodiscard]] const RuntimeGraphConfig& activeConfig() const noexcept;
+    void adoptPublishedConfig() noexcept;
 
     std::array<PatternPlayer*, maximumPatternPlayers> patternPlayers_ {};
     std::array<ModulationPlayer*, maximumModulationPlayers> modulationPlayers_ {};
@@ -185,7 +196,15 @@ private:
     std::size_t patternPlayerCount_ = 0;
     std::size_t modulationPlayerCount_ = 0;
     std::size_t voiceCount_ = 0;
-    RuntimeGraphConfig config_;
+    static constexpr std::size_t snapshotCount = 3;
+    std::array<RuntimeGraphConfig, snapshotCount> configSnapshots_ {};
+    std::array<std::uint64_t, snapshotCount> snapshotGenerations_ {};
+    std::atomic<std::uint8_t> publishedSnapshot_ {0};
+    std::atomic<std::uint8_t> acknowledgedSnapshot_ {0};
+    std::atomic<std::uint64_t> publishedGeneration_ {0};
+    std::atomic<std::uint64_t> activeGeneration_ {0};
+    std::uint64_t nextPublicationGeneration_ = 0;
+    std::uint8_t audioSnapshot_ = 0;
     std::array<ArmedCycleCommand, maximumPatternPlayers> armedCycleCommands_ {};
     std::array<std::atomic_bool, maximumPatternPlayers> armedCyclePending_ {};
     PrepareSpec prepareSpec_;

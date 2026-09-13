@@ -324,11 +324,54 @@ bool RuntimeGraph::hasControlCycle(
 
 bool RuntimeGraph::activate(const RuntimeGraphConfig& candidate) noexcept
 {
+    if (prepared_)
+        return publish(candidate);
     lastValidationError_ = validate(candidate);
     if (lastValidationError_ != GraphValidationError::none)
         return false;
-    config_ = candidate;
+    configSnapshots_[0] = candidate;
+    snapshotGenerations_[0] = ++nextPublicationGeneration_;
+    audioSnapshot_ = 0;
+    publishedSnapshot_.store(0, std::memory_order_release);
+    acknowledgedSnapshot_.store(0, std::memory_order_release);
+    publishedGeneration_.store(
+        snapshotGenerations_[0], std::memory_order_release);
+    activeGeneration_.store(
+        snapshotGenerations_[0], std::memory_order_release);
     return true;
+}
+
+bool RuntimeGraph::publish(const RuntimeGraphConfig& candidate) noexcept
+{
+    lastValidationError_ = validate(candidate);
+    if (lastValidationError_ != GraphValidationError::none)
+        return false;
+
+    const auto published = publishedSnapshot_.load(std::memory_order_acquire);
+    const auto active = acknowledgedSnapshot_.load(std::memory_order_acquire);
+    std::uint8_t destination = 0;
+    while (destination == published || destination == active)
+        ++destination;
+    configSnapshots_[destination] = candidate;
+    snapshotGenerations_[destination] = ++nextPublicationGeneration_;
+    publishedGeneration_.store(
+        snapshotGenerations_[destination], std::memory_order_relaxed);
+    publishedSnapshot_.store(destination, std::memory_order_release);
+    return true;
+}
+
+const RuntimeGraphConfig& RuntimeGraph::activeConfig() const noexcept
+{
+    return configSnapshots_[audioSnapshot_];
+}
+
+void RuntimeGraph::adoptPublishedConfig() noexcept
+{
+    const auto published = publishedSnapshot_.load(std::memory_order_acquire);
+    audioSnapshot_ = published;
+    activeGeneration_.store(
+        snapshotGenerations_[published], std::memory_order_release);
+    acknowledgedSnapshot_.store(published, std::memory_order_release);
 }
 
 void RuntimeGraph::prepare(const PrepareSpec& spec) noexcept
@@ -381,6 +424,7 @@ void RuntimeGraph::appendVoiceEvents(
 void RuntimeGraph::resolveTimestamp(
     double ppq, ResolvedVoiceEventBuffer& output) noexcept
 {
+    const auto& config = activeConfig();
     bool propagatedAny = true;
     while (propagatedAny && !workOverflowed_)
     {
@@ -435,10 +479,10 @@ void RuntimeGraph::resolveTimestamp(
             }
 
             for (std::size_t bindingIndex = 0;
-                 bindingIndex < config_.commandBindingCount;
+                 bindingIndex < config.commandBindingCount;
                  ++bindingIndex)
             {
-                const auto& binding = config_.commandBindings[bindingIndex];
+                const auto& binding = config.commandBindings[bindingIndex];
                 const bool sourceMatches =
                     binding.source.player == item.signal.patternPlayerId
                     && ((binding.source.port == ControlSourcePort::hit
@@ -466,10 +510,10 @@ void RuntimeGraph::resolveTimestamp(
     }
 
     for (std::size_t bindingIndex = 0;
-         bindingIndex < config_.parameterBindingCount;
+         bindingIndex < config.parameterBindingCount;
          ++bindingIndex)
     {
-        const auto& binding = config_.parameterBindings[bindingIndex];
+        const auto& binding = config.parameterBindings[bindingIndex];
         for (std::size_t signalIndex = 0; signalIndex < workSize_; ++signalIndex)
         {
             auto& item = work_[signalIndex];
@@ -488,10 +532,10 @@ void RuntimeGraph::resolveTimestamp(
     }
 
     for (std::size_t bindingIndex = 0;
-         bindingIndex < config_.triggerBindingCount;
+         bindingIndex < config.triggerBindingCount;
          ++bindingIndex)
     {
-        const auto& binding = config_.triggerBindings[bindingIndex];
+        const auto& binding = config.triggerBindings[bindingIndex];
         for (std::size_t signalIndex = 0; signalIndex < workSize_; ++signalIndex)
         {
             auto& item = work_[signalIndex];
@@ -517,6 +561,7 @@ bool RuntimeGraph::process(
     const TimelineBlock& block,
     ResolvedVoiceEventBuffer& output) noexcept
 {
+    adoptPublishedConfig();
     output.clear();
     workSize_ = 0;
     nextWorkOrder_ = 0;

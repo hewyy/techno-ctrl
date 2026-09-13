@@ -132,6 +132,33 @@ void testActivationKeepsOldGraphOnRejection()
     CHECK(graph.lastValidationError()
         == lps::GraphValidationError::duplicateBinding);
 }
+
+void testPublishedGraphIsAdoptedAtBlockBoundary()
+{
+    lps::PatternLibrary patterns;
+    lps::PatternPlayer pattern(patterns);
+    pattern.setRuntimeId(1);
+    lps::Voice voice(lps::VoiceId {1});
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(pattern));
+    CHECK(graph.registerVoice(voice));
+
+    lps::RuntimeGraphConfig initial;
+    CHECK(initial.add(lps::TriggerBinding {{0}, {1}, {1}}));
+    CHECK(graph.activate(initial));
+    graph.prepare({48'000.0, 256});
+    const auto initialGeneration = graph.activeGeneration();
+
+    lps::RuntimeGraphConfig replacement;
+    CHECK(graph.publish(replacement));
+    CHECK(graph.publishedGeneration() > initialGeneration);
+    CHECK(graph.activeGeneration() == initialGeneration);
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.01, 120.0, 48'000.0, 256, false, false}, output));
+    CHECK(graph.activeGeneration() == graph.publishedGeneration());
+}
 } // namespace
 
 int main()
@@ -140,6 +167,7 @@ int main()
     testValidationRejectsPhaseOneMultipleSources();
     testValidationRejectsControlCycles();
     testActivationKeepsOldGraphOnRejection();
+    testPublishedGraphIsAdoptedAtBlockBoundary();
     std::cout << "RuntimeGraph tests passed\n";
     return EXIT_SUCCESS;
 }
