@@ -180,11 +180,15 @@ void testPublishedGraphIsAdoptedAtBlockBoundary()
 
     lps::RuntimeGraphConfig initial;
     CHECK(initial.add(lps::TriggerBinding {{0}, {1}, {1}}));
+    CHECK(initial.addPlayerConfig({
+        {1}, lps::ClockAdvance {0.25}, lps::PlayMode::continuous, {}}));
     CHECK(graph.activate(initial));
     graph.prepare({48'000.0, 256});
     const auto initialGeneration = graph.activeGeneration();
 
     lps::RuntimeGraphConfig replacement;
+    CHECK(replacement.addPlayerConfig({
+        {1}, lps::ClockAdvance {0.25}, lps::PlayMode::oneShot, {}}));
     CHECK(graph.publish(replacement));
     CHECK(graph.publishedGeneration() > initialGeneration);
     CHECK(graph.activeGeneration() == initialGeneration);
@@ -193,6 +197,7 @@ void testPublishedGraphIsAdoptedAtBlockBoundary()
     CHECK(graph.process(
         {0.0, 0.01, 120.0, 48'000.0, 256, false, false}, output));
     CHECK(graph.activeGeneration() == graph.publishedGeneration());
+    CHECK(pattern.playMode() == lps::PlayMode::oneShot);
 }
 } // namespace
 

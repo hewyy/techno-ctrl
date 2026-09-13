@@ -65,26 +65,53 @@ struct OutputBinding
     OutputSignalType signal = OutputSignalType::triggers;
 };
 
+struct PatternPlayerRuntimeConfig
+{
+    PatternPlayerId player;
+    AdvanceSource advanceSource {ClockAdvance {0.25}};
+    PlayMode playMode = PlayMode::continuous;
+    PatternTransitionPolicy transitionPolicy;
+};
+
+struct ModulationPlayerRuntimeConfig
+{
+    ModulationPlayerId player;
+    AdvanceSource advanceSource {ClockAdvance {0.25}};
+    PlayMode playMode = PlayMode::continuous;
+};
+
 struct RuntimeGraphConfig
 {
     static constexpr std::size_t maximumTriggerBindings = 32;
     static constexpr std::size_t maximumParameterBindings = 64;
     static constexpr std::size_t maximumCommandBindings = 64;
     static constexpr std::size_t maximumOutputBindings = 64;
+    static constexpr std::size_t maximumPatternPlayerConfigs = 16;
+    static constexpr std::size_t maximumModulationPlayerConfigs = 64;
 
     std::array<TriggerBinding, maximumTriggerBindings> triggerBindings {};
     std::array<ParameterBinding, maximumParameterBindings> parameterBindings {};
     std::array<CommandBinding, maximumCommandBindings> commandBindings {};
     std::array<OutputBinding, maximumOutputBindings> outputBindings {};
+    std::array<PatternPlayerRuntimeConfig, maximumPatternPlayerConfigs>
+        patternPlayerConfigs {};
+    std::array<ModulationPlayerRuntimeConfig, maximumModulationPlayerConfigs>
+        modulationPlayerConfigs {};
     std::size_t triggerBindingCount = 0;
     std::size_t parameterBindingCount = 0;
     std::size_t commandBindingCount = 0;
     std::size_t outputBindingCount = 0;
+    std::size_t patternPlayerConfigCount = 0;
+    std::size_t modulationPlayerConfigCount = 0;
 
     [[nodiscard]] bool add(TriggerBinding binding) noexcept;
     [[nodiscard]] bool add(ParameterBinding binding) noexcept;
     [[nodiscard]] bool add(CommandBinding binding) noexcept;
     [[nodiscard]] bool add(OutputBinding binding) noexcept;
+    [[nodiscard]] bool addPlayerConfig(
+        PatternPlayerRuntimeConfig config) noexcept;
+    [[nodiscard]] bool addPlayerConfig(
+        ModulationPlayerRuntimeConfig config) noexcept;
 };
 
 enum class GraphValidationError : std::uint8_t
@@ -107,7 +134,6 @@ struct ResolvedVoiceEvent
     VoiceId sourceVoiceId;
     PatternPlayerId triggerSource;
     std::uint64_t stableOrder = 0;
-    bool triggerOutputEligible = true;
 };
 
 class ResolvedVoiceEventBuffer
@@ -252,6 +278,7 @@ private:
         const RuntimeGraphConfig& candidate) const noexcept;
     [[nodiscard]] const RuntimeGraphConfig& activeConfig() const noexcept;
     void adoptPublishedConfig() noexcept;
+    void applyActivePlayerConfigs() noexcept;
     [[nodiscard]] std::optional<std::uint32_t> frameOffsetFor(
         const SequencerEvent& event,
         const TimelineBlock& block) const noexcept;

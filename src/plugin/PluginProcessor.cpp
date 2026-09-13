@@ -107,13 +107,6 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         const auto& voice = defaultDrumVoices[index];
         auto player = std::make_unique<lps::PatternPlayer>(patternLibrary_);
         player->setRuntimeId(static_cast<std::uint32_t>(index));
-        if (index != configuredMasterIndex())
-        {
-            player->setTransitionPolicy(
-                lps::PatternTransitionPolicy::externalCycle(
-                    lps::PatternPlayerId {static_cast<std::uint32_t>(
-                        configuredMasterIndex())}));
-        }
         if (patternLibrary_.size() != 0)
         {
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))
@@ -144,9 +137,6 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         pitchPlayer->selectModulation(pitchRecord.entry->id);
         gatePlayer->selectModulation(gateRecord.entry->id);
         const auto hitAdvance = lps::PatternHitAdvance {patternId};
-        pitchPlayer->setAdvanceSource(hitAdvance);
-        velocityPlayer->setAdvanceSource(hitAdvance);
-        gatePlayer->setAdvanceSource(hitAdvance);
 
         auto resolvedVoice = std::make_unique<lps::Voice>(voiceId);
         constexpr lps::VoiceParameterId pitchParameter {0};
@@ -168,6 +158,23 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
             && runtimeGraph_->registerVoice(*resolvedVoice);
         jassert(nodesRegistered);
         (void) nodesRegistered;
+
+        const auto transitionPolicy = index == configuredMasterIndex()
+            ? lps::PatternTransitionPolicy {}
+            : lps::PatternTransitionPolicy::externalCycle(
+                lps::PatternPlayerId {static_cast<std::uint32_t>(
+                    configuredMasterIndex())});
+        const bool playerConfigsAdded = graphConfig.addPlayerConfig(
+                {patternId, lps::ClockAdvance {0.25},
+                    lps::PlayMode::continuous, transitionPolicy})
+            && graphConfig.addPlayerConfig(
+                {pitchModulationId, hitAdvance, lps::PlayMode::continuous})
+            && graphConfig.addPlayerConfig(
+                {velocityModulationId, hitAdvance, lps::PlayMode::continuous})
+            && graphConfig.addPlayerConfig(
+                {gateModulationId, hitAdvance, lps::PlayMode::continuous});
+        jassert(playerConfigsAdded);
+        (void) playerConfigsAdded;
 
         const bool bindingsAdded = graphConfig.add(lps::TriggerBinding {
                 lps::TriggerBindingId {static_cast<std::uint32_t>(index)},

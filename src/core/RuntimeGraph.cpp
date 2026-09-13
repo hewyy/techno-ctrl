@@ -39,6 +39,24 @@ bool RuntimeGraphConfig::add(OutputBinding binding) noexcept
     return true;
 }
 
+bool RuntimeGraphConfig::addPlayerConfig(
+    PatternPlayerRuntimeConfig config) noexcept
+{
+    if (patternPlayerConfigCount == patternPlayerConfigs.size())
+        return false;
+    patternPlayerConfigs[patternPlayerConfigCount++] = config;
+    return true;
+}
+
+bool RuntimeGraphConfig::addPlayerConfig(
+    ModulationPlayerRuntimeConfig config) noexcept
+{
+    if (modulationPlayerConfigCount == modulationPlayerConfigs.size())
+        return false;
+    modulationPlayerConfigs[modulationPlayerConfigCount++] = config;
+    return true;
+}
+
 bool ResolvedVoiceEventBuffer::push(ResolvedVoiceEvent event) noexcept
 {
     if (size_ == events_.size())
@@ -225,8 +243,56 @@ GraphValidationError RuntimeGraph::validate(
     if (candidate.triggerBindingCount > candidate.triggerBindings.size()
         || candidate.parameterBindingCount > candidate.parameterBindings.size()
         || candidate.commandBindingCount > candidate.commandBindings.size()
-        || candidate.outputBindingCount > candidate.outputBindings.size())
+        || candidate.outputBindingCount > candidate.outputBindings.size()
+        || candidate.patternPlayerConfigCount
+            > candidate.patternPlayerConfigs.size()
+        || candidate.modulationPlayerConfigCount
+            > candidate.modulationPlayerConfigs.size())
         return GraphValidationError::capacityExceeded;
+
+    const auto validAdvance = [this](
+        const AdvanceSource& source,
+        std::optional<PatternPlayerId> destination) noexcept
+    {
+        if (const auto* clock = std::get_if<ClockAdvance>(&source))
+            return std::isfinite(clock->stepLengthPpq)
+                && clock->stepLengthPpq > 0.0;
+        const auto hit = std::get<PatternHitAdvance>(source);
+        return find(hit.source) != nullptr
+            && (!destination.has_value() || hit.source != *destination);
+    };
+    for (std::size_t index = 0;
+         index < candidate.patternPlayerConfigCount;
+         ++index)
+    {
+        const auto& config = candidate.patternPlayerConfigs[index];
+        if (find(config.player) == nullptr
+            || !validAdvance(config.advanceSource, config.player))
+            return GraphValidationError::missingNode;
+        if (config.transitionPolicy.type
+            == PatternTransitionPolicyType::externalCycle)
+        {
+            if (find(config.transitionPolicy.externalSource) == nullptr)
+                return GraphValidationError::missingNode;
+            if (config.transitionPolicy.externalSource == config.player)
+                return GraphValidationError::selfEdge;
+        }
+        for (std::size_t previous = 0; previous < index; ++previous)
+            if (candidate.patternPlayerConfigs[previous].player == config.player)
+                return GraphValidationError::duplicateBinding;
+    }
+    for (std::size_t index = 0;
+         index < candidate.modulationPlayerConfigCount;
+         ++index)
+    {
+        const auto& config = candidate.modulationPlayerConfigs[index];
+        if (find(config.player) == nullptr
+            || !validAdvance(config.advanceSource, std::nullopt))
+            return GraphValidationError::missingNode;
+        for (std::size_t previous = 0; previous < index; ++previous)
+            if (candidate.modulationPlayerConfigs[previous].player == config.player)
+                return GraphValidationError::duplicateBinding;
+    }
 
     for (std::size_t index = 0; index < candidate.triggerBindingCount; ++index)
     {
@@ -331,7 +397,20 @@ GraphValidationError RuntimeGraph::validate(
     }
     for (std::size_t index = 0; index < patternPlayerCount_; ++index)
     {
-        const auto policy = patternPlayers_[index]->transitionPolicy();
+        auto advance = patternPlayers_[index]->advanceSource();
+        auto policy = patternPlayers_[index]->transitionPolicy();
+        for (std::size_t configIndex = 0;
+             configIndex < candidate.patternPlayerConfigCount;
+             ++configIndex)
+        {
+            const auto& config = candidate.patternPlayerConfigs[configIndex];
+            if (config.player.value == patternPlayers_[index]->playerRef().value)
+            {
+                advance = config.advanceSource;
+                policy = config.transitionPolicy;
+                break;
+            }
+        }
         if (policy.type == PatternTransitionPolicyType::externalCycle)
         {
             if (find(policy.externalSource) == nullptr)
@@ -342,8 +421,7 @@ GraphValidationError RuntimeGraph::validate(
                 return GraphValidationError::selfEdge;
             }
         }
-        if (const auto* hit = std::get_if<PatternHitAdvance>(
-                &patternPlayers_[index]->advanceSource()))
+        if (const auto* hit = std::get_if<PatternHitAdvance>(&advance))
         {
             if (find(hit->source) == nullptr)
                 return GraphValidationError::missingNode;
@@ -352,10 +430,24 @@ GraphValidationError RuntimeGraph::validate(
         }
     }
     for (std::size_t index = 0; index < modulationPlayerCount_; ++index)
-        if (const auto* hit = std::get_if<PatternHitAdvance>(
-                &modulationPlayers_[index]->advanceSource()))
+    {
+        auto advance = modulationPlayers_[index]->advanceSource();
+        for (std::size_t configIndex = 0;
+             configIndex < candidate.modulationPlayerConfigCount;
+             ++configIndex)
+        {
+            const auto& config = candidate.modulationPlayerConfigs[configIndex];
+            if (config.player.value
+                == modulationPlayers_[index]->playerRef().value)
+            {
+                advance = config.advanceSource;
+                break;
+            }
+        }
+        if (const auto* hit = std::get_if<PatternHitAdvance>(&advance))
             if (find(hit->source) == nullptr)
                 return GraphValidationError::missingNode;
+    }
 
     return hasControlCycle(candidate)
         ? GraphValidationError::controlCycle
@@ -389,25 +481,33 @@ bool RuntimeGraph::hasControlCycle(
         if (from < maximumNodes && to < maximumNodes)
             edges[from][to] = true;
     }
-    const auto addAdvance = [&](IPlayer& player)
+    const auto addAdvance = [&](PlayerRef player, const AdvanceSource& advance)
     {
-        const AdvanceSource* advance = nullptr;
-        if (player.playerRef().type == PlayerRefType::pattern)
-            advance = &static_cast<PatternPlayer&>(player).advanceSource();
-        else
-            advance = &static_cast<ModulationPlayer&>(player).advanceSource();
-        if (const auto* hit = std::get_if<PatternHitAdvance>(advance))
+        if (const auto* hit = std::get_if<PatternHitAdvance>(&advance))
         {
             const auto from = nodeIndex(PlayerRef::pattern(hit->source));
-            const auto to = nodeIndex(player.playerRef());
+            const auto to = nodeIndex(player);
             if (from < maximumNodes && to < maximumNodes)
                 edges[from][to] = true;
         }
     };
     for (std::size_t index = 0; index < patternPlayerCount_; ++index)
     {
-        addAdvance(*patternPlayers_[index]);
-        const auto policy = patternPlayers_[index]->transitionPolicy();
+        auto advance = patternPlayers_[index]->advanceSource();
+        auto policy = patternPlayers_[index]->transitionPolicy();
+        for (std::size_t configIndex = 0;
+             configIndex < candidate.patternPlayerConfigCount;
+             ++configIndex)
+        {
+            const auto& config = candidate.patternPlayerConfigs[configIndex];
+            if (config.player.value == patternPlayers_[index]->playerRef().value)
+            {
+                advance = config.advanceSource;
+                policy = config.transitionPolicy;
+                break;
+            }
+        }
+        addAdvance(patternPlayers_[index]->playerRef(), advance);
         if (policy.type == PatternTransitionPolicyType::externalCycle)
         {
             const auto from = nodeIndex(
@@ -418,7 +518,22 @@ bool RuntimeGraph::hasControlCycle(
         }
     }
     for (std::size_t index = 0; index < modulationPlayerCount_; ++index)
-        addAdvance(*modulationPlayers_[index]);
+    {
+        auto advance = modulationPlayers_[index]->advanceSource();
+        for (std::size_t configIndex = 0;
+             configIndex < candidate.modulationPlayerConfigCount;
+             ++configIndex)
+        {
+            const auto& config = candidate.modulationPlayerConfigs[configIndex];
+            if (config.player.value
+                == modulationPlayers_[index]->playerRef().value)
+            {
+                advance = config.advanceSource;
+                break;
+            }
+        }
+        addAdvance(modulationPlayers_[index]->playerRef(), advance);
+    }
 
     const auto nodeCount = patternPlayerCount_ + modulationPlayerCount_;
     std::array<std::uint8_t, maximumNodes> state {};
@@ -457,6 +572,7 @@ bool RuntimeGraph::activate(const RuntimeGraphConfig& candidate) noexcept
         snapshotGenerations_[0], std::memory_order_release);
     activeGeneration_.store(
         snapshotGenerations_[0], std::memory_order_release);
+    applyActivePlayerConfigs();
     return true;
 }
 
@@ -487,10 +603,39 @@ const RuntimeGraphConfig& RuntimeGraph::activeConfig() const noexcept
 void RuntimeGraph::adoptPublishedConfig() noexcept
 {
     const auto published = publishedSnapshot_.load(std::memory_order_acquire);
+    const bool changed = published != audioSnapshot_;
     audioSnapshot_ = published;
+    if (changed)
+        applyActivePlayerConfigs();
     activeGeneration_.store(
         snapshotGenerations_[published], std::memory_order_release);
     acknowledgedSnapshot_.store(published, std::memory_order_release);
+}
+
+void RuntimeGraph::applyActivePlayerConfigs() noexcept
+{
+    const auto& config = activeConfig();
+    for (std::size_t index = 0; index < config.patternPlayerConfigCount; ++index)
+    {
+        const auto& playerConfig = config.patternPlayerConfigs[index];
+        if (auto* player = find(playerConfig.player))
+        {
+            player->setAdvanceSource(playerConfig.advanceSource);
+            player->setPlayMode(playerConfig.playMode);
+            player->setTransitionPolicy(playerConfig.transitionPolicy);
+        }
+    }
+    for (std::size_t index = 0;
+         index < config.modulationPlayerConfigCount;
+         ++index)
+    {
+        const auto& playerConfig = config.modulationPlayerConfigs[index];
+        if (auto* player = find(playerConfig.player))
+        {
+            player->setAdvanceSource(playerConfig.advanceSource);
+            player->setPlayMode(playerConfig.playMode);
+        }
+    }
 }
 
 void RuntimeGraph::prepare(const PrepareSpec& spec) noexcept
@@ -628,7 +773,7 @@ void RuntimeGraph::appendVoiceEvents(
 {
     for (const auto& event : events)
         (void) output.push({
-            event, voice.id(), triggerSource, nextResolvedOrder_++, true});
+            event, voice.id(), triggerSource, nextResolvedOrder_++});
 }
 
 void RuntimeGraph::resolveTimestamp(
