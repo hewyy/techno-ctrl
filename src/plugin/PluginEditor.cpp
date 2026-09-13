@@ -1646,7 +1646,8 @@ void LivePatternSequencerEditor::updateContentSize()
         constexpr int panelChrome = 2;
         const int size = patternCellSizeForContentWidth(candidateWidth);
         const int stride = std::max(clickTargetSize, size) + panelChrome
-            + modulationPanelHeight;
+            + static_cast<int>(modulationLanes.size())
+                * modulationPanelHeight;
         return std::max(
             1,
             static_cast<int>(playerCount_) * stride + playerBottomPadding);
