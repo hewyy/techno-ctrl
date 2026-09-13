@@ -6,49 +6,308 @@
 
 namespace
 {
-constexpr auto background = 0xff101417;
-constexpr auto panel = 0xff171d21;
-constexpr auto border = 0xff39434a;
-constexpr auto cyan = 0xff20d8e5;
-constexpr auto amber = 0xffffb21a;
-constexpr auto inactive = 0xff242c31;
-constexpr auto primaryText = 0xffedf5f6;
-constexpr auto secondaryText = 0xff8c9aa1;
+constexpr auto uiYellow = 0xffe3c51a;
+constexpr auto uiBlack = 0xff000000;
+constexpr auto uiRed = 0xffc9574f;
+constexpr auto uiBlue = 0xff78a5b4;
+constexpr auto warmIvory = 0xffd5d2b8;
+constexpr auto lightGray = 0xffb8b7ac;
+constexpr auto darkGray = 0xff505255;
 
-constexpr int outerPadding = 12;
-constexpr int headerHeight = 42;
-constexpr int sectionGap = 8;
-constexpr int minimumPlayerContentWidth = 900;
-constexpr int contentHorizontalPadding = 6;
-constexpr int playerPanelHorizontalPadding = 6;
-constexpr int playerControlsWidth = 294;
-constexpr int controlsToGridGap = 6;
-constexpr int playerPanelHeight = 48;
-constexpr int playerLaneGap = 2;
-constexpr int velocityPanelHeight = 76;
-constexpr int playerPanelGap = 5;
-constexpr int playerStride = playerPanelHeight + playerLaneGap
-    + velocityPanelHeight + playerPanelGap;
-constexpr int playerBottomPadding = 6;
+constexpr auto background = darkGray;
+constexpr auto panel = 0xff444648;
+constexpr auto border = uiBlack;
+constexpr auto amber = uiBlack;
+constexpr auto pastelHit = warmIvory;
+constexpr auto pastelPlayhead = uiBlue;
+constexpr auto inactive = 0xff46484a;
+constexpr auto primaryText = warmIvory;
+constexpr auto secondaryText = lightGray;
+constexpr auto muteRed = uiRed;
+constexpr auto muteRedDark = darkGray;
+constexpr auto patternStepOff = lightGray;
+constexpr auto patternStepOffAlternate = 0xff92928a;
+constexpr auto patternStepOn = 0xff747672;
+constexpr auto patternStepTextOff = darkGray;
+constexpr auto patternStepTextOn = uiYellow;
+constexpr auto patternPlayhead = uiBlue;
+
+constexpr int outerPadding = 2;
+constexpr int headerHeight = 0;
+constexpr int sectionGap = 2;
+constexpr int contentHorizontalPadding = 2;
+constexpr int playerPanelHorizontalPadding = 4;
+constexpr int playerControlsWidth = 279;
+constexpr int controlsToGridGap = 30;
+constexpr int clickTargetSize = 41;
+constexpr int modulationPanelHeight = clickTargetSize + 2;
+constexpr int playerBottomPadding = 2;
+constexpr int velocityControlGap = 4;
 constexpr int matrixGridLeft = 82;
 constexpr int matrixGridTop = 112;
-constexpr int matrixCellWidth = 34;
-constexpr int matrixCellHeight = 30;
-constexpr int rangeHandleExtension = 5;
-constexpr int rangeHandleCapLength = 7;
-constexpr int rangeHandleCapGrabRadius = 10;
-constexpr int rangeHandleCapVerticalGrabRadius = 2;
-constexpr int rangeHandleStrokeGrabRadius = 3;
-constexpr int patternCellWidth = 17;
-constexpr int patternCellHeight = 34;
+constexpr int matrixCellWidth = clickTargetSize + 4;
+constexpr int matrixCellHeight = clickTargetSize + 4;
+constexpr int rangeHandleExtension = 0;
+constexpr int rangeHandleCapLength = 18;
+constexpr int rangeHandleCapGrabRadius = clickTargetSize / 2 + 6;
+constexpr int rangeHandleCapVerticalGrabRadius = 10;
+constexpr int rangeHandleStrokeGrabRadius = clickTargetSize / 2 + 6;
+constexpr int rangeHandleDragThreshold = 5;
+constexpr float rangeHandleStrokeWidth = 5.0f;
 constexpr int patternCellGap = 1;
+constexpr int minimumPatternCellSize = 8;
 constexpr int patternGridLeft = contentHorizontalPadding
     + playerPanelHorizontalPadding + playerControlsWidth + controlsToGridGap;
-constexpr int velocityKnobWidth = 48;
-constexpr int velocityKnobHeight = 66;
-constexpr int velocityKnobGap = 7;
-constexpr int velocityTextBoxHeight = 16;
+constexpr int velocityKnobWidth = clickTargetSize;
+constexpr int velocityKnobHeight = clickTargetSize;
+constexpr int velocityKnobGap = 2;
 constexpr int velocityGridLeft = patternGridLeft;
+
+[[nodiscard]] int patternCellSizeForContentWidth(int contentWidth) noexcept
+{
+    constexpr int stepCount = static_cast<int>(lps::Pattern::maxLength);
+    constexpr int rightPadding = contentHorizontalPadding
+        + playerPanelHorizontalPadding;
+    const int availableGridWidth = contentWidth - patternGridLeft - rightPadding;
+    return std::max(
+        minimumPatternCellSize,
+        (availableGridWidth - (stepCount - 1) * patternCellGap) / stepCount);
+}
+
+[[nodiscard]] juce::String patternMenuLabel(
+    std::size_t playerIndex, bool modified)
+{
+    return juce::String(static_cast<int>(playerIndex + 1))
+        + (modified ? " *" : "");
+}
+
+[[nodiscard]] juce::String velocityMenuLabel(
+    std::size_t playerIndex, bool modified)
+{
+    return juce::String(static_cast<int>(playerIndex + 1))
+        + (modified ? " *" : "");
+}
+
+class LaneMenuButton final : public juce::TextButton
+{
+public:
+    enum class Kind { pattern, velocity };
+
+    explicit LaneMenuButton(Kind kind) : kind_(kind) {}
+
+    void paintButton(
+        juce::Graphics& graphics,
+        bool isMouseOverButton,
+        bool isButtonDown) override
+    {
+        auto face = juce::Colour(panel);
+        if (isButtonDown)
+            face = face.darker(0.12f);
+        else if (isMouseOverButton)
+            face = face.brighter(0.08f);
+
+        const auto bounds = getLocalBounds().toFloat().reduced(1.0f);
+        graphics.setColour(face);
+        graphics.fillRoundedRectangle(bounds, 3.0f);
+        graphics.setColour(juce::Colour(border));
+        graphics.drawRoundedRectangle(bounds, 3.0f, 1.5f);
+
+        if (kind_ == Kind::pattern)
+        {
+            constexpr int previewSteps = 6;
+            constexpr float cellSize = 5.0f;
+            constexpr float gap = 2.0f;
+            const float startX = 8.0f;
+            const float centreY = static_cast<float>(getHeight()) * 0.5f;
+            for (int step = 0; step < previewSteps; ++step)
+            {
+                const bool hit = step == 0 || step == 3;
+                graphics.setColour(juce::Colour(
+                    hit ? uiYellow : lightGray));
+                graphics.fillRect(
+                    startX + static_cast<float>(step) * (cellSize + gap),
+                    centreY - cellSize * 0.5f,
+                    cellSize,
+                    cellSize);
+            }
+        }
+        else
+        {
+            const float left = 8.0f;
+            const float right = 45.0f;
+            const float centreY = static_cast<float>(getHeight()) * 0.62f;
+            juce::Path wave;
+            wave.startNewSubPath(left, centreY);
+            wave.cubicTo(
+                left + 9.0f, centreY - 18.0f,
+                right - 9.0f, centreY - 18.0f,
+                right, centreY);
+            graphics.setColour(juce::Colour(warmIvory));
+            graphics.strokePath(wave, juce::PathStrokeType(2.2f));
+            graphics.fillEllipse(left - 3.0f, centreY - 3.0f, 6.0f, 6.0f);
+            graphics.fillEllipse(right - 3.0f, centreY - 3.0f, 6.0f, 6.0f);
+        }
+
+        graphics.setColour(juce::Colour(primaryText));
+        graphics.setFont(juce::Font(
+            juce::FontOptions(13.0f, juce::Font::bold)));
+        graphics.drawText(
+            getButtonText(),
+            53,
+            0,
+            getWidth() - 58,
+            getHeight(),
+            juce::Justification::centred);
+    }
+
+private:
+    Kind kind_;
+};
+
+class PatternPreviewMenuItem final : public juce::PopupMenu::CustomComponent
+{
+public:
+    PatternPreviewMenuItem(lps::Pattern pattern, bool selected)
+        : juce::PopupMenu::CustomComponent(true),
+          pattern_(pattern),
+          selected_(selected)
+    {
+    }
+
+    void getIdealSize(int& idealWidth, int& idealHeight) override
+    {
+        idealWidth = 310;
+        idealHeight = 38;
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        if (isItemHighlighted())
+            graphics.fillAll(juce::Colour(uiBlue).withAlpha(0.3f));
+
+        const int stepCount = juce::jlimit(
+            1, static_cast<int>(lps::Pattern::maxLength),
+            static_cast<int>(pattern_.length));
+        constexpr int gap = 2;
+        const int availableWidth = getWidth() - 20;
+        const int cellSize = juce::jlimit(
+            6, 20, (availableWidth - gap * (stepCount - 1)) / stepCount);
+        const int previewWidth = stepCount * cellSize + (stepCount - 1) * gap;
+        int x = 10;
+        const int y = (getHeight() - cellSize) / 2;
+
+        if (selected_)
+        {
+            graphics.setColour(juce::Colour(uiBlue));
+            graphics.fillRect(2, 4, 4, getHeight() - 8);
+        }
+
+        for (int step = 0; step < stepCount; ++step)
+        {
+            const bool hit = pattern_.hits[static_cast<std::size_t>(step)];
+            const auto restColour = (step / 4) % 2 == 0
+                ? juce::Colour(lightGray)
+                : juce::Colour(patternStepOffAlternate);
+            graphics.setColour(hit ? juce::Colour(uiYellow) : restColour);
+            graphics.fillRect(x, y, cellSize, cellSize);
+            graphics.setColour(juce::Colour(uiBlack));
+            graphics.drawRect(x, y, cellSize, cellSize, 1);
+            x += cellSize + gap;
+        }
+
+        if (previewWidth < availableWidth)
+        {
+            graphics.setColour(juce::Colour(uiBlack));
+            graphics.drawVerticalLine(
+                10 + previewWidth,
+                static_cast<float>(y),
+                static_cast<float>(y + cellSize));
+        }
+    }
+
+private:
+    lps::Pattern pattern_;
+    bool selected_ = false;
+};
+
+class MuteButton final : public juce::TextButton
+{
+public:
+    void paintButton(
+        juce::Graphics& graphics,
+        bool isMouseOverButton,
+        bool isButtonDown) override
+    {
+        const bool engaged = getToggleState() || isButtonDown;
+        auto face = juce::Colour(engaged ? muteRed : inactive);
+        if (isMouseOverButton && !engaged)
+            face = face.brighter(0.08f);
+
+        const auto bounds = getLocalBounds().toFloat().reduced(1.0f);
+        graphics.setColour(face);
+        graphics.fillRoundedRectangle(bounds, 3.0f);
+        graphics.setColour(juce::Colour(
+            engaged ? muteRedDark : muteRed));
+        graphics.drawRoundedRectangle(bounds, 3.0f, 1.5f);
+
+        graphics.setFont(juce::Font(
+            juce::FontOptions(20.0f, juce::Font::bold)));
+        graphics.drawText(
+            "M",
+            getLocalBounds(),
+            juce::Justification::centred,
+            false);
+    }
+};
+
+class VelocitySliderPopup final : public juce::Component
+{
+public:
+    explicit VelocitySliderPopup(juce::Slider& target)
+    {
+        setInterceptsMouseClicks(false, false);
+        slider_.setSliderStyle(juce::Slider::LinearVertical);
+        slider_.setInterceptsMouseClicks(false, false);
+        slider_.setRange(
+            target.getMinimum(), target.getMaximum(), target.getInterval());
+        slider_.setNumDecimalPlacesToDisplay(0);
+        slider_.setTextBoxStyle(
+            juce::Slider::TextBoxBelow, false, 56, 20);
+        slider_.setScrollWheelEnabled(false);
+        slider_.setColour(
+            juce::Slider::trackColourId, juce::Colour(pastelHit));
+        slider_.setColour(
+            juce::Slider::thumbColourId, juce::Colour(primaryText));
+        slider_.setColour(
+            juce::Slider::backgroundColourId, juce::Colour(inactive));
+        slider_.setColour(
+            juce::Slider::textBoxTextColourId, juce::Colour(primaryText));
+        slider_.setColour(
+            juce::Slider::textBoxBackgroundColourId,
+            juce::Colours::transparentBlack);
+        slider_.setColour(
+            juce::Slider::textBoxOutlineColourId,
+            juce::Colours::transparentBlack);
+        slider_.getValueObject().referTo(target.getValueObject());
+        addAndMakeVisible(slider_);
+        setSize(76, 220);
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        graphics.fillAll(juce::Colour(panel));
+        graphics.setColour(juce::Colour(border));
+        graphics.drawRect(getLocalBounds(), 1);
+    }
+
+    void resized() override
+    {
+        slider_.setBounds(getLocalBounds().reduced(8));
+    }
+
+private:
+    juce::Slider slider_;
+};
 }
 
 LivePatternSequencerEditor::ContentComponent::ContentComponent(
@@ -100,6 +359,104 @@ void LivePatternSequencerEditor::MatrixComponent::resized()
     editor_.resizedMatrix();
 }
 
+void LivePatternSequencerEditor::MatrixComponent::mouseDown(
+    const juce::MouseEvent& event)
+{
+    editor_.matrixMouseDown(event);
+}
+
+LivePatternSequencerEditor::VelocityCell::VelocityCell()
+{
+    setSliderStyle(juce::Slider::RotaryVerticalDrag);
+    setRange(0.0, 255.0, 1.0);
+    setNumDecimalPlacesToDisplay(0);
+    setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+    setScrollWheelEnabled(false);
+    setMouseDragSensitivity(180);
+    setWantsKeyboardFocus(true);
+}
+
+void LivePatternSequencerEditor::VelocityCell::setActive(bool shouldBeActive)
+{
+    if (active_ == shouldBeActive)
+        return;
+    active_ = shouldBeActive;
+    repaint();
+}
+
+void LivePatternSequencerEditor::VelocityCell::paint(
+    juce::Graphics& graphics)
+{
+    auto square = getLocalBounds().reduced(1);
+    graphics.setColour(juce::Colour(inactive));
+    graphics.fillRect(square);
+
+    const auto valueRange = getMaximum() - getMinimum();
+    const auto proportion = valueRange > 0.0
+        ? juce::jlimit(0.0, 1.0, (getValue() - getMinimum()) / valueRange)
+        : 0.0;
+    const int fillHeight = juce::roundToInt(
+        static_cast<double>(square.getHeight()) * proportion);
+    graphics.setColour(juce::Colour(active_ ? pastelPlayhead : pastelHit));
+    graphics.fillRect(square.removeFromBottom(fillHeight));
+
+    graphics.setColour(active_
+        ? juce::Colour(pastelPlayhead).brighter(0.1f)
+        : juce::Colour(border).brighter(0.22f));
+    graphics.drawRect(getLocalBounds().reduced(1), 1);
+    graphics.setColour(juce::Colour(
+        proportion >= 0.5 ? background : primaryText));
+    graphics.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+    graphics.drawText(
+        juce::String(juce::roundToInt(getValue())),
+        getLocalBounds(),
+        juce::Justification::centred);
+}
+
+void LivePatternSequencerEditor::VelocityCell::mouseDown(
+    const juce::MouseEvent& event)
+{
+    auto* editor = findParentComponentOfClass<LivePatternSequencerEditor>();
+    if (editor == nullptr)
+        return;
+
+    activePopup_.reset();
+
+    juce::Slider::mouseDown(event);
+    auto popup = std::make_unique<VelocitySliderPopup>(*this);
+    const auto anchor = editor->getLocalArea(this, getLocalBounds());
+    const int popupWidth = popup->getWidth();
+    const int popupHeight = popup->getHeight();
+    int popupY = anchor.getY() - popupHeight - 8;
+    if (popupY < 0)
+        popupY = anchor.getBottom() + 8;
+    const int popupX = juce::jlimit(
+        0,
+        std::max(0, editor->getWidth() - popupWidth),
+        anchor.getCentreX() - popupWidth / 2);
+    popupY = juce::jlimit(
+        0,
+        std::max(0, editor->getHeight() - popupHeight),
+        popupY);
+    editor->addAndMakeVisible(*popup);
+    popup->setTopLeftPosition(popupX, popupY);
+    popup->toFront(false);
+    activePopup_ = std::move(popup);
+}
+
+void LivePatternSequencerEditor::VelocityCell::mouseDrag(
+    const juce::MouseEvent& event)
+{
+    juce::Slider::mouseDrag(event);
+}
+
+void LivePatternSequencerEditor::VelocityCell::mouseUp(
+    const juce::MouseEvent& event)
+{
+    juce::Slider::mouseUp(event);
+    activePopup_.reset();
+}
+
 LivePatternSequencerEditor::LivePatternSequencerEditor(
     LivePatternSequencerProcessor& processorToEdit)
     : juce::AudioProcessorEditor(processorToEdit),
@@ -108,6 +465,79 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
       content_(*this),
       matrix_(*this)
 {
+    lookAndFeel_.setColour(
+        juce::TextButton::buttonColourId, juce::Colour(panel));
+    lookAndFeel_.setColour(
+        juce::TextButton::buttonOnColourId, juce::Colour(uiYellow));
+    lookAndFeel_.setColour(
+        juce::TextButton::textColourOffId, juce::Colour(primaryText));
+    lookAndFeel_.setColour(
+        juce::TextButton::textColourOnId, juce::Colour(background));
+    lookAndFeel_.setColour(
+        juce::ComboBox::backgroundColourId, juce::Colour(panel));
+    lookAndFeel_.setColour(
+        juce::ComboBox::textColourId, juce::Colour(primaryText));
+    lookAndFeel_.setColour(
+        juce::ComboBox::outlineColourId, juce::Colour(border));
+    lookAndFeel_.setColour(
+        juce::ComboBox::arrowColourId, juce::Colour(uiYellow));
+    lookAndFeel_.setColour(
+        juce::PopupMenu::backgroundColourId, juce::Colour(panel));
+    lookAndFeel_.setColour(
+        juce::PopupMenu::textColourId, juce::Colour(primaryText));
+    lookAndFeel_.setColour(
+        juce::PopupMenu::highlightedBackgroundColourId,
+        juce::Colour(uiBlue));
+    lookAndFeel_.setColour(
+        juce::PopupMenu::highlightedTextColourId, juce::Colour(background));
+    lookAndFeel_.setColour(
+        juce::PopupMenu::headerTextColourId, juce::Colour(warmIvory));
+    lookAndFeel_.setColour(
+        juce::Slider::thumbColourId, juce::Colour(uiYellow));
+    lookAndFeel_.setColour(
+        juce::Slider::trackColourId, juce::Colour(warmIvory));
+    lookAndFeel_.setColour(
+        juce::Slider::backgroundColourId, juce::Colour(inactive));
+    lookAndFeel_.setColour(
+        juce::ToggleButton::tickColourId, juce::Colour(uiYellow));
+    lookAndFeel_.setColour(
+        juce::ToggleButton::tickDisabledColourId, juce::Colour(border));
+    lookAndFeel_.setColour(
+        juce::ToggleButton::textColourId, juce::Colour(primaryText));
+    lookAndFeel_.setColour(
+        juce::ScrollBar::thumbColourId, juce::Colour(uiBlue));
+    lookAndFeel_.setColour(
+        juce::ScrollBar::trackColourId, juce::Colour(background));
+    lookAndFeel_.setColour(
+        juce::AlertWindow::backgroundColourId, juce::Colour(panel));
+    lookAndFeel_.setColour(
+        juce::AlertWindow::textColourId, juce::Colour(primaryText));
+    lookAndFeel_.setColour(
+        juce::AlertWindow::outlineColourId, juce::Colour(uiYellow));
+    lookAndFeel_.setColour(
+        juce::Label::textColourId, juce::Colour(primaryText));
+    lookAndFeel_.setColour(
+        juce::TextEditor::backgroundColourId, juce::Colour(background));
+    lookAndFeel_.setColour(
+        juce::TextEditor::textColourId, juce::Colour(primaryText));
+    lookAndFeel_.setColour(
+        juce::TextEditor::outlineColourId, juce::Colour(border));
+    lookAndFeel_.setColour(
+        juce::TextEditor::focusedOutlineColourId, juce::Colour(uiBlue));
+    lookAndFeel_.setColour(
+        juce::TextEditor::highlightColourId, juce::Colour(uiBlue));
+    lookAndFeel_.setColour(
+        juce::TextEditor::highlightedTextColourId, juce::Colour(background));
+    lookAndFeel_.setColour(
+        juce::TooltipWindow::backgroundColourId, juce::Colour(panel));
+    lookAndFeel_.setColour(
+        juce::TooltipWindow::textColourId, juce::Colour(primaryText));
+    lookAndFeel_.setColour(
+        juce::TooltipWindow::outlineColourId, juce::Colour(uiYellow));
+    setLookAndFeel(&lookAndFeel_);
+
+    patternMenuButtons_.reserve(playerCount_);
+    velocityMenuButtons_.reserve(playerCount_);
     patternSelectors_.reserve(playerCount_);
     savePatternButtons_.reserve(playerCount_);
     resetToMasterButtons_.reserve(playerCount_);
@@ -121,7 +551,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     increaseVelocityModulationLengthButtons_.reserve(playerCount_);
     velocityModulationSliders_.reserve(
         playerCount_ * lps::VelocityModulation::maxLength);
-    suppressionButtons_.reserve(playerCount_ * playerCount_);
 
     for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
     {
@@ -129,6 +558,29 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             processor_.playerSupportsPatternEditingForUi(playerIndex);
         const bool supportsVelocity =
             processor_.playerSupportsVelocityEditingForUi(playerIndex);
+
+        patternMenuButtons_.push_back(std::make_unique<LaneMenuButton>(
+            LaneMenuButton::Kind::pattern));
+        auto& patternMenuButton = *patternMenuButtons_.back();
+        patternMenuButton.setButtonText(patternMenuLabel(playerIndex, false));
+        patternMenuButton.setTooltip("Choose a pattern, playback speed, or save");
+        patternMenuButton.onClick = [this, playerIndex]
+        {
+            showPatternMenu(playerIndex);
+        };
+        content_.addAndMakeVisible(patternMenuButton);
+
+        velocityMenuButtons_.push_back(std::make_unique<LaneMenuButton>(
+            LaneMenuButton::Kind::velocity));
+        auto& velocityMenuButton = *velocityMenuButtons_.back();
+        velocityMenuButton.setButtonText(velocityMenuLabel(playerIndex, false));
+        velocityMenuButton.setTooltip("Choose or save a velocity modulation");
+        velocityMenuButton.onClick = [this, playerIndex]
+        {
+            showVelocityMenu(playerIndex);
+        };
+        content_.addAndMakeVisible(velocityMenuButton);
+
         patternSelectors_.push_back(std::make_unique<juce::ComboBox>());
         auto& selector = *patternSelectors_.back();
         for (std::size_t patternIndex = 0;
@@ -149,7 +601,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             if (selected >= 0)
                 processor_.selectPatternForPlayer(playerIndex, static_cast<std::size_t>(selected));
         };
-        content_.addAndMakeVisible(selector);
 
         savePatternButtons_.push_back(std::make_unique<juce::TextButton>());
         auto& saveButton = *savePatternButtons_.back();
@@ -160,7 +611,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         {
             beginSavePlayerPattern(playerIndex);
         };
-        content_.addAndMakeVisible(saveButton);
 
         resetToMasterButtons_.push_back(std::make_unique<juce::TextButton>());
         auto& resetButton = *resetToMasterButtons_.back();
@@ -205,7 +655,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             if (selected >= 0)
                 processor_.setPlayerPlaybackSpeed(playerIndex, static_cast<std::size_t>(selected));
         };
-        content_.addAndMakeVisible(speedSelector);
 
         offsetLeftButtons_.push_back(std::make_unique<juce::TextButton>());
         auto& offsetLeftButton = *offsetLeftButtons_.back();
@@ -227,9 +676,9 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         };
         content_.addAndMakeVisible(offsetRightButton);
 
-        muteButtons_.push_back(std::make_unique<juce::TextButton>());
+        muteButtons_.push_back(std::make_unique<MuteButton>());
         auto& muteButton = *muteButtons_.back();
-        muteButton.setButtonText("MUTE");
+        muteButton.setButtonText("M");
         muteButton.setClickingTogglesState(true);
         muteButton.setToggleState(
             processor_.playerMutedForUi(playerIndex),
@@ -239,10 +688,10 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             + " note output while its sequence keeps running");
         muteButton.setColour(
             juce::TextButton::buttonOnColourId,
-            juce::Colour(0xffb84646));
+            juce::Colour(muteRed));
         muteButton.setColour(
             juce::TextButton::textColourOnId,
-            juce::Colour(primaryText));
+            juce::Colour(muteRedDark));
         muteButton.onClick = [this, playerIndex]
         {
             processor_.setPlayerMuted(
@@ -279,7 +728,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
                     playerIndex, static_cast<std::size_t>(selected));
             }
         };
-        content_.addAndMakeVisible(velocitySelector);
 
         saveVelocityModulationButtons_.push_back(
             std::make_unique<juce::TextButton>());
@@ -291,7 +739,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         {
             beginSavePlayerVelocityModulation(playerIndex);
         };
-        content_.addAndMakeVisible(velocitySaveButton);
 
         decreaseVelocityModulationLengthButtons_.push_back(
             std::make_unique<juce::TextButton>());
@@ -346,7 +793,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
              ++step)
         {
             velocityModulationSliders_.push_back(
-                std::make_unique<juce::Slider>());
+                std::make_unique<VelocityCell>());
             const auto sliderIndex = velocityModulationSliders_.size() - 1;
             auto& slider = *velocityModulationSliders_.back();
             slider.setName(
@@ -355,35 +802,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             slider.setTooltip(
                 "Velocity step " + juce::String(static_cast<int>(step + 1))
                 + " (0-255)");
-            slider.setSliderStyle(
-                juce::Slider::RotaryHorizontalVerticalDrag);
-            slider.setRange(0.0, 255.0, 1.0);
-            slider.setNumDecimalPlacesToDisplay(0);
-            slider.setTextBoxStyle(
-                juce::Slider::TextBoxBelow,
-                false,
-                velocityKnobWidth,
-                velocityTextBoxHeight);
             slider.setDoubleClickReturnValue(true, 255.0);
-            slider.setScrollWheelEnabled(false);
-            slider.setColour(
-                juce::Slider::rotarySliderFillColourId,
-                juce::Colour(cyan));
-            slider.setColour(
-                juce::Slider::rotarySliderOutlineColourId,
-                juce::Colour(inactive));
-            slider.setColour(
-                juce::Slider::thumbColourId,
-                juce::Colour(primaryText));
-            slider.setColour(
-                juce::Slider::textBoxTextColourId,
-                juce::Colour(primaryText));
-            slider.setColour(
-                juce::Slider::textBoxBackgroundColourId,
-                juce::Colours::transparentBlack);
-            slider.setColour(
-                juce::Slider::textBoxOutlineColourId,
-                juce::Colours::transparentBlack);
             slider.setValue(
                 static_cast<double>(modulation.values[step]),
                 juce::dontSendNotification);
@@ -407,38 +826,13 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             slider.setVisible(supportsVelocity && step < modulation.length);
         }
 
-        selector.setVisible(supportsPattern);
-        saveButton.setVisible(supportsPattern);
-        speedSelector.setVisible(supportsPattern);
+        patternMenuButton.setVisible(supportsPattern);
         offsetLeftButton.setVisible(supportsPattern);
         offsetRightButton.setVisible(supportsPattern);
-        velocitySelector.setVisible(supportsVelocity);
-        velocitySaveButton.setVisible(supportsVelocity);
+        velocityMenuButton.setVisible(supportsVelocity);
         decreaseLengthButton.setVisible(supportsVelocity);
         increaseLengthButton.setVisible(supportsVelocity);
     }
-
-    for (std::size_t row = 0; row < playerCount_; ++row)
-        for (std::size_t column = 0; column < playerCount_; ++column)
-        {
-            suppressionButtons_.push_back(std::make_unique<juce::ToggleButton>());
-            auto& button = *suppressionButtons_.back();
-            button.setButtonText(row == column ? "--" : "X");
-            button.setEnabled(row != column);
-            button.setToggleState(
-                processor_.suppression(row, column), juce::dontSendNotification);
-            const auto suppressorName = processor_.playerNameForUi(row);
-            const auto suppressedName = processor_.playerNameForUi(column);
-            button.setTooltip(
-                suppressorName + " suppresses " + suppressedName);
-            button.onClick = [this, row, column]
-            {
-                const auto index = row * playerCount_ + column;
-                processor_.setSuppression(
-                    row, column, suppressionButtons_[index]->getToggleState());
-            };
-            matrix_.addAndMakeVisible(button);
-        }
 
     displayedPatternModified_.assign(playerCount_, false);
     displayedVelocityModulationModified_.assign(playerCount_, false);
@@ -451,18 +845,27 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     viewport_.setScrollBarsShown(true, true);
     viewport_.setWantsKeyboardFocus(false);
     addAndMakeVisible(viewport_);
-    addAndMakeVisible(matrix_);
 
-    const int rowsHeight = playerCount_ == 0
-        ? 0
-        : static_cast<int>(playerCount_) * playerStride - playerPanelGap;
-    const int playerContentHeight = std::max(1, rowsHeight + playerBottomPadding);
-    content_.setSize(requiredContentWidth(), playerContentHeight);
+    suppressionButton_.setButtonText("SUPPRESSION...");
+    suppressionButton_.setTooltip("Open or close the suppression matrix");
+    suppressionButton_.onClick = [this] { showSuppressionMatrix(); };
+    addAndMakeVisible(suppressionButton_);
 
-    constexpr int initialEditorHeight = 650;
-    const int editorWidth = outerPadding * 2
-        + minimumPlayerContentWidth + viewport_.getScrollBarThickness()
-        + sectionGap + matrixPanelWidth();
+    suppressionCloseButton_.setButtonText("CLOSE");
+    suppressionCloseButton_.setTooltip("Close the suppression matrix");
+    suppressionCloseButton_.setColour(
+        juce::TextButton::buttonColourId, juce::Colour(uiRed));
+    suppressionCloseButton_.setColour(
+        juce::TextButton::textColourOffId, juce::Colour(darkGray));
+    suppressionCloseButton_.onClick = [this] { showSuppressionMatrix(); };
+    matrix_.addAndMakeVisible(suppressionCloseButton_);
+
+    content_.setSize(requiredContentWidth(), 1);
+
+    constexpr int initialEditorHeight = 720;
+    constexpr int editorWidth = 1466;
+    setResizable(true, false);
+    setResizeLimits(800, 400, 4096, 2160);
     setSize(editorWidth, initialEditorHeight);
     startTimerHz(30);
 
@@ -479,30 +882,18 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
 LivePatternSequencerEditor::~LivePatternSequencerEditor()
 {
     stopTimer();
+    setLookAndFeel(nullptr);
     viewport_.setViewedComponent(nullptr, false);
+    if (suppressionWindow_ != nullptr)
+    {
+        suppressionWindow_->clearContentComponent();
+        suppressionWindow_->exitModalState(0);
+    }
 }
 
 void LivePatternSequencerEditor::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(juce::Colour(background));
-
-    auto bounds = getLocalBounds().reduced(outerPadding);
-    auto header = bounds.removeFromTop(headerHeight);
-
-    graphics.setColour(juce::Colour(primaryText));
-    graphics.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
-    graphics.drawText(
-        "LIVE PATTERN SEQUENCER",
-        header.removeFromLeft(430),
-        juce::Justification::centredLeft);
-
-    const bool playing = processor_.playingForUi();
-    graphics.setColour(juce::Colour(playing ? cyan : secondaryText));
-    graphics.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
-    graphics.drawText(
-        playing ? "REAPER CLOCK: PLAYING" : "REAPER CLOCK: STOPPED",
-        header,
-        juce::Justification::centredRight);
 }
 
 void LivePatternSequencerEditor::resized()
@@ -510,61 +901,50 @@ void LivePatternSequencerEditor::resized()
     auto bounds = getLocalBounds().reduced(outerPadding);
     bounds.removeFromTop(headerHeight + sectionGap);
 
-    auto matrixBounds = bounds.removeFromRight(matrixPanelWidth());
-    bounds.removeFromRight(sectionGap);
+    auto footer = bounds.removeFromBottom(clickTargetSize);
+    bounds.removeFromBottom(sectionGap);
     viewport_.setBounds(bounds);
-    matrix_.setBounds(matrixBounds);
+    suppressionButton_.setBounds(footer.removeFromRight(160));
 
-    const bool needsVerticalScrollbar = content_.getHeight() > viewport_.getHeight();
-    const int visiblePlayerWidth = viewport_.getWidth()
-        - (needsVerticalScrollbar ? viewport_.getScrollBarThickness() : 0);
-    const int contentWidth = std::max(requiredContentWidth(), visiblePlayerWidth);
-    if (content_.getWidth() != contentWidth)
-        content_.setSize(contentWidth, content_.getHeight());
+    updateContentSize();
 }
 
 void LivePatternSequencerEditor::resizedContent()
 {
     constexpr int controlsX = contentHorizontalPadding + playerPanelHorizontalPadding;
-    constexpr int patternSelectorX = controlsX + 70;
-    constexpr int secondaryControlsX = patternSelectorX + 112;
-    constexpr int lowerButtonWidth = 52;
-    constexpr int lowerButtonGap = 4;
-    constexpr int muteButtonX = secondaryControlsX + 66;
-    constexpr int lengthButtonWidth = 24;
+    constexpr int menuWidth = 86;
+    constexpr int resetWidth = 52;
+    constexpr int resetX = controlsX + menuWidth + velocityControlGap;
+    constexpr int offsetLeftX = resetX + resetWidth + velocityControlGap;
+    constexpr int offsetRightX = offsetLeftX + clickTargetSize
+        + velocityControlGap;
+    constexpr int muteX = offsetRightX + clickTargetSize
+        + velocityControlGap;
+    constexpr int decreaseX = controlsX + menuWidth + velocityControlGap;
+    constexpr int increaseX = decreaseX + clickTargetSize
+        + velocityControlGap;
 
-    for (std::size_t index = 0; index < patternSelectors_.size(); ++index)
+    for (std::size_t index = 0; index < patternMenuButtons_.size(); ++index)
     {
-        const int y = static_cast<int>(index) * playerStride;
-        patternSelectors_[index]->setBounds(patternSelectorX, y + 3, 108, 21);
-        savePatternButtons_[index]->setBounds(
-            patternSelectorX, y + 27, lowerButtonWidth, 17);
+        const int y = static_cast<int>(index) * playerStride();
+        patternMenuButtons_[index]->setBounds(
+            controlsX, y + 1, menuWidth, clickTargetSize);
         resetToMasterButtons_[index]->setBounds(
-            patternSelectorX + lowerButtonWidth + lowerButtonGap,
-            y + 27,
-            lowerButtonWidth,
-            17);
-        speedSelectors_[index]->setBounds(secondaryControlsX, y + 4, 62, 21);
-        offsetLeftButtons_[index]->setBounds(secondaryControlsX, y + 27, 30, 17);
-        offsetRightButtons_[index]->setBounds(secondaryControlsX + 32, y + 27, 30, 17);
-        muteButtons_[index]->setBounds(muteButtonX, y + 3, 46, 41);
+            resetX, y + 1, resetWidth, clickTargetSize);
+        offsetLeftButtons_[index]->setBounds(
+            offsetLeftX, y + 1, clickTargetSize, clickTargetSize);
+        offsetRightButtons_[index]->setBounds(
+            offsetRightX, y + 1, clickTargetSize, clickTargetSize);
+        muteButtons_[index]->setBounds(
+            muteX, y + 1, 46, clickTargetSize);
 
-        const int velocityY = y + playerPanelHeight + playerLaneGap;
-        velocityModulationSelectors_[index]->setBounds(
-            patternSelectorX, velocityY + 4, 108, 21);
-        saveVelocityModulationButtons_[index]->setBounds(
-            patternSelectorX, velocityY + 29, lowerButtonWidth, 18);
+        const int modulationY = y + patternPanelHeight() + 1;
+        velocityMenuButtons_[index]->setBounds(
+            controlsX, modulationY, menuWidth, clickTargetSize);
         decreaseVelocityModulationLengthButtons_[index]->setBounds(
-            patternSelectorX + lowerButtonWidth + lowerButtonGap,
-            velocityY + 29,
-            lengthButtonWidth,
-            18);
+            decreaseX, modulationY, clickTargetSize, clickTargetSize);
         increaseVelocityModulationLengthButtons_[index]->setBounds(
-            patternSelectorX + lowerButtonWidth + lowerButtonGap
-                + lengthButtonWidth + lowerButtonGap,
-            velocityY + 29,
-            lengthButtonWidth,
-            18);
+            increaseX, modulationY, clickTargetSize, clickTargetSize);
 
         for (std::size_t step = 0;
              step < lps::VelocityModulation::maxLength;
@@ -576,7 +956,7 @@ void LivePatternSequencerEditor::resizedContent()
                 velocityGridLeft
                     + static_cast<int>(step)
                         * (velocityKnobWidth + velocityKnobGap),
-                velocityY + 3,
+                modulationY,
                 velocityKnobWidth,
                 velocityKnobHeight);
         }
@@ -585,18 +965,30 @@ void LivePatternSequencerEditor::resizedContent()
 
 void LivePatternSequencerEditor::resizedMatrix()
 {
-    for (std::size_t row = 0; row < playerCount_; ++row)
-        for (std::size_t column = 0; column < playerCount_; ++column)
-            suppressionButtons_[row * playerCount_ + column]->setBounds(
-                matrixGridLeft + static_cast<int>(column) * matrixCellWidth + 3,
-                matrixGridTop + static_cast<int>(row) * matrixCellHeight + 3,
-                28,
-                24);
+    suppressionCloseButton_.setBounds(matrix_.getWidth() - 92, 10, 78, 32);
+}
+
+void LivePatternSequencerEditor::matrixMouseDown(
+    const juce::MouseEvent& event)
+{
+    const int relativeX = event.x - matrixGridLeft;
+    const int relativeY = event.y - matrixGridTop;
+    if (relativeX < 0 || relativeY < 0)
+        return;
+
+    const auto column = static_cast<std::size_t>(relativeX / matrixCellWidth);
+    const auto row = static_cast<std::size_t>(relativeY / matrixCellHeight);
+    if (row >= playerCount_ || column >= playerCount_ || row == column)
+        return;
+
+    processor_.setSuppression(
+        row, column, !processor_.suppression(row, column));
+    matrix_.repaint();
 }
 
 void LivePatternSequencerEditor::timerCallback()
 {
-    updateContentWidth();
+    updateContentSize();
     updatePatternModifiedIndicators();
     for (std::size_t playerIndex = 0;
          playerIndex < playerCount_;
@@ -606,8 +998,6 @@ void LivePatternSequencerEditor::timerCallback()
     }
     updateVelocityModulationModifiedIndicators();
     updateResetToMasterIndicators();
-    auto header = getLocalBounds().reduced(outerPadding).removeFromTop(headerHeight);
-    repaint(header);
     content_.repaint();
 }
 
@@ -899,6 +1289,9 @@ void LivePatternSequencerEditor::refreshVelocityModulationControls(
         processor_.velocityModulationForUi(playerIndex);
     const auto length = std::min(
         modulation.length, lps::VelocityModulation::maxLength);
+    const bool playing = processor_.playingForUi();
+    const int currentStep =
+        processor_.currentVelocityModulationStepForUi(playerIndex);
     decreaseVelocityModulationLengthButtons_[playerIndex]->setEnabled(
         length > 1);
     increaseVelocityModulationLengthButtons_[playerIndex]->setEnabled(
@@ -915,6 +1308,9 @@ void LivePatternSequencerEditor::refreshVelocityModulationControls(
 
         auto& slider = *velocityModulationSliders_[sliderIndex];
         const bool shouldBeVisible = step < length;
+        slider.setActive(
+            playing && shouldBeVisible
+            && static_cast<int>(step) == currentStep);
         if (slider.isVisible() != shouldBeVisible)
             slider.setVisible(shouldBeVisible);
 
@@ -942,8 +1338,10 @@ void LivePatternSequencerEditor::updatePatternModifiedIndicators(bool force)
         displayedPatternModified_[playerIndex] = modified;
         auto& selector = *patternSelectors_[playerIndex];
         auto& saveButton = *savePatternButtons_[playerIndex];
+        auto& menuButton = *patternMenuButtons_[playerIndex];
         saveButton.setEnabled(modified);
         saveButton.setButtonText(modified ? "Save *" : "Save");
+        menuButton.setButtonText(patternMenuLabel(playerIndex, modified));
 
         if (modified)
         {
@@ -953,6 +1351,9 @@ void LivePatternSequencerEditor::updatePatternModifiedIndicators(bool force)
             saveButton.setColour(
                 juce::TextButton::buttonColourId,
                 juce::Colour(amber).darker(0.45f));
+            menuButton.setColour(
+                juce::TextButton::buttonColourId,
+                juce::Colour(amber).darker(0.45f));
         }
         else
         {
@@ -960,10 +1361,12 @@ void LivePatternSequencerEditor::updatePatternModifiedIndicators(bool force)
             selector.removeColour(juce::ComboBox::textColourId);
             selector.removeColour(juce::ComboBox::arrowColourId);
             saveButton.removeColour(juce::TextButton::buttonColourId);
+            menuButton.removeColour(juce::TextButton::buttonColourId);
         }
 
         selector.repaint();
         saveButton.repaint();
+        menuButton.repaint();
     }
 }
 
@@ -987,8 +1390,10 @@ void LivePatternSequencerEditor::updateVelocityModulationModifiedIndicators(
         displayedVelocityModulationModified_[playerIndex] = modified;
         auto& selector = *velocityModulationSelectors_[playerIndex];
         auto& saveButton = *saveVelocityModulationButtons_[playerIndex];
+        auto& menuButton = *velocityMenuButtons_[playerIndex];
         saveButton.setEnabled(modified);
         saveButton.setButtonText(modified ? "Save *" : "Save");
+        menuButton.setButtonText(velocityMenuLabel(playerIndex, modified));
 
         if (modified)
         {
@@ -1001,6 +1406,9 @@ void LivePatternSequencerEditor::updateVelocityModulationModifiedIndicators(
             saveButton.setColour(
                 juce::TextButton::buttonColourId,
                 juce::Colour(amber).darker(0.45f));
+            menuButton.setColour(
+                juce::TextButton::buttonColourId,
+                juce::Colour(amber).darker(0.45f));
         }
         else
         {
@@ -1008,10 +1416,12 @@ void LivePatternSequencerEditor::updateVelocityModulationModifiedIndicators(
             selector.removeColour(juce::ComboBox::textColourId);
             selector.removeColour(juce::ComboBox::arrowColourId);
             saveButton.removeColour(juce::TextButton::buttonColourId);
+            menuButton.removeColour(juce::TextButton::buttonColourId);
         }
 
         selector.repaint();
         saveButton.repaint();
+        menuButton.repaint();
     }
 }
 
@@ -1118,40 +1528,70 @@ void LivePatternSequencerEditor::showVelocityModulationLibraryWarning(
 juce::Rectangle<int> LivePatternSequencerEditor::cellsAreaForPlayer(
     std::size_t playerIndex) const
 {
-    const int y = static_cast<int>(playerIndex) * playerStride;
+    const int y = static_cast<int>(playerIndex) * playerStride();
     constexpr int stepCount = static_cast<int>(lps::Pattern::maxLength);
-    constexpr int width = stepCount * patternCellWidth
-        + (stepCount - 1) * patternCellGap;
+    const int size = cellWidth();
+    const int width = stepCount * size + (stepCount - 1) * patternCellGap;
     return {
         patternGridLeft,
-        y + (playerPanelHeight - patternCellHeight) / 2,
+        y + (patternPanelHeight() - size) / 2,
         width,
-        patternCellHeight
+        size
     };
 }
 
 int LivePatternSequencerEditor::cellWidth() const
 {
-    return patternCellWidth;
+    return patternCellSizeForContentWidth(content_.getWidth());
+}
+
+int LivePatternSequencerEditor::patternPanelHeight() const
+{
+    return std::max(clickTargetSize, cellWidth()) + 2;
+}
+
+int LivePatternSequencerEditor::playerStride() const
+{
+    return patternPanelHeight() + modulationPanelHeight;
 }
 
 int LivePatternSequencerEditor::requiredContentWidth() const
 {
     constexpr int stepCount = static_cast<int>(lps::Pattern::maxLength);
-    constexpr int gridWidth = stepCount * patternCellWidth
+    constexpr int gridWidth = stepCount * minimumPatternCellSize
         + (stepCount - 1) * patternCellGap;
     constexpr int rightPadding = contentHorizontalPadding + playerPanelHorizontalPadding;
-    return std::max(minimumPlayerContentWidth, patternGridLeft + gridWidth + rightPadding);
+    return patternGridLeft + gridWidth + rightPadding;
 }
 
-void LivePatternSequencerEditor::updateContentWidth()
+void LivePatternSequencerEditor::updateContentSize()
 {
-    const bool needsVerticalScrollbar = content_.getHeight() > viewport_.getHeight();
-    const int visiblePlayerWidth = viewport_.getWidth()
-        - (needsVerticalScrollbar ? viewport_.getScrollBarThickness() : 0);
-    const int width = std::max(requiredContentWidth(), visiblePlayerWidth);
-    if (content_.getWidth() != width)
-        content_.setSize(width, content_.getHeight());
+    if (viewport_.getWidth() <= 0 || viewport_.getHeight() <= 0)
+        return;
+
+    int width = std::max(requiredContentWidth(), viewport_.getWidth());
+    const auto heightForWidth = [this](int candidateWidth)
+    {
+        constexpr int panelChrome = 2;
+        const int size = patternCellSizeForContentWidth(candidateWidth);
+        const int stride = std::max(clickTargetSize, size) + panelChrome
+            + modulationPanelHeight;
+        return std::max(
+            1,
+            static_cast<int>(playerCount_) * stride + playerBottomPadding);
+    };
+
+    int height = heightForWidth(width);
+    if (height > viewport_.getHeight())
+    {
+        width = std::max(
+            requiredContentWidth(),
+            viewport_.getWidth() - viewport_.getScrollBarThickness());
+        height = heightForWidth(width);
+    }
+
+    if (content_.getWidth() != width || content_.getHeight() != height)
+        content_.setSize(width, height);
 }
 
 int LivePatternSequencerEditor::matrixPanelWidth() const
@@ -1236,8 +1676,9 @@ void LivePatternSequencerEditor::contentMouseDown(const juce::MouseEvent& event)
             const int selectedHandleX = draggedRangeHandle_ == DraggedRangeHandle::start
                 ? startX : endX;
             draggedRangeHandleOffsetX_ = event.x - selectedHandleX;
+            rangeHandleDragStart_ = event.getPosition();
+            rangeHandleWasDragged_ = false;
             content_.setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
-            updateDraggedRange(event.x);
             return;
         }
 
@@ -1252,13 +1693,39 @@ void LivePatternSequencerEditor::contentMouseDown(const juce::MouseEvent& event)
 
 void LivePatternSequencerEditor::contentMouseDrag(const juce::MouseEvent& event)
 {
+    if (draggedRangeHandle_ == DraggedRangeHandle::none)
+        return;
+
+    if (!rangeHandleWasDragged_)
+    {
+        const int distanceX = std::abs(event.x - rangeHandleDragStart_.x);
+        const int distanceY = std::abs(event.y - rangeHandleDragStart_.y);
+        if (std::max(distanceX, distanceY) < rangeHandleDragThreshold)
+            return;
+        rangeHandleWasDragged_ = true;
+    }
+
     updateDraggedRange(event.x);
 }
 
-void LivePatternSequencerEditor::contentMouseUp(const juce::MouseEvent&)
+void LivePatternSequencerEditor::contentMouseUp(const juce::MouseEvent& event)
 {
+    if (draggedRangeHandle_ != DraggedRangeHandle::none
+        && !rangeHandleWasDragged_
+        && draggedPlayerIndex_ < playerCount_)
+    {
+        const auto cells = cellsAreaForPlayer(draggedPlayerIndex_);
+        if (cells.contains(event.getPosition()))
+        {
+            processor_.togglePlayerStep(
+                draggedPlayerIndex_, stepAtX(draggedPlayerIndex_, event.x));
+            content_.repaint();
+        }
+    }
+
     draggedRangeHandle_ = DraggedRangeHandle::none;
     draggedRangeHandleOffsetX_ = 0;
+    rangeHandleWasDragged_ = false;
     content_.setMouseCursor(juce::MouseCursor::NormalCursor);
 }
 
@@ -1286,50 +1753,37 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
     graphics.fillAll(juce::Colour(background));
 
     const bool playing = processor_.playingForUi();
-    auto bounds = content_.getLocalBounds().reduced(contentHorizontalPadding, 0);
     for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
     {
-        auto patternPanel = bounds.removeFromTop(playerPanelHeight);
-        bounds.removeFromTop(playerLaneGap);
-        auto velocityPanel = bounds.removeFromTop(velocityPanelHeight);
-        bounds.removeFromTop(playerPanelGap);
+        const juce::Rectangle<int> patternPanel(
+            contentHorizontalPadding,
+            static_cast<int>(playerIndex) * playerStride(),
+            content_.getWidth() - contentHorizontalPadding * 2,
+            patternPanelHeight());
+        const juce::Rectangle<int> modulationPanel(
+            contentHorizontalPadding,
+            patternPanel.getBottom(),
+            content_.getWidth() - contentHorizontalPadding * 2,
+            modulationPanelHeight);
         graphics.setColour(juce::Colour(panel));
-        graphics.fillRoundedRectangle(patternPanel.toFloat(), 3.0f);
-        graphics.setColour(juce::Colour(border));
-        graphics.drawRoundedRectangle(patternPanel.toFloat(), 3.0f, 1.0f);
+        graphics.fillRect(patternPanel);
+        graphics.setColour(juce::Colour(border).brighter(0.08f));
+        graphics.fillRect(
+            patternPanel.getX(), patternPanel.getBottom() - 2,
+            patternPanel.getWidth(), 2);
 
-        const int infoX = patternPanel.getX() + playerPanelHorizontalPadding;
-        graphics.setColour(juce::Colour(
-            processor_.playerIsMasterForUi(playerIndex) ? amber : cyan));
-        graphics.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
-        graphics.drawFittedText(
-            processor_.playerNameForUi(playerIndex),
-            infoX,
-            patternPanel.getY() + 4,
-            64,
-            19,
-            juce::Justification::centredLeft,
-            1,
-            0.75f);
-        graphics.setColour(juce::Colour(secondaryText));
-        graphics.setFont(juce::Font(juce::FontOptions(9.0f)));
-        const auto midiLabel = "CH " + juce::String(processor_.drumMidiChannelForUi())
-            + " / N " + juce::String(processor_.playerMidiNoteForUi(playerIndex));
-        graphics.drawFittedText(
-            midiLabel,
-            infoX,
-            patternPanel.getY() + 25,
-            64,
-            17,
-            juce::Justification::centredLeft,
-            1,
-            0.75f);
+        graphics.setColour(juce::Colour(panel));
+        graphics.fillRect(modulationPanel);
+        graphics.setColour(juce::Colour(border).brighter(0.08f));
+        graphics.fillRect(
+            modulationPanel.getX(), modulationPanel.getBottom() - 3,
+            modulationPanel.getWidth(), 3);
 
         graphics.setColour(juce::Colour(border).withMultipliedAlpha(0.65f));
         graphics.drawVerticalLine(
             patternGridLeft - controlsToGridGap / 2,
-            static_cast<float>(patternPanel.getY() + 5),
-            static_cast<float>(patternPanel.getBottom() - 5));
+            static_cast<float>(patternPanel.getY() + 1),
+            static_cast<float>(patternPanel.getBottom() - 2));
 
         auto cellsArea = cellsAreaForPlayer(playerIndex);
         const auto pattern = processor_.patternForUi(playerIndex);
@@ -1353,29 +1807,35 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
                  step < static_cast<std::uint16_t>(lps::Pattern::maxLength);
                  ++step)
             {
-                auto cell = cellsArea.removeFromLeft(patternCellWidth);
+                auto cell = cellsArea.removeFromLeft(cellWidth());
                 const bool isCurrent = playing && static_cast<int>(step) == currentStep;
                 const bool isHit = pattern.isHit(step);
                 const bool isInsideWindow = pattern.isInsidePlaybackWindow(step);
-                auto fillColour = juce::Colour(isHit ? cyan : inactive);
+                const auto restColour = (step / 4) % 2 == 0
+                    ? patternStepOff
+                    : patternStepOffAlternate;
+                auto fillColour = juce::Colour(
+                    isHit ? patternStepOn : restColour);
                 if (!isInsideWindow)
                     fillColour = fillColour.withMultipliedAlpha(0.28f);
                 graphics.setColour(fillColour);
                 graphics.fillRoundedRectangle(cell.toFloat(), 2.0f);
-                const auto cellBorder = step % 4 == 0
-                    ? juce::Colour(border).brighter(0.22f)
-                    : juce::Colour(border);
+                const auto cellBorder = isCurrent
+                    ? juce::Colour(patternPlayhead)
+                    : (isHit
+                        ? juce::Colour(uiYellow)
+                        : (step % 4 == 0
+                            ? juce::Colour(darkGray).darker(0.18f)
+                            : juce::Colour(darkGray)));
                 graphics.setColour(cellBorder);
-                graphics.drawRoundedRectangle(cell.toFloat(), 2.0f, 1.0f);
+                graphics.drawRoundedRectangle(
+                    cell.toFloat(), 2.0f,
+                    (isCurrent || isHit) ? 2.5f : 1.0f);
 
-                if (isCurrent)
-                {
-                    const auto playheadBar = cell.reduced(3, 0).removeFromBottom(3);
-                    graphics.setColour(juce::Colour(amber));
-                    graphics.fillRoundedRectangle(playheadBar.toFloat(), 1.5f);
-                }
-
-                auto textColour = juce::Colour(isHit ? primaryText : secondaryText);
+                auto textColour = juce::Colour(
+                    isCurrent
+                        ? patternPlayhead
+                        : (isHit ? patternStepTextOn : patternStepTextOff));
                 if (!isInsideWindow)
                     textColour = textColour.withMultipliedAlpha(0.38f);
                 graphics.setColour(textColour);
@@ -1385,74 +1845,14 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
             }
         }
 
-        graphics.setColour(juce::Colour(panel));
-        graphics.fillRoundedRectangle(velocityPanel.toFloat(), 3.0f);
-        graphics.setColour(juce::Colour(border));
-        graphics.drawRoundedRectangle(velocityPanel.toFloat(), 3.0f, 1.0f);
-
-        const bool supportsVelocity =
-            processor_.playerSupportsVelocityEditingForUi(playerIndex);
-        const auto velocityModulation = supportsVelocity
-            ? processor_.velocityModulationForUi(playerIndex)
-            : lps::VelocityModulation {};
-        graphics.setColour(juce::Colour(cyan));
-        graphics.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
-        graphics.drawFittedText(
-            supportsVelocity ? "VELOCITY" : "MODULATION",
-            velocityPanel.getX() + playerPanelHorizontalPadding,
-            velocityPanel.getY() + 12,
-            64,
-            18,
-            juce::Justification::centredLeft,
-            1,
-            0.75f);
-        graphics.setColour(juce::Colour(secondaryText));
-        graphics.setFont(juce::Font(juce::FontOptions(9.0f)));
-        graphics.drawFittedText(
-            supportsVelocity
-                ? juce::String(static_cast<int>(velocityModulation.length))
-                    + (velocityModulation.length == 1 ? " HIT" : " HITS")
-                : juce::String("RUNTIME LANE"),
-            velocityPanel.getX() + playerPanelHorizontalPadding,
-            velocityPanel.getY() + 35,
-            64,
-            17,
-            juce::Justification::centredLeft,
-            1,
-            0.75f);
-
-        graphics.setColour(juce::Colour(border).withMultipliedAlpha(0.65f));
-        graphics.drawVerticalLine(
-            velocityGridLeft - controlsToGridGap / 2,
-            static_cast<float>(velocityPanel.getY() + 6),
-            static_cast<float>(velocityPanel.getBottom() - 6));
-
-        const int currentVelocityStep =
-            processor_.currentVelocityModulationStepForUi(playerIndex);
-        if (playing
-            && currentVelocityStep >= 0
-            && static_cast<std::size_t>(currentVelocityStep)
-                < velocityModulation.length)
-        {
-            const int knobX = velocityGridLeft
-                + currentVelocityStep * (velocityKnobWidth + velocityKnobGap);
-            const juce::Rectangle<int> playheadBar(
-                knobX + 8,
-                velocityPanel.getBottom() - 5,
-                velocityKnobWidth - 16,
-                3);
-            graphics.setColour(juce::Colour(amber));
-            graphics.fillRoundedRectangle(playheadBar.toFloat(), 1.5f);
-        }
-
         if (!supportsPattern || pattern.stepCount == 0)
             continue;
 
         const auto bracketArea = cellsAreaForPlayer(playerIndex);
-        const int pitch = patternCellWidth + patternCellGap;
+        const int pitch = cellWidth() + patternCellGap;
         const int startX = bracketArea.getX() + static_cast<int>(pattern.playbackStart) * pitch;
         const int endX = bracketArea.getX()
-            + static_cast<int>(pattern.playbackEnd) * pitch + patternCellWidth;
+            + static_cast<int>(pattern.playbackEnd) * pitch + cellWidth();
         const int top = bracketArea.getY() - rangeHandleExtension;
         const int bottom = bracketArea.getBottom() + rangeHandleExtension;
         juce::Path brackets;
@@ -1469,8 +1869,180 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
         brackets.lineTo(
             static_cast<float>(endX - rangeHandleCapLength), static_cast<float>(bottom));
         graphics.setColour(juce::Colour(amber));
-        graphics.strokePath(brackets, juce::PathStrokeType(2.0f));
+        graphics.strokePath(
+            brackets, juce::PathStrokeType(rangeHandleStrokeWidth));
+
+        constexpr float gripWidth = 12.0f;
+        constexpr float gripHeight = 28.0f;
+        const float gripY = static_cast<float>(top + bottom) * 0.5f
+            - gripHeight * 0.5f;
+        graphics.fillRoundedRectangle(
+            static_cast<float>(startX) - gripWidth * 0.5f,
+            gripY,
+            gripWidth,
+            gripHeight,
+            3.0f);
+        graphics.fillRoundedRectangle(
+            static_cast<float>(endX) - gripWidth * 0.5f,
+            gripY,
+            gripWidth,
+            gripHeight,
+            3.0f);
     }
+}
+
+void LivePatternSequencerEditor::showSuppressionMatrix()
+{
+    if (suppressionWindow_ != nullptr)
+    {
+        suppressionWindow_->closeButtonPressed();
+        return;
+    }
+
+    matrix_.setSize(
+        matrixPanelWidth(),
+        matrixGridTop + static_cast<int>(playerCount_) * matrixCellHeight + 10);
+
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = "Suppression Matrix";
+    options.dialogBackgroundColour = juce::Colour(background);
+    options.content.setNonOwned(&matrix_);
+    options.componentToCentreAround = this;
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    suppressionWindow_ = options.launchAsync();
+}
+
+void LivePatternSequencerEditor::showPatternMenu(std::size_t playerIndex)
+{
+    if (playerIndex >= playerCount_ || playerIndex >= patternMenuButtons_.size())
+        return;
+
+    constexpr int speedItemBase = 10000;
+    constexpr int saveItemId = 20000;
+    juce::PopupMenu patternChoices;
+    const auto selectedPattern =
+        processor_.selectedPatternForPlayer(playerIndex);
+    for (std::size_t patternIndex = 0;
+         patternIndex < processor_.patternCountForUi();
+         ++patternIndex)
+    {
+        patternChoices.addCustomItem(
+            static_cast<int>(patternIndex + 1),
+            std::make_unique<PatternPreviewMenuItem>(
+                processor_.patternAtForUi(patternIndex),
+                patternIndex == selectedPattern),
+            nullptr,
+            processor_.patternNameForUi(patternIndex));
+    }
+
+    juce::PopupMenu speedChoices;
+    static constexpr const char* speedNames[] { "0.5x", "1x", "2x" };
+    const auto selectedSpeed = processor_.playerPlaybackSpeed(playerIndex);
+    for (int speedIndex = 0; speedIndex < 3; ++speedIndex)
+    {
+        speedChoices.addItem(
+            speedItemBase + speedIndex,
+            speedNames[speedIndex],
+            true,
+            static_cast<std::size_t>(speedIndex) == selectedSpeed);
+    }
+
+    juce::PopupMenu menu;
+    menu.addSubMenu("SELECT PATTERN", patternChoices);
+    menu.addSubMenu("PLAY SPEED", speedChoices);
+    menu.addSeparator();
+    menu.addItem(
+        saveItemId,
+        "SAVE PATTERN",
+        processor_.playerPatternModifiedForUi(playerIndex));
+
+    const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
+    menu.showMenuAsync(
+        juce::PopupMenu::Options {}
+            .withTargetComponent(patternMenuButtons_[playerIndex].get()),
+        [safeThis, playerIndex](int result)
+        {
+            if (safeThis == nullptr || result == 0)
+                return;
+
+            if (result == saveItemId)
+            {
+                safeThis->beginSavePlayerPattern(playerIndex);
+                return;
+            }
+
+            if (result >= speedItemBase && result < speedItemBase + 3)
+            {
+                safeThis->processor_.setPlayerPlaybackSpeed(
+                    playerIndex,
+                    static_cast<std::size_t>(result - speedItemBase));
+                return;
+            }
+
+            const auto patternIndex = static_cast<std::size_t>(result - 1);
+            if (patternIndex < safeThis->processor_.patternCountForUi())
+            {
+                safeThis->processor_.selectPatternForPlayer(
+                    playerIndex, patternIndex);
+                safeThis->updatePatternModifiedIndicators(true);
+                safeThis->content_.repaint();
+            }
+        });
+}
+
+void LivePatternSequencerEditor::showVelocityMenu(std::size_t playerIndex)
+{
+    if (playerIndex >= playerCount_ || playerIndex >= velocityMenuButtons_.size())
+        return;
+
+    constexpr int saveItemId = 20000;
+    juce::PopupMenu menu;
+    const auto selected =
+        processor_.selectedVelocityModulationForPlayer(playerIndex);
+    for (std::size_t modulationIndex = 0;
+         modulationIndex < processor_.velocityModulationCountForUi();
+         ++modulationIndex)
+    {
+        menu.addItem(
+            static_cast<int>(modulationIndex + 1),
+            processor_.velocityModulationNameForUi(modulationIndex),
+            true,
+            modulationIndex == selected);
+    }
+    menu.addSeparator();
+    menu.addItem(
+        saveItemId,
+        "SAVE MODULATION",
+        processor_.playerVelocityModulationModifiedForUi(playerIndex));
+
+    const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
+    menu.showMenuAsync(
+        juce::PopupMenu::Options {}
+            .withTargetComponent(velocityMenuButtons_[playerIndex].get()),
+        [safeThis, playerIndex](int result)
+        {
+            if (safeThis == nullptr || result == 0)
+                return;
+
+            if (result == saveItemId)
+            {
+                safeThis->beginSavePlayerVelocityModulation(playerIndex);
+                return;
+            }
+
+            const auto modulationIndex = static_cast<std::size_t>(result - 1);
+            if (modulationIndex
+                < safeThis->processor_.velocityModulationCountForUi())
+            {
+                safeThis->processor_.selectVelocityModulationForPlayer(
+                    playerIndex, modulationIndex);
+                safeThis->refreshVelocityModulationControls(playerIndex, true);
+                safeThis->updateVelocityModulationModifiedIndicators(true);
+                safeThis->content_.repaint();
+            }
+        });
 }
 
 void LivePatternSequencerEditor::paintMatrix(juce::Graphics& graphics)
@@ -1488,6 +2060,31 @@ void LivePatternSequencerEditor::paintMatrix(juce::Graphics& graphics)
     graphics.drawText("SUPPRESSION: ROW suppresses COLUMN", 16, 14,
         matrix_.getWidth() - 32, 24,
         juce::Justification::centredLeft);
+
+    for (std::size_t row = 0; row < playerCount_; ++row)
+    {
+        for (std::size_t column = 0; column < playerCount_; ++column)
+        {
+            const juce::Rectangle<int> cell(
+                matrixGridLeft + static_cast<int>(column) * matrixCellWidth,
+                matrixGridTop + static_cast<int>(row) * matrixCellHeight,
+                matrixCellWidth,
+                matrixCellHeight);
+            const bool isDiagonal = row == column;
+            const bool isActive = !isDiagonal
+                && processor_.suppression(row, column);
+
+            graphics.setColour(juce::Colour(
+                isActive
+                    ? uiBlue
+                    : (isDiagonal ? panel : darkGray)));
+            graphics.fillRect(cell);
+            graphics.setColour(juce::Colour(uiBlack).withMultipliedAlpha(
+                isDiagonal ? 0.35f : 0.9f));
+            graphics.drawRect(cell, isActive ? 2 : 1);
+        }
+    }
+
     graphics.setColour(juce::Colour(secondaryText));
     graphics.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
     for (std::size_t index = 0; index < playerCount_; ++index)

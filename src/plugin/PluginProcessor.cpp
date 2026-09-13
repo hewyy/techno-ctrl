@@ -969,6 +969,13 @@ std::size_t LivePatternSequencerProcessor::patternCountForUi() const noexcept
     return patternLibrary_.size();
 }
 
+lps::Pattern LivePatternSequencerProcessor::patternAtForUi(
+    std::size_t patternIndex) const noexcept
+{
+    const auto* entry = patternLibrary_.recordAt(patternIndex);
+    return entry != nullptr ? entry->pattern : lps::Pattern {};
+}
+
 juce::String LivePatternSequencerProcessor::patternNameForUi(
     std::size_t patternIndex) const
 {

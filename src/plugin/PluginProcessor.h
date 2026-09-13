@@ -101,6 +101,8 @@ public:
     [[nodiscard]] int playerMidiNoteForUi(std::size_t playerIndex) const noexcept;
     [[nodiscard]] int drumMidiChannelForUi() const noexcept;
     [[nodiscard]] std::size_t patternCountForUi() const noexcept;
+    [[nodiscard]] lps::Pattern patternAtForUi(
+        std::size_t patternIndex) const noexcept;
     [[nodiscard]] juce::String patternNameForUi(std::size_t patternIndex) const;
     [[nodiscard]] juce::String patternCatalogErrorForUi() const;
     [[nodiscard]] bool playerPatternModifiedForUi(

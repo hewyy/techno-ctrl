@@ -41,9 +41,26 @@ private:
 
         void paint(juce::Graphics&) override;
         void resized() override;
+        void mouseDown(const juce::MouseEvent&) override;
 
     private:
         LivePatternSequencerEditor& editor_;
+    };
+
+    class VelocityCell final : public juce::Slider
+    {
+    public:
+        VelocityCell();
+
+        void setActive(bool);
+        void paint(juce::Graphics&) override;
+        void mouseDown(const juce::MouseEvent&) override;
+        void mouseDrag(const juce::MouseEvent&) override;
+        void mouseUp(const juce::MouseEvent&) override;
+
+    private:
+        std::unique_ptr<juce::Component> activePopup_;
+        bool active_ = false;
     };
 
     void timerCallback() override;
@@ -51,6 +68,10 @@ private:
     void paintMatrix(juce::Graphics&);
     void resizedContent();
     void resizedMatrix();
+    void showSuppressionMatrix();
+    void matrixMouseDown(const juce::MouseEvent&);
+    void showPatternMenu(std::size_t playerIndex);
+    void showVelocityMenu(std::size_t playerIndex);
     void contentMouseDown(const juce::MouseEvent&);
     void contentMouseDrag(const juce::MouseEvent&);
     void contentMouseUp(const juce::MouseEvent&);
@@ -83,9 +104,15 @@ private:
 
     LivePatternSequencerProcessor& processor_;
     const std::size_t playerCount_;
+    juce::LookAndFeel_V4 lookAndFeel_;
     ContentComponent content_;
     juce::Viewport viewport_;
     MatrixComponent matrix_;
+    juce::TextButton suppressionButton_;
+    juce::TextButton suppressionCloseButton_;
+    juce::Component::SafePointer<juce::DialogWindow> suppressionWindow_;
+    std::vector<std::unique_ptr<juce::TextButton>> patternMenuButtons_;
+    std::vector<std::unique_ptr<juce::TextButton>> velocityMenuButtons_;
     std::vector<std::unique_ptr<juce::ComboBox>> patternSelectors_;
     std::vector<std::unique_ptr<juce::TextButton>> savePatternButtons_;
     std::vector<std::unique_ptr<juce::TextButton>> resetToMasterButtons_;
@@ -100,8 +127,7 @@ private:
         decreaseVelocityModulationLengthButtons_;
     std::vector<std::unique_ptr<juce::TextButton>>
         increaseVelocityModulationLengthButtons_;
-    std::vector<std::unique_ptr<juce::Slider>> velocityModulationSliders_;
-    std::vector<std::unique_ptr<juce::ToggleButton>> suppressionButtons_;
+    std::vector<std::unique_ptr<VelocityCell>> velocityModulationSliders_;
     std::vector<bool> displayedPatternModified_;
     std::vector<bool> displayedVelocityModulationModified_;
     std::vector<bool> displayedResetToMasterPending_;
@@ -110,11 +136,15 @@ private:
     DraggedRangeHandle draggedRangeHandle_ = DraggedRangeHandle::none;
     std::size_t draggedPlayerIndex_ = 0;
     int draggedRangeHandleOffsetX_ = 0;
+    juce::Point<int> rangeHandleDragStart_;
+    bool rangeHandleWasDragged_ = false;
 
     [[nodiscard]] juce::Rectangle<int> cellsAreaForPlayer(std::size_t playerIndex) const;
     [[nodiscard]] int cellWidth() const;
+    [[nodiscard]] int patternPanelHeight() const;
+    [[nodiscard]] int playerStride() const;
     [[nodiscard]] int requiredContentWidth() const;
-    void updateContentWidth();
+    void updateContentSize();
     [[nodiscard]] int matrixPanelWidth() const;
     [[nodiscard]] std::size_t stepAtX(std::size_t playerIndex, int x) const;
     [[nodiscard]] std::size_t nearestStepAtX(std::size_t playerIndex, int x) const;
