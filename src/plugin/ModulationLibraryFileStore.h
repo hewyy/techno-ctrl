@@ -1,15 +1,15 @@
 #pragma once
 
-#include "core/VelocityModulationLibrary.h"
+#include "core/ModulationLibrary.h"
 
 #include <juce_core/juce_core.h>
 
 #include <vector>
 
-class VelocityModulationLibraryFileStore
+class ModulationLibraryFileStore
 {
 public:
-    explicit VelocityModulationLibraryFileStore(juce::File catalogFile);
+    explicit ModulationLibraryFileStore(juce::File catalogFile);
 
     [[nodiscard]] static juce::File defaultCatalogFile();
 
@@ -17,15 +17,15 @@ public:
     // exist yet, the constructor defaults are written as its initial content.
     // A malformed existing file is left untouched and the library keeps its
     // defaults.
-    [[nodiscard]] bool loadOrCreate(lps::VelocityModulationLibrary& library);
+    [[nodiscard]] bool loadOrCreate(lps::ModulationLibrary& library);
 
     // Merges the latest on-disk catalog with this instance's snapshot and the
     // staged entry, then atomically replaces the catalog. The staged ID may be
     // adjusted while the entry is still unpublished to avoid cross-instance
     // ID collisions.
     [[nodiscard]] bool persistNewEntry(
-        const lps::VelocityModulationLibrary& library,
-        lps::VelocityModulationLibraryEntry& stagedEntry);
+        const lps::ModulationLibrary& library,
+        lps::ModulationLibraryEntry& stagedEntry);
 
     [[nodiscard]] const juce::File& catalogFile() const noexcept
     {
@@ -36,9 +36,9 @@ public:
 
 private:
     [[nodiscard]] bool readEntries(
-        std::vector<lps::VelocityModulationLibraryEntry>& entries) const;
+        std::vector<lps::ModulationLibraryEntry>& entries) const;
     [[nodiscard]] bool writeEntries(
-        const std::vector<lps::VelocityModulationLibraryEntry>& entries) const;
+        const std::vector<lps::ModulationLibraryEntry>& entries) const;
 
     juce::File catalogFile_;
     juce::InterProcessLock catalogLock_;

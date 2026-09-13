@@ -4,11 +4,11 @@
 #include "core/SequencerEngine.h"
 #include "core/PatternPlayer.h"
 #include "core/PulsePlayer.h"
-#include "core/VelocityModulationLibrary.h"
+#include "core/ModulationLibrary.h"
 #include "plugin/CvBufferRenderer.h"
 #include "plugin/MidiBufferRenderer.h"
 #include "plugin/PatternLibraryFileStore.h"
-#include "plugin/VelocityModulationLibraryFileStore.h"
+#include "plugin/ModulationLibraryFileStore.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -36,7 +36,7 @@ public:
         lps::Pattern candidatePattern;
     };
 
-    enum class SaveVelocityModulationStatus
+    enum class SaveModulationStatus
     {
         failed,
         needsName,
@@ -44,12 +44,12 @@ public:
         savedNew
     };
 
-    struct SaveVelocityModulationResult
+    struct SaveModulationResult
     {
-        SaveVelocityModulationStatus status =
-            SaveVelocityModulationStatus::failed;
+        SaveModulationStatus status =
+            SaveModulationStatus::failed;
         std::size_t modulationIndex = std::numeric_limits<std::size_t>::max();
-        lps::VelocityModulation candidateModulation;
+        lps::Modulation candidateModulation;
     };
 
     LivePatternSequencerProcessor();
@@ -87,7 +87,7 @@ public:
     [[nodiscard]] bool playerResetToMasterPendingForUi(
         std::size_t playerIndex) const noexcept;
     [[nodiscard]] int currentStepForUi(std::size_t playerIndex = 0) const noexcept;
-    [[nodiscard]] int currentVelocityModulationStepForUi(
+    [[nodiscard]] int currentModulationStepForUi(
         std::size_t playerIndex = 0) const noexcept;
     [[nodiscard]] bool playingForUi() const noexcept;
     [[nodiscard]] lps::PatternView patternForUi(std::size_t playerIndex = 0) const noexcept;
@@ -133,27 +133,27 @@ public:
     [[nodiscard]] juce::String velocityModulationNameForUi(
         std::size_t modulationIndex) const;
     [[nodiscard]] juce::String velocityModulationCatalogErrorForUi() const;
-    [[nodiscard]] lps::VelocityModulation velocityModulationForUi(
+    [[nodiscard]] lps::Modulation velocityModulationForUi(
         std::size_t playerIndex) const noexcept;
-    [[nodiscard]] bool playerVelocityModulationModifiedForUi(
+    [[nodiscard]] bool playerModulationModifiedForUi(
         std::size_t playerIndex) const noexcept;
-    [[nodiscard]] SaveVelocityModulationResult savePlayerVelocityModulation(
+    [[nodiscard]] SaveModulationResult savePlayerModulation(
         std::size_t playerIndex,
         const juce::String& name = {});
-    [[nodiscard]] SaveVelocityModulationResult savePlayerVelocityModulation(
+    [[nodiscard]] SaveModulationResult savePlayerModulation(
         std::size_t playerIndex,
-        const lps::VelocityModulation& candidateModulation,
+        const lps::Modulation& candidateModulation,
         const juce::String& name);
-    void selectVelocityModulationForPlayer(
+    void selectModulationForPlayer(
         std::size_t playerIndex,
         std::size_t modulationIndex) noexcept;
-    [[nodiscard]] std::size_t selectedVelocityModulationForPlayer(
+    [[nodiscard]] std::size_t selectedModulationForPlayer(
         std::size_t playerIndex) const noexcept;
-    void setPlayerVelocityModulationValue(
+    void setPlayerModulationValue(
         std::size_t playerIndex,
         std::size_t step,
         std::uint8_t value) noexcept;
-    void setPlayerVelocityModulationLength(
+    void setPlayerModulationLength(
         std::size_t playerIndex,
         std::size_t length) noexcept;
     void setPlayerMuted(std::size_t playerIndex, bool muted) noexcept;
@@ -204,9 +204,9 @@ private:
     // The library must outlive every player because players keep a read-only
     // reference to its immutable, append-only entries.
     lps::PatternLibrary patternLibrary_;
-    lps::VelocityModulationLibrary velocityModulationLibrary_;
+    lps::ModulationLibrary modulationLibrary_;
     PatternLibraryFileStore patternLibraryFileStore_;
-    VelocityModulationLibraryFileStore velocityModulationLibraryFileStore_;
+    ModulationLibraryFileStore modulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
     std::unique_ptr<lps::CvBufferRenderer> cvRenderer_;
@@ -217,7 +217,7 @@ private:
 
     std::vector<std::unique_ptr<std::atomic<int>>> currentSteps_;
     std::vector<std::unique_ptr<std::atomic<int>>>
-        currentVelocityModulationSteps_;
+        currentModulationSteps_;
     std::atomic<bool> playing_ { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LivePatternSequencerProcessor)

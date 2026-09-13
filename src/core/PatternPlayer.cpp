@@ -7,34 +7,33 @@ namespace lps
 {
 namespace
 {
-const VelocityModulationLibrary& defaultVelocityModulationLibrary() noexcept
+const ModulationLibrary& defaultModulationLibrary() noexcept
 {
-    static const VelocityModulationLibrary library;
+    static const ModulationLibrary library;
     return library;
 }
 
-ModulationLaneState laneStateFrom(const VelocityModulation& modulation) noexcept
+ModulationLaneState laneStateFrom(const Modulation& modulation) noexcept
 {
     ModulationLaneState state;
     state.length = static_cast<std::uint8_t>(std::min<std::size_t>(
-        modulation.length, VelocityModulation::maxLength));
+        modulation.length, state.values.size()));
     for (std::size_t step = 0; step < state.length; ++step)
-        state.values[step] = NormalizedValue::fromUnipolar8(
-            modulation.values[step]);
+        state.values[step] = modulation.values[step];
     return state;
 }
 } // namespace
 
 PatternPlayer::PatternPlayer(const PatternLibrary& patternLibrary) noexcept
-    : PatternPlayer(patternLibrary, defaultVelocityModulationLibrary())
+    : PatternPlayer(patternLibrary, defaultModulationLibrary())
 {
 }
 
 PatternPlayer::PatternPlayer(
     const PatternLibrary& patternLibrary,
-    const VelocityModulationLibrary& velocityModulationLibrary) noexcept
+    const ModulationLibrary& velocityModulationLibrary) noexcept
     : patternLibrary_(patternLibrary),
-      velocityModulationLibrary_(velocityModulationLibrary),
+      modulationLibrary_(velocityModulationLibrary),
       velocityLane_(makeIntensityLaneDefinition())
 {
     if (const auto* initialPattern = patternLibrary_.recordAt(0))
@@ -44,11 +43,11 @@ PatternPlayer::PatternPlayer(
         (void) activatePattern(initialPattern->id, false);
     }
 
-    if (const auto* initialModulation = velocityModulationLibrary_.recordAt(0))
+    if (const auto* initialModulation = modulationLibrary_.recordAt(0))
     {
-        requestedVelocityModulationId_.store(
+        requestedModulationId_.store(
             initialModulation->id.value(), std::memory_order_relaxed);
-        (void) activateVelocityModulation(initialModulation->id);
+        (void) activateModulation(initialModulation->id);
     }
 }
 
@@ -358,31 +357,31 @@ bool PatternPlayer::hasUnsavedPatternChanges() const noexcept
             || !patternsEqual(makePatternForSave(draft), activeRecord->pattern));
 }
 
-void PatternPlayer::selectVelocityModulation(
-    VelocityModulationId modulationId) noexcept
+void PatternPlayer::selectModulation(
+    ModulationId modulationId) noexcept
 {
-    if (velocityModulationLibrary_.find(modulationId) != nullptr)
+    if (modulationLibrary_.find(modulationId) != nullptr)
     {
-        requestedVelocityModulationId_.store(
+        requestedModulationId_.store(
             modulationId.value(), std::memory_order_release);
     }
 }
 
-VelocityModulationId PatternPlayer::selectedVelocityModulationId() const noexcept
+ModulationId PatternPlayer::selectedModulationId() const noexcept
 {
-    return VelocityModulationId {
-        requestedVelocityModulationId_.load(std::memory_order_acquire)
+    return ModulationId {
+        requestedModulationId_.load(std::memory_order_acquire)
     };
 }
 
-VelocityModulationId PatternPlayer::activeVelocityModulationId() const noexcept
+ModulationId PatternPlayer::activeModulationId() const noexcept
 {
-    return VelocityModulationId {
-        activeVelocityModulationId_.load(std::memory_order_acquire)
+    return ModulationId {
+        activeModulationId_.load(std::memory_order_acquire)
     };
 }
 
-PatternPlayer::VelocityModulationWriteGuard::VelocityModulationWriteGuard(
+PatternPlayer::ModulationWriteGuard::ModulationWriteGuard(
     PatternPlayer& owner,
     bool waitForAccess) noexcept
 {
@@ -410,7 +409,7 @@ PatternPlayer::VelocityModulationWriteGuard::VelocityModulationWriteGuard(
     }
 }
 
-PatternPlayer::VelocityModulationWriteGuard::~VelocityModulationWriteGuard()
+PatternPlayer::ModulationWriteGuard::~ModulationWriteGuard()
 {
     if (owner_ != nullptr)
     {
@@ -420,57 +419,59 @@ PatternPlayer::VelocityModulationWriteGuard::~VelocityModulationWriteGuard()
     }
 }
 
-bool PatternPlayer::activateVelocityModulation(
-    VelocityModulationId modulationId) noexcept
+bool PatternPlayer::activateModulation(
+    ModulationId modulationId) noexcept
 {
-    const auto* entry = velocityModulationLibrary_.find(modulationId);
+    const auto* entry = modulationLibrary_.find(modulationId);
     if (entry == nullptr
         || entry->modulation.length == 0
-        || entry->modulation.length > VelocityModulation::maxLength)
+        || entry->modulation.length > Modulation::maxLength)
     {
         return false;
     }
 
-    const VelocityModulationWriteGuard guard { *this, false };
+    const ModulationWriteGuard guard { *this, false };
     if (!guard)
         return false;
 
-    for (std::size_t step = 0; step < VelocityModulation::maxLength; ++step)
+    for (std::size_t step = 0; step < Modulation::maxLength; ++step)
     {
         editableVelocityValues_[step].store(
-            entry->modulation.values[step], std::memory_order_relaxed);
+            entry->modulation.values[step].raw, std::memory_order_relaxed);
     }
     editableVelocityLength_.store(
         entry->modulation.length, std::memory_order_relaxed);
-    activeVelocityModulationId_.store(
+    activeModulationId_.store(
         modulationId.value(), std::memory_order_release);
     return true;
 }
 
-void PatternPlayer::setVelocityModulationValue(
+void PatternPlayer::setModulationValue(
     std::size_t step,
     std::uint8_t value) noexcept
 {
-    const VelocityModulationWriteGuard guard { *this, true };
+    const ModulationWriteGuard guard { *this, true };
     if (step >= editableVelocityLength_.load(std::memory_order_relaxed))
         return;
 
-    editableVelocityValues_[step].store(value, std::memory_order_relaxed);
+    editableVelocityValues_[step].store(
+        NormalizedValue::fromUnipolar8(value).raw,
+        std::memory_order_relaxed);
 }
 
-void PatternPlayer::setVelocityModulationLength(std::size_t length) noexcept
+void PatternPlayer::setModulationLength(std::size_t length) noexcept
 {
-    if (length == 0 || length > VelocityModulation::maxLength)
+    if (length == 0 || length > Modulation::maxLength)
         return;
 
-    const VelocityModulationWriteGuard guard { *this, true };
+    const ModulationWriteGuard guard { *this, true };
     const auto oldLength = std::min(
         editableVelocityLength_.load(std::memory_order_relaxed),
-        VelocityModulation::maxLength);
+        Modulation::maxLength);
     if (length > oldLength)
     {
         const auto fillValue = oldLength == 0
-            ? std::uint8_t {255}
+            ? NormalizedValue::maximum
             : editableVelocityValues_[oldLength - 1].load(
                 std::memory_order_relaxed);
         for (auto step = oldLength; step < length; ++step)
@@ -483,7 +484,7 @@ void PatternPlayer::setVelocityModulationLength(std::size_t length) noexcept
     editableVelocityLength_.store(length, std::memory_order_relaxed);
 }
 
-PatternPlayer::VelocityModulationDraftSnapshot
+PatternPlayer::ModulationDraftSnapshot
 PatternPlayer::velocityModulationSnapshot() const noexcept
 {
     for (;;)
@@ -493,17 +494,17 @@ PatternPlayer::velocityModulationSnapshot() const noexcept
         if ((revisionBefore & 1u) != 0)
             continue;
 
-        VelocityModulationDraftSnapshot draft;
-        draft.activeModulationId = VelocityModulationId {
-            activeVelocityModulationId_.load(std::memory_order_relaxed)
+        ModulationDraftSnapshot draft;
+        draft.activeModulationId = ModulationId {
+            activeModulationId_.load(std::memory_order_relaxed)
         };
         draft.modulation.length = std::min(
             editableVelocityLength_.load(std::memory_order_relaxed),
-            VelocityModulation::maxLength);
-        for (std::size_t step = 0; step < VelocityModulation::maxLength; ++step)
+            Modulation::maxLength);
+        for (std::size_t step = 0; step < Modulation::maxLength; ++step)
         {
-            draft.modulation.values[step] = editableVelocityValues_[step].load(
-                std::memory_order_relaxed);
+            draft.modulation.values[step].raw =
+                editableVelocityValues_[step].load(std::memory_order_relaxed);
         }
 
         std::atomic_thread_fence(std::memory_order_acquire);
@@ -514,23 +515,23 @@ PatternPlayer::velocityModulationSnapshot() const noexcept
     }
 }
 
-VelocityModulation PatternPlayer::velocityModulationForUi() const noexcept
+Modulation PatternPlayer::velocityModulationForUi() const noexcept
 {
     return velocityModulationSnapshot().modulation;
 }
 
-VelocityModulation PatternPlayer::velocityModulationForSave() const noexcept
+Modulation PatternPlayer::velocityModulationForSave() const noexcept
 {
     return velocityModulationSnapshot().modulation;
 }
 
-bool PatternPlayer::hasUnsavedVelocityModulationChanges() const noexcept
+bool PatternPlayer::hasUnsavedModulationChanges() const noexcept
 {
     const auto draft = velocityModulationSnapshot();
-    const auto* activeEntry = velocityModulationLibrary_.find(
+    const auto* activeEntry = modulationLibrary_.find(
         draft.activeModulationId);
     return activeEntry != nullptr
-        && !velocityModulationsEqual(draft.modulation, activeEntry->modulation);
+        && !modulationsEqual(draft.modulation, activeEntry->modulation);
 }
 
 PatternPlayerPersistentState PatternPlayer::capturePersistentState() const noexcept
@@ -553,18 +554,18 @@ bool PatternPlayer::restorePersistentState(
     const PatternPlayerPersistentState& state) noexcept
 {
     if (patternLibrary_.find(state.patternId) == nullptr
-        || velocityModulationLibrary_.find(state.velocityModulationId) == nullptr
+        || modulationLibrary_.find(state.velocityModulationId) == nullptr
         || state.playbackStart > state.playbackEnd
         || state.playbackEnd >= longestPatternLength
         || state.playbackSpeed >= playbackSpeedCount
         || state.velocityModulation.length == 0
-        || state.velocityModulation.length > VelocityModulation::maxLength)
+        || state.velocityModulation.length > Modulation::maxLength)
     {
         return false;
     }
 
     if (!activatePattern(state.patternId, false)
-        || !activateVelocityModulation(state.velocityModulationId))
+        || !activateModulation(state.velocityModulationId))
     {
         return false;
     }
@@ -579,11 +580,11 @@ bool PatternPlayer::restorePersistentState(
         activePlaybackWindow_.store(window, std::memory_order_relaxed);
     }
     {
-        const VelocityModulationWriteGuard guard { *this, true };
-        for (std::size_t step = 0; step < VelocityModulation::maxLength; ++step)
+        const ModulationWriteGuard guard { *this, true };
+        for (std::size_t step = 0; step < Modulation::maxLength; ++step)
         {
             editableVelocityValues_[step].store(
-                state.velocityModulation.values[step],
+                state.velocityModulation.values[step].raw,
                 std::memory_order_relaxed);
         }
         editableVelocityLength_.store(
@@ -592,7 +593,7 @@ bool PatternPlayer::restorePersistentState(
     playbackSpeed_.store(state.playbackSpeed, std::memory_order_relaxed);
     requestedPatternSelection_.store(
         state.patternId.value(), std::memory_order_release);
-    requestedVelocityModulationId_.store(
+    requestedModulationId_.store(
         state.velocityModulationId.value(), std::memory_order_release);
     reset();
     return true;
@@ -608,9 +609,9 @@ void PatternPlayer::prepare(const PrepareSpec& /*spec*/) noexcept
         consumeSaveSelectionRequest(selection);
     }
 
-    const auto requestedModulation = selectedVelocityModulationId();
-    if (requestedModulation != activeVelocityModulationId())
-        (void) activateVelocityModulation(requestedModulation);
+    const auto requestedModulation = selectedModulationId();
+    if (requestedModulation != activeModulationId())
+        (void) activateModulation(requestedModulation);
 
     reset();
 }
@@ -669,9 +670,9 @@ PlayerProcessResult PatternPlayer::process(
     output.clear();
     PlayerProcessResult result;
 
-    const auto requestedVelocityModulation = selectedVelocityModulationId();
-    if (requestedVelocityModulation != activeVelocityModulationId()
-        && activateVelocityModulation(requestedVelocityModulation))
+    const auto requestedModulation = selectedModulationId();
+    if (requestedModulation != activeModulationId()
+        && activateModulation(requestedModulation))
     {
         velocityLane_.reset(ModulationResetReason::sourceSelection);
         modulationPlaybackSnapshot_.currentStep = -1;

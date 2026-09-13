@@ -32,6 +32,12 @@ struct NormalizedValue
     {
         return left.raw == right.raw;
     }
+
+    friend constexpr bool operator!=(
+        NormalizedValue left, NormalizedValue right) noexcept
+    {
+        return !(left == right);
+    }
 };
 
 static_assert(std::is_trivially_copyable_v<NormalizedValue>);

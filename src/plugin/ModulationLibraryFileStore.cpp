@@ -1,4 +1,4 @@
-#include "plugin/VelocityModulationLibraryFileStore.h"
+#include "plugin/ModulationLibraryFileStore.h"
 
 #include <algorithm>
 #include <chrono>
@@ -13,10 +13,10 @@ constexpr int schemaVersion = 1;
 constexpr juce::int64 maximumCatalogBytes = 1024 * 1024;
 constexpr int catalogLockTimeoutMilliseconds = 2000;
 constexpr auto catalogFormat =
-    "live-pattern-sequencer-velocity-modulation-library";
+    "live-pattern-sequencer-modulation-library";
 constexpr auto catalogLockName =
-    "com.hew.livepatternsequencer.velocity-modulation-library";
-std::timed_mutex velocityModulationCatalogProcessMutex;
+    "com.hew.livepatternsequencer.modulation-library";
+std::timed_mutex modulationCatalogProcessMutex;
 
 class CatalogLockGuard
 {
@@ -41,8 +41,8 @@ private:
 };
 
 [[nodiscard]] bool idIsUsed(
-    const std::vector<lps::VelocityModulationLibraryEntry>& entries,
-    lps::VelocityModulationId id) noexcept
+    const std::vector<lps::ModulationLibraryEntry>& entries,
+    lps::ModulationId id) noexcept
 {
     return std::any_of(entries.begin(), entries.end(), [id](const auto& entry)
     {
@@ -50,14 +50,14 @@ private:
     });
 }
 
-[[nodiscard]] lps::VelocityModulationId nextAvailableId(
-    const std::vector<lps::VelocityModulationLibraryEntry>& entries) noexcept
+[[nodiscard]] lps::ModulationId nextAvailableId(
+    const std::vector<lps::ModulationLibraryEntry>& entries) noexcept
 {
     for (std::uint64_t value = 1;
-         value <= lps::VelocityModulationLibrary::maxEntryCount;
+         value <= lps::ModulationLibrary::maxEntryCount;
          ++value)
     {
-        const auto candidate = lps::VelocityModulationId {value};
+        const auto candidate = lps::ModulationId {value};
         if (!idIsUsed(entries, candidate))
             return candidate;
     }
@@ -65,23 +65,23 @@ private:
     return {};
 }
 
-[[nodiscard]] const lps::VelocityModulationLibraryEntry* findEquivalent(
-    const std::vector<lps::VelocityModulationLibraryEntry>& entries,
-    const lps::VelocityModulation& modulation) noexcept
+[[nodiscard]] const lps::ModulationLibraryEntry* findEquivalent(
+    const std::vector<lps::ModulationLibraryEntry>& entries,
+    const lps::Modulation& modulation) noexcept
 {
     const auto found = std::find_if(
         entries.begin(), entries.end(), [&modulation](const auto& entry)
         {
-            return lps::velocityModulationsEqual(entry.modulation, modulation);
+            return lps::modulationsEqual(entry.modulation, modulation);
         });
     return found != entries.end() ? &*found : nullptr;
 }
 
 [[nodiscard]] bool entriesAreValid(
-    const std::vector<lps::VelocityModulationLibraryEntry>& entries) noexcept
+    const std::vector<lps::ModulationLibraryEntry>& entries) noexcept
 {
     if (entries.empty()
-        || entries.size() > lps::VelocityModulationLibrary::maxEntryCount)
+        || entries.size() > lps::ModulationLibrary::maxEntryCount)
     {
         return false;
     }
@@ -91,11 +91,11 @@ private:
         const auto& candidate = entries[index];
         if (!candidate.id.isValid()
             || candidate.id.value()
-                > lps::VelocityModulationLibrary::maxEntryCount
+                > lps::ModulationLibrary::maxEntryCount
             || candidate.name.empty()
             || candidate.modulation.length == 0
             || candidate.modulation.length
-                > lps::VelocityModulation::maxLength)
+                > lps::Modulation::maxLength)
         {
             return false;
         }
@@ -103,7 +103,7 @@ private:
         for (std::size_t previous = 0; previous < index; ++previous)
         {
             if (entries[previous].id == candidate.id
-                || lps::velocityModulationsEqual(
+                || lps::modulationsEqual(
                     entries[previous].modulation, candidate.modulation))
             {
                 return false;
@@ -115,9 +115,9 @@ private:
 }
 
 [[nodiscard]] bool appendIfMissing(
-    std::vector<lps::VelocityModulationLibraryEntry>& entries,
-    lps::VelocityModulationLibraryEntry candidate,
-    lps::VelocityModulationLibraryEntry* resolvedEntry = nullptr)
+    std::vector<lps::ModulationLibraryEntry>& entries,
+    lps::ModulationLibraryEntry candidate,
+    lps::ModulationLibraryEntry* resolvedEntry = nullptr)
 {
     if (const auto* existing = findEquivalent(entries, candidate.modulation))
     {
@@ -126,12 +126,12 @@ private:
         return true;
     }
 
-    if (entries.size() >= lps::VelocityModulationLibrary::maxEntryCount)
+    if (entries.size() >= lps::ModulationLibrary::maxEntryCount)
         return false;
 
     if (!candidate.id.isValid()
         || candidate.id.value()
-            > lps::VelocityModulationLibrary::maxEntryCount
+            > lps::ModulationLibrary::maxEntryCount
         || idIsUsed(entries, candidate.id))
     {
         candidate.id = nextAvailableId(entries);
@@ -147,13 +147,13 @@ private:
 }
 
 [[nodiscard]] bool mergePublishedEntry(
-    std::vector<lps::VelocityModulationLibraryEntry>& entries,
-    const lps::VelocityModulationLibraryEntry& candidate)
+    std::vector<lps::ModulationLibraryEntry>& entries,
+    const lps::ModulationLibraryEntry& candidate)
 {
     if (const auto* existing = findEquivalent(entries, candidate.modulation))
         return existing->id == candidate.id;
 
-    if (entries.size() >= lps::VelocityModulationLibrary::maxEntryCount
+    if (entries.size() >= lps::ModulationLibrary::maxEntryCount
         || idIsUsed(entries, candidate.id))
     {
         return false;
@@ -164,7 +164,7 @@ private:
 }
 
 [[nodiscard]] juce::var makeCatalogJson(
-    const std::vector<lps::VelocityModulationLibraryEntry>& entries)
+    const std::vector<lps::ModulationLibraryEntry>& entries)
 {
     auto* root = new juce::DynamicObject();
     root->setProperty("format", catalogFormat);
@@ -187,7 +187,7 @@ private:
         for (std::size_t step = 0; step < entry.modulation.length; ++step)
         {
             serializedValues.add(
-                static_cast<int>(entry.modulation.values[step]));
+                static_cast<int>(entry.modulation.values[step].raw));
         }
 
         serialized->setProperty("values", serializedValues);
@@ -199,32 +199,32 @@ private:
 }
 } // namespace
 
-VelocityModulationLibraryFileStore::VelocityModulationLibraryFileStore(
+ModulationLibraryFileStore::ModulationLibraryFileStore(
     juce::File catalogFile)
     : catalogFile_(std::move(catalogFile)),
       catalogLock_(catalogLockName)
 {
 }
 
-juce::File VelocityModulationLibraryFileStore::defaultCatalogFile()
+juce::File ModulationLibraryFileStore::defaultCatalogFile()
 {
     return juce::File::getSpecialLocation(
                juce::File::userApplicationDataDirectory)
         .getChildFile("Hew")
         .getChildFile("LivePatternSequencer")
-        .getChildFile("velocity-modulations.json");
+        .getChildFile("modulations.json");
 }
 
-bool VelocityModulationLibraryFileStore::loadOrCreate(
-    lps::VelocityModulationLibrary& library)
+bool ModulationLibraryFileStore::loadOrCreate(
+    lps::ModulationLibrary& library)
 {
     std::unique_lock<std::timed_mutex> processLock(
-        velocityModulationCatalogProcessMutex, std::defer_lock);
+        modulationCatalogProcessMutex, std::defer_lock);
     if (!processLock.try_lock_for(
             std::chrono::milliseconds(catalogLockTimeoutMilliseconds)))
     {
         lastError_ =
-            "Timed out waiting for another in-process velocity modulation "
+            "Timed out waiting for another in-process modulation "
             "catalog operation:\n"
             + catalogFile_.getFullPathName();
         return false;
@@ -234,7 +234,7 @@ bool VelocityModulationLibraryFileStore::loadOrCreate(
     if (!lock.isLocked())
     {
         lastError_ =
-            "Timed out waiting for access to the velocity modulation catalog:\n"
+            "Timed out waiting for access to the modulation catalog:\n"
             + catalogFile_.getFullPathName()
             + "\n\nClose other instances that may be saving, then reopen the plug-in.";
         return false;
@@ -242,7 +242,7 @@ bool VelocityModulationLibraryFileStore::loadOrCreate(
 
     if (!catalogFile_.existsAsFile())
     {
-        std::vector<lps::VelocityModulationLibraryEntry> defaults;
+        std::vector<lps::ModulationLibraryEntry> defaults;
         defaults.reserve(library.size());
         for (std::size_t index = 0; index < library.size(); ++index)
         {
@@ -253,7 +253,7 @@ bool VelocityModulationLibraryFileStore::loadOrCreate(
         if (!writeEntries(defaults))
         {
             lastError_ =
-                "Could not create the velocity modulation catalog:\n"
+                "Could not create the modulation catalog:\n"
                 + catalogFile_.getFullPathName()
                 + "\n\nCheck that the folder is writable and there is free disk space.";
             return false;
@@ -263,12 +263,12 @@ bool VelocityModulationLibraryFileStore::loadOrCreate(
         return true;
     }
 
-    std::vector<lps::VelocityModulationLibraryEntry> loadedEntries;
+    std::vector<lps::ModulationLibraryEntry> loadedEntries;
     if (!readEntries(loadedEntries)
         || !library.replaceEntriesForStartup(loadedEntries))
     {
         lastError_ =
-            "The velocity modulation catalog is malformed, unsupported, or "
+            "The modulation catalog is malformed, unsupported, or "
             "unreadable:\n"
             + catalogFile_.getFullPathName()
             + "\n\nThe file was left untouched. Correct it or move it aside, "
@@ -280,17 +280,17 @@ bool VelocityModulationLibraryFileStore::loadOrCreate(
     return true;
 }
 
-bool VelocityModulationLibraryFileStore::persistNewEntry(
-    const lps::VelocityModulationLibrary& library,
-    lps::VelocityModulationLibraryEntry& stagedEntry)
+bool ModulationLibraryFileStore::persistNewEntry(
+    const lps::ModulationLibrary& library,
+    lps::ModulationLibraryEntry& stagedEntry)
 {
     std::unique_lock<std::timed_mutex> processLock(
-        velocityModulationCatalogProcessMutex, std::defer_lock);
+        modulationCatalogProcessMutex, std::defer_lock);
     if (!processLock.try_lock_for(
             std::chrono::milliseconds(catalogLockTimeoutMilliseconds)))
     {
         lastError_ =
-            "Timed out waiting for another in-process velocity modulation "
+            "Timed out waiting for another in-process modulation "
             "catalog operation:\n"
             + catalogFile_.getFullPathName()
             + "\n\nWait for the other save to finish and try again.";
@@ -301,17 +301,17 @@ bool VelocityModulationLibraryFileStore::persistNewEntry(
     if (!lock.isLocked())
     {
         lastError_ =
-            "Timed out waiting for access to the velocity modulation catalog:\n"
+            "Timed out waiting for access to the modulation catalog:\n"
             + catalogFile_.getFullPathName()
             + "\n\nWait for the other save to finish and try again.";
         return false;
     }
 
-    std::vector<lps::VelocityModulationLibraryEntry> mergedEntries;
+    std::vector<lps::ModulationLibraryEntry> mergedEntries;
     if (catalogFile_.existsAsFile() && !readEntries(mergedEntries))
     {
         lastError_ =
-            "The existing velocity modulation catalog is malformed or "
+            "The existing modulation catalog is malformed or "
             "unreadable:\n"
             + catalogFile_.getFullPathName()
             + "\n\nIt was not overwritten. Correct it or move it aside, then "
@@ -325,19 +325,19 @@ bool VelocityModulationLibraryFileStore::persistNewEntry(
         if (entry == nullptr || !mergePublishedEntry(mergedEntries, *entry))
         {
             lastError_ =
-                "The velocity modulation catalog is full or could not be "
+                "The modulation catalog is full or could not be "
                 "merged safely:\n"
                 + catalogFile_.getFullPathName();
             return false;
         }
     }
 
-    lps::VelocityModulationLibraryEntry resolvedEntry;
+    lps::ModulationLibraryEntry resolvedEntry;
     if (!appendIfMissing(mergedEntries, stagedEntry, &resolvedEntry)
         || !entriesAreValid(mergedEntries))
     {
         lastError_ =
-            "The velocity modulation catalog is full or contains conflicting "
+            "The modulation catalog is full or contains conflicting "
             "entries:\n"
             + catalogFile_.getFullPathName();
         return false;
@@ -346,7 +346,7 @@ bool VelocityModulationLibraryFileStore::persistNewEntry(
     if (!writeEntries(mergedEntries))
     {
         lastError_ =
-            "Could not write the velocity modulation catalog:\n"
+            "Could not write the modulation catalog:\n"
             + catalogFile_.getFullPathName()
             + "\n\nCheck that the folder is writable and there is free disk space.";
         return false;
@@ -357,8 +357,8 @@ bool VelocityModulationLibraryFileStore::persistNewEntry(
     return true;
 }
 
-bool VelocityModulationLibraryFileStore::readEntries(
-    std::vector<lps::VelocityModulationLibraryEntry>& entries) const
+bool ModulationLibraryFileStore::readEntries(
+    std::vector<lps::ModulationLibraryEntry>& entries) const
 {
     if (!catalogFile_.existsAsFile()
         || catalogFile_.getSize() <= 0
@@ -385,12 +385,12 @@ bool VelocityModulationLibraryFileStore::readEntries(
         || modulations == nullptr
         || modulations->isEmpty()
         || modulations->size()
-            > static_cast<int>(lps::VelocityModulationLibrary::maxEntryCount))
+            > static_cast<int>(lps::ModulationLibrary::maxEntryCount))
     {
         return false;
     }
 
-    std::vector<lps::VelocityModulationLibraryEntry> parsedEntries;
+    std::vector<lps::ModulationLibraryEntry> parsedEntries;
     parsedEntries.reserve(static_cast<std::size_t>(modulations->size()));
     for (const auto& serializedValue : *modulations)
     {
@@ -413,18 +413,18 @@ bool VelocityModulationLibraryFileStore::readEntries(
         const auto name = nameValue.toString();
         if (id <= 0
             || id > static_cast<juce::int64>(
-                lps::VelocityModulationLibrary::maxEntryCount)
+                lps::ModulationLibrary::maxEntryCount)
             || name.isEmpty()
             || name.trim().isEmpty()
             || values->isEmpty()
             || values->size()
-                > static_cast<int>(lps::VelocityModulation::maxLength))
+                > static_cast<int>(lps::Modulation::maxLength))
         {
             return false;
         }
 
-        lps::VelocityModulation modulation;
-        modulation.length = static_cast<std::size_t>(values->size());
+        lps::Modulation modulation;
+        modulation.length = static_cast<std::uint8_t>(values->size());
         for (int step = 0; step < values->size(); ++step)
         {
             const auto& value = values->getReference(step);
@@ -435,17 +435,17 @@ bool VelocityModulationLibraryFileStore::readEntries(
             if (integerValue < 0
                 || integerValue
                     > static_cast<juce::int64>(
-                        std::numeric_limits<std::uint8_t>::max()))
+                        lps::NormalizedValue::maximum))
             {
                 return false;
             }
 
-            modulation.values[static_cast<std::size_t>(step)] =
-                static_cast<std::uint8_t>(integerValue);
+            modulation.values[static_cast<std::size_t>(step)].raw =
+                static_cast<std::uint16_t>(integerValue);
         }
 
         parsedEntries.push_back({
-            lps::VelocityModulationId {static_cast<std::uint64_t>(id)},
+            lps::ModulationId {static_cast<std::uint64_t>(id)},
             name.toStdString(),
             modulation
         });
@@ -458,8 +458,8 @@ bool VelocityModulationLibraryFileStore::readEntries(
     return true;
 }
 
-bool VelocityModulationLibraryFileStore::writeEntries(
-    const std::vector<lps::VelocityModulationLibraryEntry>& entries) const
+bool ModulationLibraryFileStore::writeEntries(
+    const std::vector<lps::ModulationLibraryEntry>& entries) const
 {
     if (!entriesAreValid(entries))
         return false;

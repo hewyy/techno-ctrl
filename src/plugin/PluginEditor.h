@@ -85,10 +85,10 @@ private:
     void beginSavePlayerVelocityModulation(std::size_t playerIndex);
     void promptForVelocityModulationName(
         std::size_t playerIndex,
-        lps::VelocityModulation candidateModulation);
+        lps::Modulation candidateModulation);
     void handleVelocityModulationSaveResult(
         std::size_t playerIndex,
-        LivePatternSequencerProcessor::SaveVelocityModulationResult result);
+        LivePatternSequencerProcessor::SaveModulationResult result);
     void refreshPatternSelectors();
     void refreshVelocityModulationSelectors();
     void refreshVelocityModulationControls(

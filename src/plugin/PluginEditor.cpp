@@ -550,7 +550,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     decreaseVelocityModulationLengthButtons_.reserve(playerCount_);
     increaseVelocityModulationLengthButtons_.reserve(playerCount_);
     velocityModulationSliders_.reserve(
-        playerCount_ * lps::VelocityModulation::maxLength);
+        playerCount_ * lps::Modulation::maxLength);
 
     for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
     {
@@ -713,7 +713,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         }
         velocitySelector.setSelectedItemIndex(
             static_cast<int>(
-                processor_.selectedVelocityModulationForPlayer(playerIndex)),
+                processor_.selectedModulationForPlayer(playerIndex)),
             juce::dontSendNotification);
         velocitySelector.setTooltip(
             "Choose a velocity modulation independently of the hit pattern");
@@ -724,7 +724,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
                     ->getSelectedItemIndex();
             if (selected >= 0)
             {
-                processor_.selectVelocityModulationForPlayer(
+                processor_.selectModulationForPlayer(
                     playerIndex, static_cast<std::size_t>(selected));
             }
         };
@@ -753,7 +753,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
                 processor_.velocityModulationForUi(playerIndex);
             if (modulation.length > 1)
             {
-                processor_.setPlayerVelocityModulationLength(
+                processor_.setPlayerModulationLength(
                     playerIndex, modulation.length - 1);
                 refreshVelocityModulationControls(playerIndex, true);
                 updateVelocityModulationModifiedIndicators(true);
@@ -773,11 +773,11 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         {
             const auto modulation =
                 processor_.velocityModulationForUi(playerIndex);
-            if (modulation.length < lps::VelocityModulation::maxLength)
+            if (modulation.length < lps::Modulation::maxLength)
             {
                 const auto newLength = std::max<std::size_t>(
                     1, modulation.length + 1);
-                processor_.setPlayerVelocityModulationLength(
+                processor_.setPlayerModulationLength(
                     playerIndex, newLength);
                 refreshVelocityModulationControls(playerIndex, true);
                 updateVelocityModulationModifiedIndicators(true);
@@ -789,7 +789,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         const auto modulation =
             processor_.velocityModulationForUi(playerIndex);
         for (std::size_t step = 0;
-             step < lps::VelocityModulation::maxLength;
+             step < lps::Modulation::maxLength;
              ++step)
         {
             velocityModulationSliders_.push_back(
@@ -804,7 +804,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
                 + " (0-255)");
             slider.setDoubleClickReturnValue(true, 255.0);
             slider.setValue(
-                static_cast<double>(modulation.values[step]),
+                static_cast<double>(modulation.values[step].raw / 257u),
                 juce::dontSendNotification);
             slider.onValueChange =
                 [this, playerIndex, step, sliderIndex]
@@ -815,7 +815,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
                         juce::roundToInt(
                             velocityModulationSliders_[sliderIndex]
                                 ->getValue()));
-                    processor_.setPlayerVelocityModulationValue(
+                    processor_.setPlayerModulationValue(
                         playerIndex,
                         step,
                         static_cast<std::uint8_t>(value));
@@ -947,11 +947,11 @@ void LivePatternSequencerEditor::resizedContent()
             increaseX, modulationY, clickTargetSize, clickTargetSize);
 
         for (std::size_t step = 0;
-             step < lps::VelocityModulation::maxLength;
+             step < lps::Modulation::maxLength;
              ++step)
         {
             const auto sliderIndex =
-                index * lps::VelocityModulation::maxLength + step;
+                index * lps::Modulation::maxLength + step;
             velocityModulationSliders_[sliderIndex]->setBounds(
                 velocityGridLeft
                     + static_cast<int>(step)
@@ -1108,12 +1108,12 @@ void LivePatternSequencerEditor::beginSavePlayerVelocityModulation(
 {
     handleVelocityModulationSaveResult(
         playerIndex,
-        processor_.savePlayerVelocityModulation(playerIndex));
+        processor_.savePlayerModulation(playerIndex));
 }
 
 void LivePatternSequencerEditor::promptForVelocityModulationName(
     std::size_t playerIndex,
-    lps::VelocityModulation candidateModulation)
+    lps::Modulation candidateModulation)
 {
     constexpr auto nameEditorId = "velocityModulationName";
     auto* alert = new juce::AlertWindow(
@@ -1169,11 +1169,11 @@ void LivePatternSequencerEditor::promptForVelocityModulationName(
                 }
 
                 const auto saveResult =
-                    safeThis->processor_.savePlayerVelocityModulation(
+                    safeThis->processor_.savePlayerModulation(
                         playerIndex, candidateModulation, name);
                 if (saveResult.status
                     == LivePatternSequencerProcessor::
-                        SaveVelocityModulationStatus::needsName)
+                        SaveModulationStatus::needsName)
                 {
                     safeThis->showVelocityModulationSaveWarning(
                         "Enter a name before saving the new velocity "
@@ -1189,10 +1189,10 @@ void LivePatternSequencerEditor::promptForVelocityModulationName(
 
 void LivePatternSequencerEditor::handleVelocityModulationSaveResult(
     std::size_t playerIndex,
-    LivePatternSequencerProcessor::SaveVelocityModulationResult result)
+    LivePatternSequencerProcessor::SaveModulationResult result)
 {
     using Status =
-        LivePatternSequencerProcessor::SaveVelocityModulationStatus;
+        LivePatternSequencerProcessor::SaveModulationStatus;
     switch (result.status)
     {
         case Status::needsName:
@@ -1268,7 +1268,7 @@ void LivePatternSequencerEditor::refreshVelocityModulationSelectors()
 
         selector.setSelectedItemIndex(
             static_cast<int>(
-                processor_.selectedVelocityModulationForPlayer(playerIndex)),
+                processor_.selectedModulationForPlayer(playerIndex)),
             juce::dontSendNotification);
     }
 }
@@ -1287,22 +1287,22 @@ void LivePatternSequencerEditor::refreshVelocityModulationControls(
 
     const auto modulation =
         processor_.velocityModulationForUi(playerIndex);
-    const auto length = std::min(
-        modulation.length, lps::VelocityModulation::maxLength);
+    const auto length = std::min<std::size_t>(
+        modulation.length, lps::Modulation::maxLength);
     const bool playing = processor_.playingForUi();
     const int currentStep =
-        processor_.currentVelocityModulationStepForUi(playerIndex);
+        processor_.currentModulationStepForUi(playerIndex);
     decreaseVelocityModulationLengthButtons_[playerIndex]->setEnabled(
         length > 1);
     increaseVelocityModulationLengthButtons_[playerIndex]->setEnabled(
-        length < lps::VelocityModulation::maxLength);
+        length < lps::Modulation::maxLength);
 
     for (std::size_t step = 0;
-         step < lps::VelocityModulation::maxLength;
+         step < lps::Modulation::maxLength;
          ++step)
     {
         const auto sliderIndex =
-            playerIndex * lps::VelocityModulation::maxLength + step;
+            playerIndex * lps::Modulation::maxLength + step;
         if (sliderIndex >= velocityModulationSliders_.size())
             break;
 
@@ -1314,7 +1314,8 @@ void LivePatternSequencerEditor::refreshVelocityModulationControls(
         if (slider.isVisible() != shouldBeVisible)
             slider.setVisible(shouldBeVisible);
 
-        const auto value = static_cast<double>(modulation.values[step]);
+        const auto value = static_cast<double>(
+            modulation.values[step].raw / 257u);
         if (!slider.isMouseButtonDown()
             && (force || std::abs(slider.getValue() - value) > 0.5))
         {
@@ -1380,7 +1381,7 @@ void LivePatternSequencerEditor::updateVelocityModulationModifiedIndicators(
         if (!processor_.playerSupportsVelocityEditingForUi(playerIndex))
             continue;
         const bool modified =
-            processor_.playerVelocityModulationModifiedForUi(playerIndex);
+            processor_.playerModulationModifiedForUi(playerIndex);
         if (!force
             && displayedVelocityModulationModified_[playerIndex] == modified)
         {
@@ -2000,7 +2001,7 @@ void LivePatternSequencerEditor::showVelocityMenu(std::size_t playerIndex)
     constexpr int saveItemId = 20000;
     juce::PopupMenu menu;
     const auto selected =
-        processor_.selectedVelocityModulationForPlayer(playerIndex);
+        processor_.selectedModulationForPlayer(playerIndex);
     for (std::size_t modulationIndex = 0;
          modulationIndex < processor_.velocityModulationCountForUi();
          ++modulationIndex)
@@ -2015,7 +2016,7 @@ void LivePatternSequencerEditor::showVelocityMenu(std::size_t playerIndex)
     menu.addItem(
         saveItemId,
         "SAVE MODULATION",
-        processor_.playerVelocityModulationModifiedForUi(playerIndex));
+        processor_.playerModulationModifiedForUi(playerIndex));
 
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
     menu.showMenuAsync(
@@ -2036,7 +2037,7 @@ void LivePatternSequencerEditor::showVelocityMenu(std::size_t playerIndex)
             if (modulationIndex
                 < safeThis->processor_.velocityModulationCountForUi())
             {
-                safeThis->processor_.selectVelocityModulationForPlayer(
+                safeThis->processor_.selectModulationForPlayer(
                     playerIndex, modulationIndex);
                 safeThis->refreshVelocityModulationControls(playerIndex, true);
                 safeThis->updateVelocityModulationModifiedIndicators(true);

@@ -65,8 +65,8 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
               juce::AudioChannelSet::discreteChannels(cvOutputChannelCount),
               true)),
       patternLibraryFileStore_(patternCatalogFile),
-      velocityModulationLibraryFileStore_(
-          patternCatalogFile.getSiblingFile("velocity-modulations.json")),
+      modulationLibraryFileStore_(
+          patternCatalogFile.getSiblingFile("modulations.json")),
       drumRenderer_(std::make_unique<lps::MidiBufferRenderer>(drumMidiChannel)),
       cvRenderer_(std::make_unique<lps::CvBufferRenderer>()),
       engine_(std::make_unique<lps::SequencerEngine>())
@@ -74,20 +74,20 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     // Catalog replacement is startup-only and must finish before PatternPlayer
     // instances retain references to the library.
     (void) patternLibraryFileStore_.loadOrCreate(patternLibrary_);
-    (void) velocityModulationLibraryFileStore_.loadOrCreate(
-        velocityModulationLibrary_);
+    (void) modulationLibraryFileStore_.loadOrCreate(
+        modulationLibrary_);
 
     constexpr std::size_t additionalPulsePlayers = 1;
     const auto totalPlayerCount = defaultDrumVoices.size() + additionalPulsePlayers;
     players_.reserve(totalPlayerCount);
     currentSteps_.reserve(totalPlayerCount);
-    currentVelocityModulationSteps_.reserve(totalPlayerCount);
+    currentModulationSteps_.reserve(totalPlayerCount);
 
     for (std::size_t index = 0; index < defaultDrumVoices.size(); ++index)
     {
         const auto& voice = defaultDrumVoices[index];
         auto player = std::make_unique<lps::PatternPlayer>(
-            patternLibrary_, velocityModulationLibrary_);
+            patternLibrary_, modulationLibrary_);
         if (patternLibrary_.size() != 0)
         {
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))
@@ -135,20 +135,19 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         bundle.realtime = std::move(player);
         players_.push_back(std::move(bundle));
         currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
-        currentVelocityModulationSteps_.push_back(
+        currentModulationSteps_.push_back(
             std::make_unique<std::atomic<int>>(-1));
     }
 
     auto pulse = std::make_unique<lps::PulsePlayer>(0.5, 0.5);
     lps::ModulationLaneState pulseIntensity;
-    if (const auto* modulation = velocityModulationLibrary_.recordAt(0))
+    if (const auto* modulation = modulationLibrary_.recordAt(0))
     {
         pulseIntensity.length = static_cast<std::uint8_t>(std::min<std::size_t>(
             modulation->modulation.length, pulseIntensity.values.size()));
         for (std::size_t step = 0; step < pulseIntensity.length; ++step)
         {
-            pulseIntensity.values[step] = lps::NormalizedValue::fromUnipolar8(
-                modulation->modulation.values[step]);
+            pulseIntensity.values[step] = modulation->modulation.values[step];
         }
     }
     pulse->publishModulationState(pulseIntensity);
@@ -193,7 +192,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     pulseBundle.realtime = std::move(pulse);
     players_.push_back(std::move(pulseBundle));
     currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
-    currentVelocityModulationSteps_.push_back(
+    currentModulationSteps_.push_back(
         std::make_unique<std::atomic<int>>(-1));
 
     const auto masterId = engine_->playerIdAt(configuredMasterIndex());
@@ -346,7 +345,7 @@ void LivePatternSequencerProcessor::getStateInformation(juce::MemoryBlock& desti
         const auto serializeLane = [&lanes](
             const lps::ModulationLaneDefinition& definition,
             const lps::ModulationLaneState& state,
-            std::optional<lps::VelocityModulationId> legacyPreset)
+            std::optional<lps::ModulationId> legacyPreset)
         {
             auto lane = juce::DynamicObject::Ptr(new juce::DynamicObject());
             lane->setProperty("id", static_cast<int>(definition.id.value));
@@ -388,8 +387,7 @@ void LivePatternSequencerProcessor::getStateInformation(juce::MemoryBlock& desti
             laneState.length = static_cast<std::uint8_t>(state.velocityModulation.length);
             for (std::size_t step = 0; step < laneState.length; ++step)
             {
-                laneState.values[step] = lps::NormalizedValue::fromUnipolar8(
-                    state.velocityModulation.values[step]);
+                laneState.values[step] = state.velocityModulation.values[step];
             }
             serializeLane(
                 lps::makeIntensityLaneDefinition(),
@@ -502,7 +500,7 @@ void LivePatternSequencerProcessor::setStateInformation(
                     patternId)
                 || !integer(object, "velocityModulationId", 1,
                     static_cast<juce::int64>(
-                        lps::VelocityModulationLibrary::maxEntryCount),
+                        lps::ModulationLibrary::maxEntryCount),
                     modulationId))
             {
                 return;
@@ -510,8 +508,8 @@ void LivePatternSequencerProcessor::setStateInformation(
 
             const auto* pattern = patternLibrary_.find(
                 lps::PatternId { static_cast<std::uint64_t>(patternId) });
-            const auto* modulation = velocityModulationLibrary_.find(
-                lps::VelocityModulationId {
+            const auto* modulation = modulationLibrary_.find(
+                lps::ModulationId {
                     static_cast<std::uint64_t>(modulationId) });
             if (pattern == nullptr || modulation == nullptr)
                 return;
@@ -553,7 +551,7 @@ void LivePatternSequencerProcessor::setStateInformation(
     const auto parseLane = [&](const juce::var& value,
                                lps::ModulationLaneDefinition& definition,
                                lps::ModulationLaneState& state,
-                               std::optional<lps::VelocityModulationId>& legacyId)
+                               std::optional<lps::ModulationId>& legacyId)
     {
         const auto* lane = value.getDynamicObject();
         juce::int64 id = 0;
@@ -614,11 +612,11 @@ void LivePatternSequencerProcessor::setStateInformation(
         {
             juce::int64 preset = 0;
             if (!integer(lane, "legacyVelocityPresetId", 1,
-                lps::VelocityModulationLibrary::maxEntryCount, preset))
+                lps::ModulationLibrary::maxEntryCount, preset))
             {
                 return false;
             }
-            legacyId = lps::VelocityModulationId {
+            legacyId = lps::ModulationId {
                 static_cast<std::uint64_t>(preset) };
         }
         return true;
@@ -737,12 +735,12 @@ void LivePatternSequencerProcessor::setStateInformation(
 
             lps::ModulationLaneDefinition definition;
             lps::ModulationLaneState laneState;
-            std::optional<lps::VelocityModulationId> legacyId;
+            std::optional<lps::ModulationId> legacyId;
             if (!parseLane(lanes->getReference(0), definition, laneState, legacyId)
                 || definition.target != lps::ModulationTarget::intensity
                 || !legacyId.has_value()
-                || velocityModulationLibrary_.find(*legacyId) == nullptr
-                || laneState.length > lps::VelocityModulation::maxLength
+                || modulationLibrary_.find(*legacyId) == nullptr
+                || laneState.length > lps::Modulation::maxLength
                 || patternLibrary_.find(lps::PatternId {
                     static_cast<std::uint64_t>(patternId) }) == nullptr)
             {
@@ -761,10 +759,7 @@ void LivePatternSequencerProcessor::setStateInformation(
             state.velocityModulation.length = laneState.length;
             for (std::size_t step = 0; step < laneState.length; ++step)
             {
-                if (laneState.values[step].raw % 257u != 0)
-                    return;
-                state.velocityModulation.values[step] =
-                    static_cast<std::uint8_t>(laneState.values[step].raw / 257u);
+                state.velocityModulation.values[step] = laneState.values[step];
             }
             restored[playerIndex].pattern = state;
         }
@@ -787,7 +782,7 @@ void LivePatternSequencerProcessor::setStateInformation(
             state.laneCount = static_cast<std::uint8_t>(lanes->size());
             for (int laneIndex = 0; laneIndex < lanes->size(); ++laneIndex)
             {
-                std::optional<lps::VelocityModulationId> legacyId;
+                std::optional<lps::ModulationId> legacyId;
                 if (!parseLane(
                     lanes->getReference(laneIndex),
                     state.laneDefinitions[static_cast<std::size_t>(laneIndex)],
@@ -900,11 +895,11 @@ int LivePatternSequencerProcessor::currentStepForUi(std::size_t playerIndex) con
         : -1;
 }
 
-int LivePatternSequencerProcessor::currentVelocityModulationStepForUi(
+int LivePatternSequencerProcessor::currentModulationStepForUi(
     std::size_t playerIndex) const noexcept
 {
-    return playerIndex < currentVelocityModulationSteps_.size()
-        ? currentVelocityModulationSteps_[playerIndex]->load(
+    return playerIndex < currentModulationSteps_.size()
+        ? currentModulationSteps_[playerIndex]->load(
             std::memory_order_relaxed)
         : -1;
 }
@@ -1171,13 +1166,13 @@ void LivePatternSequencerProcessor::togglePlayerStep(
 
 std::size_t LivePatternSequencerProcessor::velocityModulationCountForUi() const noexcept
 {
-    return velocityModulationLibrary_.size();
+    return modulationLibrary_.size();
 }
 
 juce::String LivePatternSequencerProcessor::velocityModulationNameForUi(
     std::size_t modulationIndex) const
 {
-    const auto* modulation = velocityModulationLibrary_.recordAt(modulationIndex);
+    const auto* modulation = modulationLibrary_.recordAt(modulationIndex);
     return modulation != nullptr
         ? juce::String(modulation->name)
         : juce::String {};
@@ -1186,28 +1181,28 @@ juce::String LivePatternSequencerProcessor::velocityModulationNameForUi(
 juce::String
 LivePatternSequencerProcessor::velocityModulationCatalogErrorForUi() const
 {
-    return velocityModulationLibraryFileStore_.lastError();
+    return modulationLibraryFileStore_.lastError();
 }
 
-lps::VelocityModulation LivePatternSequencerProcessor::velocityModulationForUi(
+lps::Modulation LivePatternSequencerProcessor::velocityModulationForUi(
     std::size_t playerIndex) const noexcept
 {
     const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr
         ? player->velocityModulationForUi()
-        : lps::VelocityModulation {};
+        : lps::Modulation {};
 }
 
-bool LivePatternSequencerProcessor::playerVelocityModulationModifiedForUi(
+bool LivePatternSequencerProcessor::playerModulationModifiedForUi(
     std::size_t playerIndex) const noexcept
 {
     const auto* player = patternPlayerAt(playerIndex);
     return player != nullptr
-        && player->hasUnsavedVelocityModulationChanges();
+        && player->hasUnsavedModulationChanges();
 }
 
-LivePatternSequencerProcessor::SaveVelocityModulationResult
-LivePatternSequencerProcessor::savePlayerVelocityModulation(
+LivePatternSequencerProcessor::SaveModulationResult
+LivePatternSequencerProcessor::savePlayerModulation(
     std::size_t playerIndex,
     const juce::String& name)
 {
@@ -1215,36 +1210,36 @@ LivePatternSequencerProcessor::savePlayerVelocityModulation(
     if (player == nullptr)
         return {};
 
-    return savePlayerVelocityModulation(
+    return savePlayerModulation(
         playerIndex, player->velocityModulationForSave(), name);
 }
 
-LivePatternSequencerProcessor::SaveVelocityModulationResult
-LivePatternSequencerProcessor::savePlayerVelocityModulation(
+LivePatternSequencerProcessor::SaveModulationResult
+LivePatternSequencerProcessor::savePlayerModulation(
     std::size_t playerIndex,
-    const lps::VelocityModulation& candidateModulation,
+    const lps::Modulation& candidateModulation,
     const juce::String& name)
 {
     auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr
         || candidateModulation.length == 0
-        || candidateModulation.length > lps::VelocityModulation::maxLength)
+        || candidateModulation.length > lps::Modulation::maxLength)
     {
         return {};
     }
 
     try
     {
-        if (const auto* existing = velocityModulationLibrary_.findEquivalent(
+        if (const auto* existing = modulationLibrary_.findEquivalent(
                 candidateModulation))
         {
-            const auto index = velocityModulationLibrary_.indexOf(existing->id);
+            const auto index = modulationLibrary_.indexOf(existing->id);
             if (!index)
                 return {};
 
-            player->selectVelocityModulation(existing->id);
+            player->selectModulation(existing->id);
             return {
-                SaveVelocityModulationStatus::selectedExisting,
+                SaveModulationStatus::selectedExisting,
                 *index,
                 candidateModulation
             };
@@ -1254,32 +1249,32 @@ LivePatternSequencerProcessor::savePlayerVelocityModulation(
         if (trimmedName.isEmpty())
         {
             return {
-                SaveVelocityModulationStatus::needsName,
+                SaveModulationStatus::needsName,
                 std::numeric_limits<std::size_t>::max(),
                 candidateModulation
             };
         }
 
-        const auto insertion = velocityModulationLibrary_.addOrFind(
+        const auto insertion = modulationLibrary_.addOrFind(
             trimmedName.toStdString(),
             candidateModulation,
-            [this](lps::VelocityModulationLibraryEntry& stagedEntry)
+            [this](lps::ModulationLibraryEntry& stagedEntry)
             {
-                return velocityModulationLibraryFileStore_.persistNewEntry(
-                    velocityModulationLibrary_, stagedEntry);
+                return modulationLibraryFileStore_.persistNewEntry(
+                    modulationLibrary_, stagedEntry);
             });
         if (insertion.entry == nullptr)
             return {};
 
-        const auto index = velocityModulationLibrary_.indexOf(insertion.entry->id);
+        const auto index = modulationLibrary_.indexOf(insertion.entry->id);
         if (!index)
             return {};
 
-        player->selectVelocityModulation(insertion.entry->id);
+        player->selectModulation(insertion.entry->id);
         return {
             insertion.inserted
-                ? SaveVelocityModulationStatus::savedNew
-                : SaveVelocityModulationStatus::selectedExisting,
+                ? SaveModulationStatus::savedNew
+                : SaveModulationStatus::selectedExisting,
             *index,
             candidateModulation
         };
@@ -1290,42 +1285,42 @@ LivePatternSequencerProcessor::savePlayerVelocityModulation(
     }
 }
 
-void LivePatternSequencerProcessor::selectVelocityModulationForPlayer(
+void LivePatternSequencerProcessor::selectModulationForPlayer(
     std::size_t playerIndex,
     std::size_t modulationIndex) noexcept
 {
     auto* player = patternPlayerAt(playerIndex);
-    const auto* modulation = velocityModulationLibrary_.recordAt(modulationIndex);
+    const auto* modulation = modulationLibrary_.recordAt(modulationIndex);
     if (player != nullptr && modulation != nullptr)
-        player->selectVelocityModulation(modulation->id);
+        player->selectModulation(modulation->id);
 }
 
-std::size_t LivePatternSequencerProcessor::selectedVelocityModulationForPlayer(
+std::size_t LivePatternSequencerProcessor::selectedModulationForPlayer(
     std::size_t playerIndex) const noexcept
 {
     const auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr)
         return 0;
 
-    return velocityModulationLibrary_.indexOf(
-        player->selectedVelocityModulationId()).value_or(0);
+    return modulationLibrary_.indexOf(
+        player->selectedModulationId()).value_or(0);
 }
 
-void LivePatternSequencerProcessor::setPlayerVelocityModulationValue(
+void LivePatternSequencerProcessor::setPlayerModulationValue(
     std::size_t playerIndex,
     std::size_t step,
     std::uint8_t value) noexcept
 {
     if (auto* player = patternPlayerAt(playerIndex))
-        player->setVelocityModulationValue(step, value);
+        player->setModulationValue(step, value);
 }
 
-void LivePatternSequencerProcessor::setPlayerVelocityModulationLength(
+void LivePatternSequencerProcessor::setPlayerModulationLength(
     std::size_t playerIndex,
     std::size_t length) noexcept
 {
     if (auto* player = patternPlayerAt(playerIndex))
-        player->setVelocityModulationLength(length);
+        player->setModulationLength(length);
 }
 
 void LivePatternSequencerProcessor::setPlayerMuted(
@@ -1380,7 +1375,7 @@ void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
             : lps::ModulationPlaybackSnapshot {};
         currentSteps_[index]->store(
             patternSnapshot.currentStep, std::memory_order_relaxed);
-        currentVelocityModulationSteps_[index]->store(
+        currentModulationSteps_[index]->store(
             modulationSnapshot.currentStep,
             std::memory_order_relaxed);
         anyPlaying = anyPlaying || patternSnapshot.playing;

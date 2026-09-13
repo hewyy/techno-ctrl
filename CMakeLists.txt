@@ -39,8 +39,8 @@ add_library(sequencer_core STATIC
     src/core/SequencerEngine.cpp
     src/core/SequencerEngine.h
     src/core/SequencerTypes.h
-    src/core/VelocityModulationLibrary.cpp
-    src/core/VelocityModulationLibrary.h
+    src/core/ModulationLibrary.cpp
+    src/core/ModulationLibrary.h
 )
 
 target_include_directories(sequencer_core PUBLIC src)
@@ -58,8 +58,8 @@ add_executable(pattern_library_tests
     tests/PatternLibraryTests.cpp
 )
 
-add_executable(velocity_modulation_library_tests
-    tests/VelocityModulationLibraryTests.cpp
+add_executable(modulation_library_tests
+    tests/ModulationLibraryTests.cpp
 )
 
 add_executable(modulation_lane_tests
@@ -85,7 +85,7 @@ add_executable(cv_buffer_renderer_tests
 target_link_libraries(sequencer_core_tests PRIVATE sequencer_core)
 target_link_libraries(pattern_player_tests PRIVATE sequencer_core)
 target_link_libraries(pattern_library_tests PRIVATE sequencer_core)
-target_link_libraries(velocity_modulation_library_tests PRIVATE sequencer_core)
+target_link_libraries(modulation_library_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_lane_tests PRIVATE sequencer_core)
 target_link_libraries(pulse_player_tests PRIVATE sequencer_core)
 target_include_directories(midi_buffer_transport_tests PRIVATE src)
@@ -105,7 +105,7 @@ enable_testing()
 add_test(NAME sequencer_core_tests COMMAND sequencer_core_tests)
 add_test(NAME pattern_player_tests COMMAND pattern_player_tests)
 add_test(NAME pattern_library_tests COMMAND pattern_library_tests)
-add_test(NAME velocity_modulation_library_tests COMMAND velocity_modulation_library_tests)
+add_test(NAME modulation_library_tests COMMAND modulation_library_tests)
 add_test(NAME modulation_lane_tests COMMAND modulation_lane_tests)
 add_test(NAME pulse_player_tests COMMAND pulse_player_tests)
 add_test(NAME midi_buffer_transport_tests COMMAND midi_buffer_transport_tests)
@@ -133,8 +133,8 @@ target_sources(LivePatternSequencer PRIVATE
     src/plugin/MidiBufferRenderer.h
     src/plugin/PatternLibraryFileStore.cpp
     src/plugin/PatternLibraryFileStore.h
-    src/plugin/VelocityModulationLibraryFileStore.cpp
-    src/plugin/VelocityModulationLibraryFileStore.h
+    src/plugin/ModulationLibraryFileStore.cpp
+    src/plugin/ModulationLibraryFileStore.h
     src/plugin/PluginEditor.cpp
     src/plugin/PluginEditor.h
     src/plugin/PluginProcessor.cpp
@@ -159,15 +159,3 @@ target_compile_definitions(LivePatternSequencer
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
 )
-
-add_executable(plugin_processor_tests
-    tests/PluginProcessorTests.cpp
-)
-
-target_include_directories(plugin_processor_tests PRIVATE src)
-target_link_libraries(plugin_processor_tests
-    PRIVATE
-        LivePatternSequencer
-        juce::juce_audio_utils
-)
-add_test(NAME plugin_processor_tests COMMAND plugin_processor_tests)

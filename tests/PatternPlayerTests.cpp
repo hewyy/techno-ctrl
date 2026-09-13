@@ -105,12 +105,12 @@ void testBasicKickPlaysTwoFullCycles()
     CHECK(capabilities.acceptsExternalRestart);
 }
 
-void testVelocityModulationAdvancesOnlyOnHitsAndWraps()
+void testModulationAdvancesOnlyOnHitsAndWraps()
 {
     const lps::PatternLibrary patternLibrary;
-    const lps::VelocityModulationLibrary modulationLibrary;
+    const lps::ModulationLibrary modulationLibrary;
     lps::PatternPlayer player { patternLibrary, modulationLibrary };
-    player.selectVelocityModulation(lps::VelocityModulationId {2});
+    player.selectModulation(lps::ModulationId {2});
 
     lps::SequencerEventBuffer events;
     lps::TimelineBlock block;
@@ -127,16 +127,16 @@ void testVelocityModulationAdvancesOnlyOnHitsAndWraps()
     checkVelocityValues(
         triggerStartValues(events),
         {255, 100, 225, 150, 255, 100, 225, 150, 255, 100});
-    CHECK(player.activeVelocityModulationId()
-          == lps::VelocityModulationId {2});
+    CHECK(player.activeModulationId()
+          == lps::ModulationId {2});
 }
 
-void testVelocityModulationSnapshotTracksLastPlayedHitAcrossRests()
+void testModulationSnapshotTracksLastPlayedHitAcrossRests()
 {
     const lps::PatternLibrary patternLibrary;
-    const lps::VelocityModulationLibrary modulationLibrary;
+    const lps::ModulationLibrary modulationLibrary;
     lps::PatternPlayer player { patternLibrary, modulationLibrary };
-    player.selectVelocityModulation(lps::VelocityModulationId {2});
+    player.selectModulation(lps::ModulationId {2});
     lps::SequencerEventBuffer events;
 
     lps::TimelineBlock firstHit;
@@ -163,12 +163,12 @@ void testVelocityModulationSnapshotTracksLastPlayedHitAcrossRests()
     CHECK(player.modulationPlaybackSnapshot().currentStep == 1);
 }
 
-void testVelocityModulationRestartsOnTransportDiscontinuity()
+void testModulationRestartsOnTransportDiscontinuity()
 {
     const lps::PatternLibrary patternLibrary;
-    const lps::VelocityModulationLibrary modulationLibrary;
+    const lps::ModulationLibrary modulationLibrary;
     lps::PatternPlayer player { patternLibrary, modulationLibrary };
-    player.selectVelocityModulation(lps::VelocityModulationId {2});
+    player.selectModulation(lps::ModulationId {2});
     lps::SequencerEventBuffer events;
 
     lps::TimelineBlock firstRun;
@@ -190,12 +190,12 @@ void testVelocityModulationRestartsOnTransportDiscontinuity()
     CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 }
 
-void testVelocityModulationRestartsOnExplicitSequenceReset()
+void testModulationRestartsOnExplicitSequenceReset()
 {
     const lps::PatternLibrary patternLibrary;
-    const lps::VelocityModulationLibrary modulationLibrary;
+    const lps::ModulationLibrary modulationLibrary;
     lps::PatternPlayer player { patternLibrary, modulationLibrary };
-    player.selectVelocityModulation(lps::VelocityModulationId {2});
+    player.selectModulation(lps::ModulationId {2});
     lps::SequencerEventBuffer events;
 
     lps::TimelineBlock firstRun;
@@ -217,15 +217,15 @@ void testVelocityModulationRestartsOnExplicitSequenceReset()
     CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 }
 
-void testVelocityModulationContinuesAcrossPatternChanges()
+void testModulationContinuesAcrossPatternChanges()
 {
     const lps::PatternLibrary patternLibrary;
-    const lps::VelocityModulationLibrary modulationLibrary;
+    const lps::ModulationLibrary modulationLibrary;
     const auto* allSteps = patternLibrary.recordAt(1);
     CHECK(allSteps != nullptr);
 
     lps::PatternPlayer player { patternLibrary, modulationLibrary };
-    player.selectVelocityModulation(lps::VelocityModulationId {2});
+    player.selectModulation(lps::ModulationId {2});
     lps::SequencerEventBuffer events;
 
     lps::TimelineBlock start;
@@ -247,12 +247,12 @@ void testVelocityModulationContinuesAcrossPatternChanges()
     CHECK(player.modulationPlaybackSnapshot().currentStep == 1);
 }
 
-void testSelectingVelocityModulationRestartsItsOwnPhase()
+void testSelectingModulationRestartsItsOwnPhase()
 {
     const lps::PatternLibrary patternLibrary;
-    const lps::VelocityModulationLibrary modulationLibrary;
+    const lps::ModulationLibrary modulationLibrary;
     lps::PatternPlayer player { patternLibrary, modulationLibrary };
-    player.selectVelocityModulation(lps::VelocityModulationId {2});
+    player.selectModulation(lps::ModulationId {2});
     lps::SequencerEventBuffer events;
 
     lps::TimelineBlock firstRun;
@@ -262,7 +262,7 @@ void testSelectingVelocityModulationRestartsItsOwnPhase()
     player.process(firstRun, events);
     checkVelocityValues(triggerStartValues(events), {255, 100});
 
-    player.selectVelocityModulation(lps::VelocityModulationId {1});
+    player.selectModulation(lps::ModulationId {1});
     lps::TimelineBlock steadyBlock;
     steadyBlock.ppqStart = firstRun.ppqEnd;
     steadyBlock.ppqEnd = 2.1;
@@ -271,7 +271,7 @@ void testSelectingVelocityModulationRestartsItsOwnPhase()
     checkVelocityValues(triggerStartValues(events), {201});
     CHECK(player.modulationPlaybackSnapshot().currentStep == 0);
 
-    player.selectVelocityModulation(lps::VelocityModulationId {2});
+    player.selectModulation(lps::ModulationId {2});
     lps::TimelineBlock fourStepAgain;
     fourStepAgain.ppqStart = steadyBlock.ppqEnd;
     fourStepAgain.ppqEnd = 3.1;
@@ -1027,12 +1027,12 @@ void testSaveSnapshotNeverCombinesConcurrentPatternActivations()
 int main()
 {
     testBasicKickPlaysTwoFullCycles();
-    testVelocityModulationAdvancesOnlyOnHitsAndWraps();
-    testVelocityModulationSnapshotTracksLastPlayedHitAcrossRests();
-    testVelocityModulationRestartsOnTransportDiscontinuity();
-    testVelocityModulationRestartsOnExplicitSequenceReset();
-    testVelocityModulationContinuesAcrossPatternChanges();
-    testSelectingVelocityModulationRestartsItsOwnPhase();
+    testModulationAdvancesOnlyOnHitsAndWraps();
+    testModulationSnapshotTracksLastPlayedHitAcrossRests();
+    testModulationRestartsOnTransportDiscontinuity();
+    testModulationRestartsOnExplicitSequenceReset();
+    testModulationContinuesAcrossPatternChanges();
+    testSelectingModulationRestartsItsOwnPhase();
     testSmallBlocksDoNotDuplicateTriggers();
     testTransportStartAtOffGridPpqBeginsAtFirstStep();
     testResumeAfterStopRestartsAtFirstStep();
