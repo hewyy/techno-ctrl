@@ -52,7 +52,7 @@ private:
 
     struct ActiveTrigger
     {
-        PlayerId playerId;
+        VoiceId voiceId;
         RouteId routeId;
         TriggerId triggerId;
         bool active = false;

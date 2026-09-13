@@ -26,7 +26,7 @@ lps::RoutedEvent trigger(
     event.event = type == lps::SemanticEventType::triggerStart
         ? lps::SequencerEvent::triggerStart(0.0, { id }, 1.0f)
         : lps::SequencerEvent::triggerEnd(0.0, { id });
-    event.sourcePlayerId = { 0 };
+    event.sourceVoiceId = { 0 };
     event.routeId = { 1 };
     event.frameOffset = frame;
     event.mappedPitchSemitones = pitch;
@@ -78,7 +78,7 @@ void testUnmatchedEndCannotLowerAnotherSourcesGate()
     const auto start = trigger(lps::SemanticEventType::triggerStart, 1, 0);
     CHECK(renderer.renderBlock({}, { &start, 1 }));
     auto unrelatedEnd = trigger(lps::SemanticEventType::triggerEnd, 99, 4);
-    unrelatedEnd.sourcePlayerId = { 9 };
+    unrelatedEnd.sourceVoiceId = { 9 };
     CHECK(renderer.renderBlock({}, { &unrelatedEnd, 1 }));
     checkChannel(buffer, 0, { 1, 1, 1, 1, 1, 1, 1, 1 });
 }

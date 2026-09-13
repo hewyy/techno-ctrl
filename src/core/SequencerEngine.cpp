@@ -122,7 +122,7 @@ void SequencerEngine::run(const TimelineBlock& block) noexcept
 
             RoutedEvent routed;
             routed.event = event;
-            routed.sourcePlayerId = slot->id;
+            routed.sourceVoiceId = VoiceId {slot->id.value};
             routed.routeId = route.id;
             routed.frameOffset = *frameOffset;
             routed.stableOrder = stableOrder++;

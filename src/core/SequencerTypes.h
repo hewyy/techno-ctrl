@@ -406,7 +406,7 @@ struct RouteMapping
 struct RoutedEvent
 {
     SequencerEvent event;
-    PlayerId sourcePlayerId;
+    VoiceId sourceVoiceId;
     RouteId routeId;
     std::uint32_t frameOffset = 0;
     std::uint64_t stableOrder = 0;

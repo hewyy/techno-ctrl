@@ -26,7 +26,7 @@ public:
 private:
     struct ActiveTrigger
     {
-        PlayerId playerId;
+        VoiceId voiceId;
         RouteId routeId;
         TriggerId triggerId;
         std::uint8_t note = 0;

@@ -42,10 +42,13 @@ bool MidiBufferRenderer::renderBlock(
         std::optional<std::uint8_t> note;
         if (routed.event.type == SemanticEventType::triggerStart)
         {
-            if (!routed.hasMappedPitch)
+            if (!routed.event.hasMusicalPitch && !routed.hasMappedPitch)
                 return false;
             note = static_cast<std::uint8_t>(std::clamp(
-                static_cast<int>(std::lround(routed.mappedPitchSemitones)),
+                static_cast<int>(std::lround(
+                    routed.event.hasMusicalPitch
+                        ? routed.event.musicalPitchSemitones
+                        : routed.mappedPitchSemitones)),
                 0,
                 127));
             if (!rememberStart(routed, *note))
@@ -58,11 +61,11 @@ bool MidiBufferRenderer::renderBlock(
                 continue;
         }
 
+        const auto velocity = static_cast<std::uint8_t>(std::clamp(
+            static_cast<int>(std::lround(
+                routed.event.normalizedValue * 127.0f)), 1, 127));
         const auto message = routed.event.type == SemanticEventType::triggerStart
-            ? juce::MidiMessage::noteOn(
-                midiChannel_,
-                *note,
-                std::clamp(routed.event.normalizedValue, 0.0f, 1.0f))
+            ? juce::MidiMessage::noteOn(midiChannel_, *note, velocity)
             : juce::MidiMessage::noteOff(midiChannel_, *note);
         if (!midiBuffer_->addEvent(message, static_cast<int>(routed.frameOffset)))
             return false;
@@ -86,7 +89,7 @@ std::optional<std::uint8_t> MidiBufferRenderer::noteForEnd(
     for (auto& active : activeTriggers_)
     {
         if (active.active
-            && active.playerId == event.sourcePlayerId
+            && active.voiceId == event.sourceVoiceId
             && active.routeId == event.routeId
             && active.triggerId == event.event.triggerId)
         {
@@ -107,7 +110,7 @@ bool MidiBufferRenderer::rememberStart(
         if (!active.active)
         {
             active = {
-                event.sourcePlayerId,
+                event.sourceVoiceId,
                 event.routeId,
                 event.event.triggerId,
                 note,

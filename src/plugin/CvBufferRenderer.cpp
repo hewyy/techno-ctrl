@@ -102,10 +102,13 @@ bool CvBufferRenderer::renderBlock(
             ++state->activeTriggerCount;
             state->gate = 1.0f;
             fillFrom(state->config.gateChannel, frame, state->gate);
-            if (event.hasMappedPitch)
+            if (event.event.hasMusicalPitch || event.hasMappedPitch)
             {
+                const auto pitchSemitones = event.event.hasMusicalPitch
+                    ? event.event.musicalPitchSemitones
+                    : event.mappedPitchSemitones;
                 state->pitch = state->config.voltsAtReferencePitch
-                    + (event.mappedPitchSemitones
+                    + (pitchSemitones
                         - state->config.referencePitchSemitones)
                         / 12.0f * state->config.voltsPerOctave;
                 fillFrom(state->config.pitchChannel, frame, state->pitch);
@@ -236,7 +239,7 @@ bool CvBufferRenderer::rememberTrigger(const RoutedEvent& event) noexcept
         if (!trigger.active)
         {
             trigger = {
-                event.sourcePlayerId,
+                event.sourceVoiceId,
                 event.routeId,
                 event.event.triggerId,
                 true
@@ -252,7 +255,7 @@ bool CvBufferRenderer::releaseTrigger(const RoutedEvent& event) noexcept
     for (auto& trigger : activeTriggers_)
     {
         if (trigger.active
-            && trigger.playerId == event.sourcePlayerId
+            && trigger.voiceId == event.sourceVoiceId
             && trigger.routeId == event.routeId
             && trigger.triggerId == event.event.triggerId)
         {

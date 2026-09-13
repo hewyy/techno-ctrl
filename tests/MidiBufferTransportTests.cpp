@@ -146,9 +146,9 @@ void testTriggerEndUsesThePitchRememberedForItsStart()
         lps::SemanticEventType::triggerStart, 42, 73.0f, 1.0f, 5);
     auto end = routedTrigger(
         lps::SemanticEventType::triggerEnd, 42, 0.0f, 0.0f, 9);
-    start.sourcePlayerId = { 3 };
+    start.sourceVoiceId = { 3 };
     start.routeId = { 7 };
-    end.sourcePlayerId = start.sourcePlayerId;
+    end.sourceVoiceId = start.sourceVoiceId;
     end.routeId = start.routeId;
     end.hasMappedPitch = false;
     const std::array events { start, end };
