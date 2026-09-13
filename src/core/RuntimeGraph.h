@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ModulationPlayer.h"
+#include "core/IOutputRenderer.h"
 #include "core/PatternPlayer.h"
 #include "core/Voice.h"
 
@@ -8,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace lps
 {
@@ -47,22 +49,42 @@ struct CommandBinding
     PlayerCommand command = PlayerCommand::play;
 };
 
+enum class OutputSignalType : std::uint8_t
+{
+    triggers,
+    continuousParameter
+};
+
+struct OutputBinding
+{
+    OutputBindingId id;
+    VoiceId source;
+    OutputEndpointId endpoint;
+    RouteId route;
+    VoiceParameterId parameter;
+    OutputSignalType signal = OutputSignalType::triggers;
+};
+
 struct RuntimeGraphConfig
 {
     static constexpr std::size_t maximumTriggerBindings = 32;
     static constexpr std::size_t maximumParameterBindings = 64;
     static constexpr std::size_t maximumCommandBindings = 64;
+    static constexpr std::size_t maximumOutputBindings = 64;
 
     std::array<TriggerBinding, maximumTriggerBindings> triggerBindings {};
     std::array<ParameterBinding, maximumParameterBindings> parameterBindings {};
     std::array<CommandBinding, maximumCommandBindings> commandBindings {};
+    std::array<OutputBinding, maximumOutputBindings> outputBindings {};
     std::size_t triggerBindingCount = 0;
     std::size_t parameterBindingCount = 0;
     std::size_t commandBindingCount = 0;
+    std::size_t outputBindingCount = 0;
 
     [[nodiscard]] bool add(TriggerBinding binding) noexcept;
     [[nodiscard]] bool add(ParameterBinding binding) noexcept;
     [[nodiscard]] bool add(CommandBinding binding) noexcept;
+    [[nodiscard]] bool add(OutputBinding binding) noexcept;
 };
 
 enum class GraphValidationError : std::uint8_t
@@ -75,7 +97,8 @@ enum class GraphValidationError : std::uint8_t
     selfEdge,
     controlCycle,
     multipleTriggerSources,
-    multipleParameterSources
+    multipleParameterSources,
+    unsupportedOutputSignal
 };
 
 struct ResolvedVoiceEvent
@@ -115,10 +138,15 @@ public:
     static constexpr std::size_t maximumModulationPlayers = 64;
     static constexpr std::size_t maximumVoices = 16;
     static constexpr std::size_t maximumWorkSignals = 1024;
+    static constexpr std::size_t maximumOutputEndpoints = 8;
+    static constexpr std::size_t maximumRoutedEventsPerEndpoint = 1024;
 
     [[nodiscard]] bool registerPatternPlayer(PatternPlayer& player) noexcept;
     [[nodiscard]] bool registerModulationPlayer(ModulationPlayer& player) noexcept;
     [[nodiscard]] bool registerVoice(Voice& voice) noexcept;
+    [[nodiscard]] bool registerOutputEndpoint(
+        OutputEndpointId id,
+        IOutputRenderer& renderer) noexcept;
 
     [[nodiscard]] GraphValidationError validate(
         const RuntimeGraphConfig& candidate) const noexcept;
@@ -144,6 +172,19 @@ public:
     [[nodiscard]] bool process(
         const TimelineBlock& block,
         ResolvedVoiceEventBuffer& output) noexcept;
+    [[nodiscard]] bool render(
+        const TimelineBlock& block,
+        const ResolvedVoiceEventBuffer& events) noexcept;
+    void resetOutputs() noexcept;
+    void setVoiceMuted(VoiceId voice, bool muted) noexcept;
+    [[nodiscard]] bool voiceMuted(VoiceId voice) const noexcept;
+    void setSuppression(
+        PatternPlayerId suppressor,
+        PatternPlayerId suppressed,
+        bool enabled) noexcept;
+    [[nodiscard]] bool suppression(
+        PatternPlayerId suppressor,
+        PatternPlayerId suppressed) const noexcept;
 
     [[nodiscard]] GraphValidationError lastValidationError() const noexcept
     {
@@ -174,9 +215,26 @@ private:
         bool configured = false;
     };
 
+    struct OutputEndpoint
+    {
+        OutputEndpointId id;
+        IOutputRenderer* renderer = nullptr;
+        std::array<RoutedEvent, maximumRoutedEventsPerEndpoint> events {};
+        std::size_t eventCount = 0;
+    };
+
+    struct AudibleTriggerState
+    {
+        TriggerId id;
+        bool eligible = false;
+        bool active = false;
+    };
+
     [[nodiscard]] PatternPlayer* find(PatternPlayerId id) const noexcept;
     [[nodiscard]] ModulationPlayer* find(ModulationPlayerId id) const noexcept;
     [[nodiscard]] Voice* find(VoiceId id) const noexcept;
+    [[nodiscard]] OutputEndpoint* find(OutputEndpointId id) noexcept;
+    [[nodiscard]] const OutputEndpoint* find(OutputEndpointId id) const noexcept;
     [[nodiscard]] IPlayer* find(PlayerRef ref) const noexcept;
     [[nodiscard]] bool appendSignals(const PlayerSignalBuffer& signals) noexcept;
     void appendVoiceEvents(
@@ -189,13 +247,21 @@ private:
         const RuntimeGraphConfig& candidate) const noexcept;
     [[nodiscard]] const RuntimeGraphConfig& activeConfig() const noexcept;
     void adoptPublishedConfig() noexcept;
+    [[nodiscard]] std::optional<std::uint32_t> frameOffsetFor(
+        const SequencerEvent& event,
+        const TimelineBlock& block) const noexcept;
+    [[nodiscard]] std::size_t patternPlayerIndex(
+        PatternPlayerId id) const noexcept;
+    [[nodiscard]] std::size_t voiceIndex(VoiceId id) const noexcept;
 
     std::array<PatternPlayer*, maximumPatternPlayers> patternPlayers_ {};
     std::array<ModulationPlayer*, maximumModulationPlayers> modulationPlayers_ {};
     std::array<Voice*, maximumVoices> voices_ {};
+    std::array<OutputEndpoint, maximumOutputEndpoints> outputEndpoints_ {};
     std::size_t patternPlayerCount_ = 0;
     std::size_t modulationPlayerCount_ = 0;
     std::size_t voiceCount_ = 0;
+    std::size_t outputEndpointCount_ = 0;
     static constexpr std::size_t snapshotCount = 3;
     std::array<RuntimeGraphConfig, snapshotCount> configSnapshots_ {};
     std::array<std::uint64_t, snapshotCount> snapshotGenerations_ {};
@@ -207,6 +273,10 @@ private:
     std::uint8_t audioSnapshot_ = 0;
     std::array<ArmedCycleCommand, maximumPatternPlayers> armedCycleCommands_ {};
     std::array<std::atomic_bool, maximumPatternPlayers> armedCyclePending_ {};
+    std::array<std::atomic_bool, maximumVoices> voiceMuted_ {};
+    std::array<std::array<std::atomic_bool, maximumPatternPlayers>,
+        maximumPatternPlayers> suppression_ {};
+    std::array<AudibleTriggerState, maximumVoices> audibleTriggers_ {};
     PrepareSpec prepareSpec_;
     std::array<WorkSignal, maximumWorkSignals> work_ {};
     std::size_t workSize_ = 0;

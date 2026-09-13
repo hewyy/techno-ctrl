@@ -174,6 +174,8 @@ private:
     static constexpr int cvChannelsPerPlayer = 3;
     static constexpr int cvOutputChannelCount =
         static_cast<int>(cvPlayerCapacity) * cvChannelsPerPlayer;
+    static constexpr lps::OutputEndpointId midiOutputEndpoint {0};
+    static constexpr lps::OutputEndpointId cvOutputEndpoint {1};
 
     struct PlayerDescriptor
     {
@@ -206,17 +208,6 @@ private:
         std::size_t playerIndex) noexcept;
     [[nodiscard]] const lps::ModulationPlayer* modulationPlayerAt(
         std::size_t playerIndex) const noexcept;
-    [[nodiscard]] bool routeGraphOutput(
-        const lps::TimelineBlock& block,
-        const lps::ResolvedVoiceEventBuffer& events) noexcept;
-    void resetGraphOutputs() noexcept;
-
-    struct AudibleTriggerState
-    {
-        lps::TriggerId id;
-        bool eligible = false;
-        bool active = false;
-    };
 
     // The library must outlive every player because players keep a read-only
     // reference to its immutable, append-only entries.
@@ -231,14 +222,6 @@ private:
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
     std::unique_ptr<lps::CvBufferRenderer> cvRenderer_;
     std::unique_ptr<lps::RuntimeGraph> runtimeGraph_;
-    std::array<lps::RoutedEvent, lps::ResolvedVoiceEventBuffer::capacity>
-        midiRoutedEvents_ {};
-    std::array<lps::RoutedEvent, lps::ResolvedVoiceEventBuffer::capacity>
-        cvRoutedEvents_ {};
-    std::array<AudibleTriggerState, cvPlayerCapacity> audibleTriggers_ {};
-    std::array<std::atomic_bool, cvPlayerCapacity> muted_ {};
-    std::array<std::array<std::atomic_bool, cvPlayerCapacity>, cvPlayerCapacity>
-        suppression_ {};
 
     std::optional<double> expectedNextPpq_;
     bool wasPlaying_ = false;

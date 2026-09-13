@@ -95,6 +95,12 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         "Constant Gate 1/2", constantModulation(0.5f));
     jassert(gateRecord.entry != nullptr);
     lps::RuntimeGraphConfig graphConfig;
+    const bool outputsRegistered = runtimeGraph_->registerOutputEndpoint(
+            midiOutputEndpoint, *drumRenderer_)
+        && runtimeGraph_->registerOutputEndpoint(
+            cvOutputEndpoint, *cvRenderer_);
+    jassert(outputsRegistered);
+    (void) outputsRegistered;
 
     for (std::size_t index = 0; index < defaultDrumVoices.size(); ++index)
     {
@@ -167,7 +173,19 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
                 velocityModulationId, voiceId, intensityParameter})
             && graphConfig.add(lps::ParameterBinding {
                 lps::ParameterBindingId {modulationBase + 2},
-                gateModulationId, voiceId, gateParameter});
+                gateModulationId, voiceId, gateParameter})
+            && graphConfig.add(lps::OutputBinding {
+                lps::OutputBindingId {
+                    static_cast<std::uint32_t>(index * 2) },
+                voiceId, midiOutputEndpoint,
+                lps::RouteId {static_cast<std::uint32_t>(index)}, {},
+                lps::OutputSignalType::triggers})
+            && graphConfig.add(lps::OutputBinding {
+                lps::OutputBindingId {
+                    static_cast<std::uint32_t>(index * 2 + 1) },
+                voiceId, cvOutputEndpoint,
+                lps::RouteId {static_cast<std::uint32_t>(index)}, {},
+                lps::OutputSignalType::triggers});
         jassert(bindingsAdded);
         (void) bindingsAdded;
 
@@ -243,10 +261,6 @@ void LivePatternSequencerProcessor::prepareToPlay(
         static_cast<std::uint32_t>(std::max(maximumExpectedSamplesPerBlock, 0))
     };
     runtimeGraph_->prepare(spec);
-    drumRenderer_->prepare({spec.sampleRate, spec.maximumBlockSize});
-    cvRenderer_->prepare({spec.sampleRate, spec.maximumBlockSize});
-    for (auto& trigger : audibleTriggers_)
-        trigger = {};
     expectedNextPpq_.reset();
     wasPlaying_ = false;
     updateUiSnapshot();
@@ -255,7 +269,7 @@ void LivePatternSequencerProcessor::prepareToPlay(
 void LivePatternSequencerProcessor::releaseResources()
 {
     runtimeGraph_->reset();
-    resetGraphOutputs();
+    runtimeGraph_->resetOutputs();
     expectedNextPpq_.reset();
     wasPlaying_ = false;
     updateUiSnapshot();
@@ -312,123 +326,17 @@ void LivePatternSequencerProcessor::processBlock(
     wasPlaying_ = block.playing;
     drumRenderer_->setMidiBuffer(midi);
     cvRenderer_->setAudioBuffer(audio);
-    if (block.transportDiscontinuity)
-        resetGraphOutputs();
-
     lps::ResolvedVoiceEventBuffer resolvedEvents;
     if (!runtimeGraph_->process(block, resolvedEvents)
-        || !routeGraphOutput(block, resolvedEvents))
+        || !runtimeGraph_->render(block, resolvedEvents))
     {
         runtimeGraph_->reset();
-        resetGraphOutputs();
+        runtimeGraph_->resetOutputs();
     }
     cvRenderer_->clearAudioBuffer();
     drumRenderer_->clearMidiBuffer();
 
     updateUiSnapshot();
-}
-
-bool LivePatternSequencerProcessor::routeGraphOutput(
-    const lps::TimelineBlock& block,
-    const lps::ResolvedVoiceEventBuffer& events) noexcept
-{
-    std::size_t midiCount = 0;
-    std::size_t cvCount = 0;
-
-    for (const auto& resolved : events)
-    {
-        const auto voiceIndex = static_cast<std::size_t>(
-            resolved.sourceVoiceId.value);
-        if (voiceIndex >= players_.size())
-            return false;
-
-        bool eligible = true;
-        if (resolved.event.type == lps::SemanticEventType::triggerStart)
-        {
-            eligible = !muted_[voiceIndex].load(std::memory_order_relaxed);
-            for (std::size_t suppressor = 0;
-                 eligible && suppressor < players_.size();
-                 ++suppressor)
-            {
-                if (!suppression_[suppressor][voiceIndex].load(
-                        std::memory_order_relaxed))
-                    continue;
-                if (runtimeGraph_->patternHitOccurred(
-                        lps::PatternPlayerId {
-                            static_cast<std::uint32_t>(suppressor) },
-                        resolved.event.ppqPosition))
-                {
-                    eligible = false;
-                }
-            }
-            audibleTriggers_[voiceIndex] = {
-                resolved.event.triggerId, eligible, true };
-        }
-        else if (resolved.event.type == lps::SemanticEventType::triggerEnd)
-        {
-            auto& trigger = audibleTriggers_[voiceIndex];
-            eligible = trigger.active
-                && trigger.id == resolved.event.triggerId
-                && trigger.eligible;
-            if (trigger.active && trigger.id == resolved.event.triggerId)
-                trigger = {};
-        }
-
-        if (!eligible
-            && resolved.event.type != lps::SemanticEventType::controlPoint)
-            continue;
-        if (!std::isfinite(resolved.event.ppqPosition))
-            return false;
-
-        std::uint32_t frameOffset = 0;
-        if (block.sampleCount != 0)
-        {
-            if (!std::isfinite(block.ppqStart)
-                || !std::isfinite(block.tempoBpm)
-                || !std::isfinite(block.sampleRate)
-                || block.tempoBpm <= 0.0 || block.sampleRate <= 0.0)
-                return false;
-            const auto ppqPerSample = block.tempoBpm
-                / (60.0 * block.sampleRate);
-            const auto rawOffset = (resolved.event.ppqPosition - block.ppqStart)
-                / ppqPerSample;
-            if (!std::isfinite(rawOffset) || rawOffset < -0.5
-                || rawOffset > static_cast<double>(block.sampleCount) - 0.5)
-                return false;
-            frameOffset = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-                std::llround(rawOffset), 0,
-                static_cast<std::int64_t>(block.sampleCount - 1)));
-        }
-
-        lps::RoutedEvent routed;
-        routed.event = resolved.event;
-        routed.sourceVoiceId = resolved.sourceVoiceId;
-        routed.frameOffset = frameOffset;
-        routed.stableOrder = resolved.stableOrder;
-        routed.routeId = players_[voiceIndex].midiRouteId;
-        if (midiCount == midiRoutedEvents_.size())
-            return false;
-        midiRoutedEvents_[midiCount++] = routed;
-
-        routed.routeId = players_[voiceIndex].cvRouteId;
-        if (cvCount == cvRoutedEvents_.size())
-            return false;
-        cvRoutedEvents_[cvCount++] = routed;
-    }
-
-    const auto midiOk = drumRenderer_->renderBlock(
-        block, {midiRoutedEvents_.data(), midiCount});
-    const auto cvOk = cvRenderer_->renderBlock(
-        block, {cvRoutedEvents_.data(), cvCount});
-    return midiOk && cvOk;
-}
-
-void LivePatternSequencerProcessor::resetGraphOutputs() noexcept
-{
-    for (auto& trigger : audibleTriggers_)
-        trigger = {};
-    drumRenderer_->resetOutputs();
-    cvRenderer_->resetOutputs();
 }
 
 juce::AudioProcessorEditor* LivePatternSequencerProcessor::createEditor()
@@ -1626,14 +1534,16 @@ void LivePatternSequencerProcessor::setPlayerMuted(
     bool muted) noexcept
 {
     if (playerIndex < players_.size())
-        muted_[playerIndex].store(muted, std::memory_order_relaxed);
+        runtimeGraph_->setVoiceMuted(
+            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)}, muted);
 }
 
 bool LivePatternSequencerProcessor::playerMutedForUi(
     std::size_t playerIndex) const noexcept
 {
     return playerIndex < players_.size()
-        && muted_[playerIndex].load(std::memory_order_relaxed);
+        && runtimeGraph_->voiceMuted(
+            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)});
 }
 
 void LivePatternSequencerProcessor::setSuppression(
@@ -1645,8 +1555,12 @@ void LivePatternSequencerProcessor::setSuppression(
         && suppressedIndex < players_.size()
         && suppressorIndex != suppressedIndex)
     {
-        suppression_[suppressorIndex][suppressedIndex].store(
-            enabled, std::memory_order_relaxed);
+        runtimeGraph_->setSuppression(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(suppressorIndex) },
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(suppressedIndex) },
+            enabled);
     }
 }
 
@@ -1657,8 +1571,11 @@ bool LivePatternSequencerProcessor::suppression(
     return suppressorIndex < players_.size()
         && suppressedIndex < players_.size()
         && suppressorIndex != suppressedIndex
-        && suppression_[suppressorIndex][suppressedIndex].load(
-            std::memory_order_relaxed);
+        && runtimeGraph_->suppression(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(suppressorIndex) },
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(suppressedIndex) });
 }
 
 void LivePatternSequencerProcessor::updateUiSnapshot() noexcept

@@ -31,6 +31,14 @@ bool RuntimeGraphConfig::add(CommandBinding binding) noexcept
     return true;
 }
 
+bool RuntimeGraphConfig::add(OutputBinding binding) noexcept
+{
+    if (outputBindingCount == outputBindings.size())
+        return false;
+    outputBindings[outputBindingCount++] = binding;
+    return true;
+}
+
 bool ResolvedVoiceEventBuffer::push(ResolvedVoiceEvent event) noexcept
 {
     if (size_ == events_.size())
@@ -72,6 +80,22 @@ bool RuntimeGraph::registerVoice(Voice& voice) noexcept
         || voiceCount_ == voices_.size() || find(voice.id()) != nullptr)
         return false;
     voices_[voiceCount_++] = &voice;
+    return true;
+}
+
+bool RuntimeGraph::registerOutputEndpoint(
+    OutputEndpointId id,
+    IOutputRenderer& renderer) noexcept
+{
+    if (prepared_ || !id.isValid()
+        || outputEndpointCount_ == outputEndpoints_.size()
+        || find(id) != nullptr)
+    {
+        return false;
+    }
+    auto& endpoint = outputEndpoints_[outputEndpointCount_++];
+    endpoint.id = id;
+    endpoint.renderer = &renderer;
     return true;
 }
 
@@ -155,6 +179,39 @@ Voice* RuntimeGraph::find(VoiceId id) const noexcept
     return nullptr;
 }
 
+RuntimeGraph::OutputEndpoint* RuntimeGraph::find(OutputEndpointId id) noexcept
+{
+    for (std::size_t index = 0; index < outputEndpointCount_; ++index)
+        if (outputEndpoints_[index].id == id)
+            return &outputEndpoints_[index];
+    return nullptr;
+}
+
+const RuntimeGraph::OutputEndpoint* RuntimeGraph::find(
+    OutputEndpointId id) const noexcept
+{
+    for (std::size_t index = 0; index < outputEndpointCount_; ++index)
+        if (outputEndpoints_[index].id == id)
+            return &outputEndpoints_[index];
+    return nullptr;
+}
+
+std::size_t RuntimeGraph::patternPlayerIndex(PatternPlayerId id) const noexcept
+{
+    for (std::size_t index = 0; index < patternPlayerCount_; ++index)
+        if (patternPlayers_[index]->playerRef().value == id.value)
+            return index;
+    return patternPlayerCount_;
+}
+
+std::size_t RuntimeGraph::voiceIndex(VoiceId id) const noexcept
+{
+    for (std::size_t index = 0; index < voiceCount_; ++index)
+        if (voices_[index]->id() == id)
+            return index;
+    return voiceCount_;
+}
+
 IPlayer* RuntimeGraph::find(PlayerRef ref) const noexcept
 {
     return ref.type == PlayerRefType::pattern
@@ -167,7 +224,8 @@ GraphValidationError RuntimeGraph::validate(
 {
     if (candidate.triggerBindingCount > candidate.triggerBindings.size()
         || candidate.parameterBindingCount > candidate.parameterBindings.size()
-        || candidate.commandBindingCount > candidate.commandBindings.size())
+        || candidate.commandBindingCount > candidate.commandBindings.size()
+        || candidate.outputBindingCount > candidate.outputBindings.size())
         return GraphValidationError::capacityExceeded;
 
     for (std::size_t index = 0; index < candidate.triggerBindingCount; ++index)
@@ -230,6 +288,45 @@ GraphValidationError RuntimeGraph::validate(
                 && other.destination.type == binding.destination.type
                 && other.command == binding.command)
                 return GraphValidationError::duplicateBinding;
+        }
+    }
+    for (std::size_t index = 0; index < candidate.outputBindingCount; ++index)
+    {
+        const auto& binding = candidate.outputBindings[index];
+        const auto* voice = find(binding.source);
+        if (!binding.id.isValid() || voice == nullptr
+            || find(binding.endpoint) == nullptr || !binding.route.isValid())
+        {
+            return GraphValidationError::missingNode;
+        }
+        if (binding.signal != OutputSignalType::triggers
+            && binding.signal != OutputSignalType::continuousParameter)
+        {
+            return GraphValidationError::unsupportedOutputSignal;
+        }
+        if (binding.signal == OutputSignalType::continuousParameter)
+        {
+            const auto* parameter = voice->parameter(binding.parameter);
+            if (parameter == nullptr
+                || parameter->behavior != VoiceParameterBehavior::continuous)
+            {
+                return GraphValidationError::unsupportedOutputSignal;
+            }
+        }
+        for (std::size_t previous = 0; previous < index; ++previous)
+        {
+            const auto& other = candidate.outputBindings[previous];
+            if (other.id == binding.id)
+                return GraphValidationError::duplicateBindingId;
+            if (other.source == binding.source
+                && other.endpoint == binding.endpoint
+                && other.route == binding.route
+                && other.signal == binding.signal
+                && (binding.signal == OutputSignalType::triggers
+                    || other.parameter == binding.parameter))
+            {
+                return GraphValidationError::duplicateBinding;
+            }
         }
     }
     for (std::size_t index = 0; index < patternPlayerCount_; ++index)
@@ -383,6 +480,9 @@ void RuntimeGraph::prepare(const PrepareSpec& spec) noexcept
         modulationPlayers_[index]->prepare(spec);
     for (std::size_t index = 0; index < voiceCount_; ++index)
         voices_[index]->reset();
+    for (std::size_t index = 0; index < outputEndpointCount_; ++index)
+        outputEndpoints_[index].renderer->prepare(
+            {spec.sampleRate, spec.maximumBlockSize});
     prepared_ = true;
 }
 
@@ -394,6 +494,52 @@ void RuntimeGraph::reset() noexcept
         modulationPlayers_[index]->reset();
     for (std::size_t index = 0; index < voiceCount_; ++index)
         voices_[index]->reset();
+}
+
+void RuntimeGraph::resetOutputs() noexcept
+{
+    for (std::size_t index = 0; index < voiceCount_; ++index)
+        audibleTriggers_[index] = {};
+    for (std::size_t index = 0; index < outputEndpointCount_; ++index)
+    {
+        outputEndpoints_[index].eventCount = 0;
+        outputEndpoints_[index].renderer->resetOutputs();
+    }
+}
+
+void RuntimeGraph::setVoiceMuted(VoiceId voice, bool muted) noexcept
+{
+    const auto index = voiceIndex(voice);
+    if (index < voiceCount_)
+        voiceMuted_[index].store(muted, std::memory_order_relaxed);
+}
+
+bool RuntimeGraph::voiceMuted(VoiceId voice) const noexcept
+{
+    const auto index = voiceIndex(voice);
+    return index < voiceCount_
+        && voiceMuted_[index].load(std::memory_order_relaxed);
+}
+
+void RuntimeGraph::setSuppression(
+    PatternPlayerId suppressor,
+    PatternPlayerId suppressed,
+    bool enabled) noexcept
+{
+    const auto from = patternPlayerIndex(suppressor);
+    const auto to = patternPlayerIndex(suppressed);
+    if (from < patternPlayerCount_ && to < patternPlayerCount_ && from != to)
+        suppression_[from][to].store(enabled, std::memory_order_relaxed);
+}
+
+bool RuntimeGraph::suppression(
+    PatternPlayerId suppressor,
+    PatternPlayerId suppressed) const noexcept
+{
+    const auto from = patternPlayerIndex(suppressor);
+    const auto to = patternPlayerIndex(suppressed);
+    return from < patternPlayerCount_ && to < patternPlayerCount_ && from != to
+        && suppression_[from][to].load(std::memory_order_relaxed);
 }
 
 bool RuntimeGraph::appendSignals(const PlayerSignalBuffer& signals) noexcept
@@ -562,6 +708,8 @@ bool RuntimeGraph::process(
     ResolvedVoiceEventBuffer& output) noexcept
 {
     adoptPublishedConfig();
+    if (block.transportDiscontinuity)
+        resetOutputs();
     output.clear();
     workSize_ = 0;
     nextWorkOrder_ = 0;
@@ -629,6 +777,141 @@ bool RuntimeGraph::process(
         return left.stableOrder < right.stableOrder;
     });
     return !workOverflowed_ && !output.overflowed();
+}
+
+std::optional<std::uint32_t> RuntimeGraph::frameOffsetFor(
+    const SequencerEvent& event,
+    const TimelineBlock& block) const noexcept
+{
+    if (!std::isfinite(event.ppqPosition))
+        return std::nullopt;
+    if (block.sampleCount == 0)
+        return std::uint32_t {0};
+    if (!std::isfinite(block.ppqStart)
+        || !std::isfinite(block.tempoBpm)
+        || !std::isfinite(block.sampleRate)
+        || block.tempoBpm <= 0.0 || block.sampleRate <= 0.0)
+    {
+        return std::nullopt;
+    }
+
+    const auto ppqPerSample = block.tempoBpm / (60.0 * block.sampleRate);
+    const auto rawOffset = (event.ppqPosition - block.ppqStart) / ppqPerSample;
+    if (!std::isfinite(rawOffset) || rawOffset < -0.5
+        || rawOffset > static_cast<double>(block.sampleCount) - 0.5)
+    {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        std::llround(rawOffset), 0,
+        static_cast<std::int64_t>(block.sampleCount - 1)));
+}
+
+bool RuntimeGraph::render(
+    const TimelineBlock& block,
+    const ResolvedVoiceEventBuffer& events) noexcept
+{
+    for (std::size_t index = 0; index < outputEndpointCount_; ++index)
+        outputEndpoints_[index].eventCount = 0;
+
+    const auto& config = activeConfig();
+    for (const auto& resolved : events)
+    {
+        const auto sourceVoiceIndex = voiceIndex(resolved.sourceVoiceId);
+        if (sourceVoiceIndex >= voiceCount_)
+        {
+            resetOutputs();
+            return false;
+        }
+
+        bool eligible = true;
+        if (resolved.event.type == SemanticEventType::triggerStart)
+        {
+            eligible = !voiceMuted_[sourceVoiceIndex].load(
+                std::memory_order_relaxed);
+            const auto suppressed = patternPlayerIndex(resolved.triggerSource);
+            for (std::size_t suppressor = 0;
+                 eligible && suppressed < patternPlayerCount_
+                    && suppressor < patternPlayerCount_;
+                 ++suppressor)
+            {
+                if (suppression_[suppressor][suppressed].load(
+                        std::memory_order_relaxed)
+                    && patternHitOccurred(
+                        PatternPlayerId {
+                            patternPlayers_[suppressor]->playerRef().value },
+                        resolved.event.ppqPosition))
+                {
+                    eligible = false;
+                }
+            }
+            audibleTriggers_[sourceVoiceIndex] = {
+                resolved.event.triggerId, eligible, true};
+        }
+        else if (resolved.event.type == SemanticEventType::triggerEnd)
+        {
+            auto& trigger = audibleTriggers_[sourceVoiceIndex];
+            eligible = trigger.active
+                && trigger.id == resolved.event.triggerId
+                && trigger.eligible;
+            if (trigger.active && trigger.id == resolved.event.triggerId)
+                trigger = {};
+        }
+
+        if (!eligible && resolved.event.type != SemanticEventType::controlPoint)
+            continue;
+        const auto frameOffset = frameOffsetFor(resolved.event, block);
+        if (!frameOffset.has_value())
+        {
+            resetOutputs();
+            return false;
+        }
+
+        for (std::size_t bindingIndex = 0;
+             bindingIndex < config.outputBindingCount;
+             ++bindingIndex)
+        {
+            const auto& binding = config.outputBindings[bindingIndex];
+            if (binding.source != resolved.sourceVoiceId)
+                continue;
+            const bool routesTrigger = binding.signal == OutputSignalType::triggers
+                && resolved.event.type != SemanticEventType::controlPoint;
+            const bool routesControl =
+                binding.signal == OutputSignalType::continuousParameter
+                && resolved.event.type == SemanticEventType::controlPoint
+                && resolved.event.voiceParameterId == binding.parameter;
+            if (!routesTrigger && !routesControl)
+                continue;
+
+            auto* endpoint = find(binding.endpoint);
+            if (endpoint == nullptr
+                || endpoint->eventCount == endpoint->events.size())
+            {
+                resetOutputs();
+                return false;
+            }
+            auto& routed = endpoint->events[endpoint->eventCount++];
+            routed = {};
+            routed.event = resolved.event;
+            routed.sourceVoiceId = resolved.sourceVoiceId;
+            routed.routeId = binding.route;
+            routed.frameOffset = *frameOffset;
+            routed.stableOrder = resolved.stableOrder
+                * RuntimeGraphConfig::maximumOutputBindings + bindingIndex;
+        }
+    }
+
+    for (std::size_t index = 0; index < outputEndpointCount_; ++index)
+    {
+        auto& endpoint = outputEndpoints_[index];
+        if (!endpoint.renderer->renderBlock(
+                block, {endpoint.events.data(), endpoint.eventCount}))
+        {
+            resetOutputs();
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace lps

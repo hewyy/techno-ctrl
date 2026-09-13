@@ -20,6 +20,25 @@ constexpr lps::VoiceParameterId pitchId {0};
 constexpr lps::VoiceParameterId intensityId {1};
 constexpr lps::VoiceParameterId gateId {2};
 
+class CapturingRenderer final : public lps::IOutputRenderer
+{
+public:
+    void prepare(const lps::RenderSpec&) noexcept override {}
+    bool renderBlock(
+        const lps::TimelineBlock&,
+        lps::RoutedEventView events) noexcept override
+    {
+        eventCount = events.size();
+        for (std::size_t index = 0; index < eventCount; ++index)
+            captured[index] = events[index];
+        return true;
+    }
+    void resetOutputs() noexcept override { eventCount = 0; }
+
+    std::array<lps::RoutedEvent, 16> captured {};
+    std::size_t eventCount = 0;
+};
+
 void testNewModulationValuesAreSampledBeforeHit()
 {
     lps::PatternLibrary patterns;
@@ -38,6 +57,7 @@ void testNewModulationValuesAreSampledBeforeHit()
     gate.setValue(0, lps::NormalizedValue::fromFloat(0.5f));
 
     lps::Voice voice(lps::VoiceId {1});
+    CapturingRenderer renderer;
     CHECK(voice.addParameter(lps::VoiceParameterDescriptor::pitch(pitchId)));
     CHECK(voice.addParameter(
         lps::VoiceParameterDescriptor::intensity(intensityId)));
@@ -49,12 +69,15 @@ void testNewModulationValuesAreSampledBeforeHit()
     CHECK(graph.registerModulationPlayer(intensity));
     CHECK(graph.registerModulationPlayer(gate));
     CHECK(graph.registerVoice(voice));
+    CHECK(graph.registerOutputEndpoint({0}, renderer));
 
     lps::RuntimeGraphConfig config;
     CHECK(config.add(lps::TriggerBinding {{0}, {1}, {1}}));
     CHECK(config.add({{0}, {1}, {1}, pitchId}));
     CHECK(config.add({{1}, {2}, {1}, intensityId}));
     CHECK(config.add({{2}, {3}, {1}, gateId}));
+    CHECK(config.add(lps::OutputBinding {
+        {0}, {1}, {0}, {7}, {}, lps::OutputSignalType::triggers}));
     CHECK(graph.activate(config));
     graph.prepare({48'000.0, 12'000});
 
@@ -67,6 +90,18 @@ void testNewModulationValuesAreSampledBeforeHit()
     CHECK(std::abs(output[0].event.musicalPitchSemitones - 36.0f) < 0.01f);
     CHECK(output[1].event.type == lps::SemanticEventType::triggerEnd);
     CHECK(std::abs(output[1].event.ppqPosition - 0.125) < 0.0001);
+    CHECK(graph.render(
+        {0.0, 0.25, 120.0, 48'000.0, 12'000, true, true}, output));
+    CHECK(renderer.eventCount == 2);
+    CHECK(renderer.captured[0].routeId == lps::RouteId {7});
+
+    graph.setVoiceMuted({1}, true);
+    CHECK(graph.process(
+        {1.0, 1.25, 120.0, 48'000.0, 12'000, true, true}, output));
+    CHECK(output.size() == 2);
+    CHECK(graph.render(
+        {1.0, 1.25, 120.0, 48'000.0, 12'000, true, true}, output));
+    CHECK(renderer.eventCount == 0);
 }
 
 void testValidationRejectsPhaseOneMultipleSources()

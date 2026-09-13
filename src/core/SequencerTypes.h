@@ -45,6 +45,7 @@ struct TriggerBindingIdTag;
 struct ParameterBindingIdTag;
 struct CommandBindingIdTag;
 struct OutputBindingIdTag;
+struct OutputEndpointIdTag;
 
 using PatternPlayerId = StableId<PatternPlayerIdTag>;
 using ModulationPlayerId = StableId<ModulationPlayerIdTag>;
@@ -54,6 +55,7 @@ using TriggerBindingId = StableId<TriggerBindingIdTag>;
 using ParameterBindingId = StableId<ParameterBindingIdTag>;
 using CommandBindingId = StableId<CommandBindingIdTag>;
 using OutputBindingId = StableId<OutputBindingIdTag>;
+using OutputEndpointId = StableId<OutputEndpointIdTag, std::uint16_t>;
 
 enum class PlayerRefType : std::uint8_t
 {
@@ -173,6 +175,11 @@ struct RouteId
         std::numeric_limits<std::uint32_t>::max();
 
     std::uint32_t value = invalidValue;
+
+    [[nodiscard]] constexpr bool isValid() const noexcept
+    {
+        return value != invalidValue;
+    }
 
     friend constexpr bool operator==(RouteId left, RouteId right) noexcept
     {
