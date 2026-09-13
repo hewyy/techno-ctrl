@@ -16,7 +16,6 @@ public:
     virtual void reset() noexcept = 0;
     [[nodiscard]] virtual PlayerProcessResult process(
         const TimelineBlock& block,
-        const PlayerDirectives& directives,
         PlayerSignalBuffer& output) noexcept = 0;
     virtual void command(
         PlayerCommand command,

@@ -107,6 +107,25 @@ struct PatternHitAdvance
 
 using AdvanceSource = std::variant<ClockAdvance, PatternHitAdvance>;
 
+enum class PatternTransitionPolicyType : std::uint8_t
+{
+    localCycle,
+    immediate,
+    externalCycle
+};
+
+struct PatternTransitionPolicy
+{
+    PatternTransitionPolicyType type = PatternTransitionPolicyType::localCycle;
+    PatternPlayerId externalSource;
+
+    [[nodiscard]] static constexpr PatternTransitionPolicy externalCycle(
+        PatternPlayerId source) noexcept
+    {
+        return {PatternTransitionPolicyType::externalCycle, source};
+    }
+};
+
 struct PrepareSpec
 {
     double sampleRate = 44'100.0;
@@ -122,17 +141,6 @@ struct TimelineBlock
     std::uint32_t sampleCount = 0;
     bool playing = false;
     bool transportDiscontinuity = false;
-};
-
-struct PlayerDirectives
-{
-    // Unlike a transport discontinuity, this restarts only player phase and
-    // does not imply that the host timeline moved.
-    std::optional<double> restartAtPpq;
-    // Followers may use an external cycle as the quantization grid for their
-    // own pending transitions.
-    std::optional<double> externalCycleBoundaryPpq;
-    bool quantizePendingTransitionsExternally = false;
 };
 
 struct PlayerProcessResult

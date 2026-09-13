@@ -107,6 +107,13 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         const auto& voice = defaultDrumVoices[index];
         auto player = std::make_unique<lps::PatternPlayer>(patternLibrary_);
         player->setRuntimeId(static_cast<std::uint32_t>(index));
+        if (index != configuredMasterIndex())
+        {
+            player->setTransitionPolicy(
+                lps::PatternTransitionPolicy::externalCycle(
+                    lps::PatternPlayerId {static_cast<std::uint32_t>(
+                        configuredMasterIndex())}));
+        }
         if (patternLibrary_.size() != 0)
         {
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))

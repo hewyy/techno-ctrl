@@ -31,6 +31,16 @@ const AdvanceSource& PatternPlayer::advanceSource() const noexcept
     return advanceSource_;
 }
 
+void PatternPlayer::setTransitionPolicy(PatternTransitionPolicy policy) noexcept
+{
+    if (policy.type == PatternTransitionPolicyType::externalCycle
+        && !policy.externalSource.isValid())
+    {
+        return;
+    }
+    transitionPolicy_ = policy;
+}
+
 void PatternPlayer::selectPattern(PatternId patternId) noexcept
 {
     if (patternLibrary_.find(patternId) != nullptr
@@ -402,6 +412,7 @@ void PatternPlayer::reset() noexcept
     playbackWindowOriginStep_ = 0;
     patternPlaybackSnapshot_ = {};
     completed_ = false;
+    lastResetAndPlayPpq_ = -std::numeric_limits<double>::infinity();
 }
 
 PatternView PatternPlayer::patternView() const noexcept
@@ -434,7 +445,6 @@ PlayerSyncCapabilities PatternPlayer::syncCapabilities() const noexcept
 
 PlayerProcessResult PatternPlayer::process(
     const TimelineBlock& block,
-    const PlayerDirectives& directives,
     PlayerSignalBuffer& output) noexcept
 {
     output.clear();
@@ -465,13 +475,21 @@ PlayerProcessResult PatternPlayer::process(
     auto activePattern = activePatternId();
     auto selection = requestedPatternSelection();
     auto requestedPattern = patternIdFromSelection(selection);
+    const bool activateImmediately = transitionPolicy_.type
+        == PatternTransitionPolicyType::immediate;
     if ((requestedPattern != activePattern || selectionResetsOffset(selection))
-        && (!block.playing || block.transportDiscontinuity)
+        && (!block.playing || block.transportDiscontinuity || activateImmediately)
         && activatePattern(requestedPattern, selectionResetsOffset(selection)))
     {
         activePattern = requestedPattern;
         playbackWindowOriginStep_ = 0;
         consumeSaveSelectionRequest(selection);
+        if (activateImmediately && block.playing && !block.transportDiscontinuity)
+        {
+            playbackOriginPpq_ = block.ppqStart;
+            lastTriggeredPlaybackStep_ =
+                std::numeric_limits<std::int64_t>::min();
+        }
     }
 
     // A range chosen while stopped should be the range used when transport
@@ -558,7 +576,8 @@ PlayerProcessResult PatternPlayer::process(
             selection = requestedPatternSelection();
             const auto pendingPattern = patternIdFromSelection(selection);
             if ((pendingPattern != activePattern || selectionResetsOffset(selection))
-                && !directives.quantizePendingTransitionsExternally
+                && transitionPolicy_.type
+                    == PatternTransitionPolicyType::localCycle
                 && atPlaybackBoundary
                 && activatePattern(pendingPattern, selectionResetsOffset(selection)))
             {
@@ -634,81 +653,33 @@ PlayerProcessResult PatternPlayer::process(
         }
     };
 
-    const auto pendingSelection = requestedPatternSelection();
-    const bool patternChangePending =
-        patternIdFromSelection(pendingSelection) != activePattern
-        || selectionResetsOffset(pendingSelection);
-    const auto masterBoundaryPpq = directives.externalCycleBoundaryPpq.value_or(0.0);
-    const bool hasSynchronizedPatternChange =
-        directives.quantizePendingTransitionsExternally
-        && directives.externalCycleBoundaryPpq.has_value()
-        && patternChangePending
-        && std::isfinite(masterBoundaryPpq)
-        && masterBoundaryPpq + stepBoundaryTolerance >= block.ppqStart
-        && masterBoundaryPpq < block.ppqEnd;
-
-    const auto externalResetPpq = directives.restartAtPpq.value_or(0.0);
-    const bool hasExternalReset = directives.restartAtPpq.has_value()
-        && std::isfinite(externalResetPpq)
-        && externalResetPpq + stepBoundaryTolerance >= block.ppqStart
-        && externalResetPpq < block.ppqEnd;
-
-    if (!hasExternalReset && !hasSynchronizedPatternChange)
-    {
-        processRange(block.ppqStart, block.ppqEnd);
-        result.active = patternPlaybackSnapshot_.playing;
-        result.eventOverflow = output.overflowed();
-        return result;
-    }
-
-    // Both directives originate from the same validated master boundary in
-    // RuntimeGraph. A synchronized pattern activation itself restarts the
-    // follower, while a manual reset can do so without a pattern change.
-    auto transitionPpq = hasSynchronizedPatternChange
-        ? masterBoundaryPpq
-        : externalResetPpq;
-    if (transitionPpq <= block.ppqStart + stepBoundaryTolerance)
-        transitionPpq = block.ppqStart;
-    else
-        processRange(block.ppqStart, transitionPpq);
-
-    bool patternActivated = false;
-    if (hasSynchronizedPatternChange)
-    {
-        selection = requestedPatternSelection();
-        const auto pendingPattern = patternIdFromSelection(selection);
-        if ((pendingPattern != activePattern || selectionResetsOffset(selection))
-            && activatePattern(pendingPattern, selectionResetsOffset(selection)))
-        {
-            activePattern = pendingPattern;
-            activeRecord = patternLibrary_.find(activePattern);
-            pattern = activeRecord != nullptr ? &activeRecord->pattern : nullptr;
-            currentDraftStepCount = pattern != nullptr && patternLength(*pattern) != 0
-                ? longestPatternLength : 0;
-            hitMask = editableHitMask_.load(std::memory_order_relaxed);
-            unpackPlaybackWindow(
-                activePlaybackWindow_.load(std::memory_order_relaxed),
-                playbackStart,
-                playbackEnd);
-            consumeSaveSelectionRequest(selection);
-            patternActivated = true;
-        }
-    }
-
-    // Make the active playback-window start step occur exactly at the master's
-    // loop boundary. A failed activation remains pending for the next master
-    // boundary unless a manual phase reset was also requested.
-    if (patternActivated || hasExternalReset)
-    {
-        playbackOriginPpq_ = transitionPpq;
-        playbackWindowOriginStep_ = 0;
-        lastTriggeredPlaybackStep_ = std::numeric_limits<std::int64_t>::min();
-    }
-
-    processRange(transitionPpq, block.ppqEnd);
+    processRange(block.ppqStart, block.ppqEnd);
     result.active = patternPlaybackSnapshot_.playing;
     result.eventOverflow = output.overflowed();
     return result;
+}
+
+bool PatternPlayer::observeCycleBoundary(
+    const PlayerSignal& boundary,
+    PlayerSignalBuffer& output) noexcept
+{
+    if (boundary.type != PlayerSignalType::patternCycleBoundary
+        || transitionPolicy_.type != PatternTransitionPolicyType::externalCycle
+        || transitionPolicy_.externalSource != boundary.patternPlayerId)
+    {
+        return false;
+    }
+
+    const auto selection = requestedPatternSelection();
+    const auto pendingPattern = patternIdFromSelection(selection);
+    if ((pendingPattern == activePatternId() && !selectionResetsOffset(selection))
+        || !activatePattern(pendingPattern, selectionResetsOffset(selection)))
+    {
+        return false;
+    }
+    consumeSaveSelectionRequest(selection);
+    command(PlayerCommand::resetAndPlay, boundary.ppqPosition, output);
+    return true;
 }
 
 void PatternPlayer::command(
@@ -716,6 +687,11 @@ void PatternPlayer::command(
     double ppqPosition,
     PlayerSignalBuffer& output) noexcept
 {
+    if (commandValue == PlayerCommand::resetAndPlay
+        && std::abs(ppqPosition - lastResetAndPlayPpq_) <= 1.0e-12)
+    {
+        return;
+    }
     if (commandValue == PlayerCommand::stop)
     {
         commandPlaying_ = false;
@@ -749,7 +725,6 @@ void PatternPlayer::command(
             ppqPosition, std::numeric_limits<double>::infinity());
         (void) process(
             {ppqPosition, end, 120.0, 48'000.0, 1, true, false},
-            {},
             immediate);
         processingExternalAdvance_ = false;
         for (const auto& signal : immediate)
@@ -781,7 +756,6 @@ void PatternPlayer::advanceFromPatternHit(
         hit.ppqPosition, std::numeric_limits<double>::infinity());
     (void) process(
         {hit.ppqPosition, end, 120.0, 48'000.0, 1, true, false},
-        {},
         advanced);
     processingExternalAdvance_ = false;
     for (const auto& signal : advanced)

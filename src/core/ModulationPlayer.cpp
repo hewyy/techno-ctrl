@@ -228,6 +228,11 @@ void ModulationPlayer::command(
     double ppqPosition,
     PlayerSignalBuffer& output) noexcept
 {
+    if (commandValue == PlayerCommand::resetAndPlay
+        && std::abs(ppqPosition - lastResetAndPlayPpq_) <= 1.0e-12)
+    {
+        return;
+    }
     switch (commandValue)
     {
         case PlayerCommand::stop:
@@ -279,7 +284,6 @@ void ModulationPlayer::processClock(
 
 PlayerProcessResult ModulationPlayer::process(
     const TimelineBlock& block,
-    const PlayerDirectives&,
     PlayerSignalBuffer& output) noexcept
 {
     processClock(block, output);

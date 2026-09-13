@@ -44,6 +44,11 @@ public:
     [[nodiscard]] const AdvanceSource& advanceSource() const noexcept;
     void setPlayMode(PlayMode mode) noexcept { playMode_ = mode; }
     [[nodiscard]] PlayMode playMode() const noexcept { return playMode_; }
+    void setTransitionPolicy(PatternTransitionPolicy policy) noexcept;
+    [[nodiscard]] PatternTransitionPolicy transitionPolicy() const noexcept
+    {
+        return transitionPolicy_;
+    }
 
     void selectPattern(PatternId patternId) noexcept;
     void selectSavedPattern(PatternId patternId) noexcept;
@@ -71,14 +76,7 @@ public:
     void reset() noexcept override;
     [[nodiscard]] PlayerProcessResult process(
         const TimelineBlock& block,
-        const PlayerDirectives& directives,
         PlayerSignalBuffer& output) noexcept override;
-    [[nodiscard]] PlayerProcessResult process(
-        const TimelineBlock& block,
-        PlayerSignalBuffer& output) noexcept
-    {
-        return process(block, {}, output);
-    }
     void command(
         PlayerCommand command,
         double ppqPosition,
@@ -86,6 +84,9 @@ public:
     void advanceFromPatternHit(
         const PlayerSignal& hit,
         PlayerSignalBuffer& output) noexcept override;
+    [[nodiscard]] bool observeCycleBoundary(
+        const PlayerSignal& boundary,
+        PlayerSignalBuffer& output) noexcept;
     [[nodiscard]] PlayerSyncCapabilities syncCapabilities() const noexcept override;
 
     [[nodiscard]] PatternView patternView() const noexcept override;
@@ -96,6 +97,7 @@ private:
     PatternPlayerId id_;
     AdvanceSource advanceSource_ { ClockAdvance {0.25} };
     PlayMode playMode_ = PlayMode::continuous;
+    PatternTransitionPolicy transitionPolicy_;
     // PatternLibrary IDs are bounded by its fixed capacity. The otherwise
     // unused high bit makes the selection and its activation behavior one
     // atomic request, so the audio thread cannot observe a torn pair.

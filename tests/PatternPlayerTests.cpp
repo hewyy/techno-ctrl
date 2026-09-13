@@ -96,6 +96,32 @@ void testHitAdvanceAndCommands()
     player.advanceFromPatternHit(nextHit, output);
     CHECK(output.size() == 3);
 }
+
+void testExternalCycleActivatesPendingSelection()
+{
+    lps::PatternLibrary library;
+    lps::PatternPlayer player(library);
+    player.setRuntimeId(8);
+    player.setTransitionPolicy(lps::PatternTransitionPolicy::externalCycle(
+        lps::PatternPlayerId {2}));
+    player.prepare({});
+
+    lps::PlayerSignalBuffer output;
+    (void) player.process(block(0.0, 0.25, true), output);
+    player.selectPattern(lps::PatternId {2});
+    output.clear();
+    (void) player.process(block(0.25, 0.5), output);
+    CHECK(player.activePatternId() == lps::PatternId {1});
+
+    output.clear();
+    CHECK(player.observeCycleBoundary(
+        lps::PlayerSignal::patternCycleBoundary(
+            1.0, lps::PatternPlayerId {2}), output));
+    CHECK(player.activePatternId() == lps::PatternId {2});
+    CHECK(output.size() == 2);
+    CHECK(output[0].type == lps::PlayerSignalType::patternCycleBoundary);
+    CHECK(output[1].type == lps::PlayerSignalType::patternHit);
+}
 } // namespace
 
 int main()
@@ -104,6 +130,7 @@ int main()
     testCycleBoundaryExistsWhenFirstStepIsRest();
     testOneShotCountsRestsAndStops();
     testHitAdvanceAndCommands();
+    testExternalCycleActivatesPendingSelection();
     std::cout << "PatternPlayer signal tests passed\n";
     return EXIT_SUCCESS;
 }

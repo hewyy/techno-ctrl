@@ -331,6 +331,17 @@ GraphValidationError RuntimeGraph::validate(
     }
     for (std::size_t index = 0; index < patternPlayerCount_; ++index)
     {
+        const auto policy = patternPlayers_[index]->transitionPolicy();
+        if (policy.type == PatternTransitionPolicyType::externalCycle)
+        {
+            if (find(policy.externalSource) == nullptr)
+                return GraphValidationError::missingNode;
+            if (policy.externalSource.value
+                == patternPlayers_[index]->playerRef().value)
+            {
+                return GraphValidationError::selfEdge;
+            }
+        }
         if (const auto* hit = std::get_if<PatternHitAdvance>(
                 &patternPlayers_[index]->advanceSource()))
         {
@@ -394,7 +405,18 @@ bool RuntimeGraph::hasControlCycle(
         }
     };
     for (std::size_t index = 0; index < patternPlayerCount_; ++index)
+    {
         addAdvance(*patternPlayers_[index]);
+        const auto policy = patternPlayers_[index]->transitionPolicy();
+        if (policy.type == PatternTransitionPolicyType::externalCycle)
+        {
+            const auto from = nodeIndex(
+                PlayerRef::pattern(policy.externalSource));
+            const auto to = nodeIndex(patternPlayers_[index]->playerRef());
+            if (from < maximumNodes && to < maximumNodes)
+                edges[from][to] = true;
+        }
+    }
     for (std::size_t index = 0; index < modulationPlayerCount_; ++index)
         addAdvance(*modulationPlayers_[index]);
 
@@ -556,6 +578,48 @@ bool RuntimeGraph::appendSignals(const PlayerSignalBuffer& signals) noexcept
     return !signals.overflowed();
 }
 
+void RuntimeGraph::invalidatePlayerSignalsFrom(
+    PlayerRef player,
+    double ppqPosition,
+    std::size_t limit) noexcept
+{
+    limit = std::min(limit, workSize_);
+    for (std::size_t index = 0; index < limit; ++index)
+    {
+        auto& item = work_[index];
+        if (item.resolved || item.signal.ppqPosition < ppqPosition)
+            continue;
+        const bool belongsToPlayer = player.type == PlayerRefType::pattern
+            ? ((item.signal.type == PlayerSignalType::patternHit
+                    || item.signal.type
+                        == PlayerSignalType::patternCycleBoundary)
+                && item.signal.patternPlayerId.value == player.value)
+            : (item.signal.type == PlayerSignalType::modulationValue
+                && item.signal.modulationPlayerId.value == player.value);
+        if (belongsToPlayer)
+        {
+            item.resolved = true;
+            item.propagated = true;
+        }
+    }
+}
+
+void RuntimeGraph::appendPlayerRemainder(
+    IPlayer& player,
+    double ppqPosition) noexcept
+{
+    if (!currentBlock_.playing || ppqPosition >= currentBlock_.ppqEnd)
+        return;
+    auto remainder = currentBlock_;
+    remainder.ppqStart = ppqPosition + 2.0e-9;
+    remainder.transportDiscontinuity = false;
+    if (remainder.ppqStart >= remainder.ppqEnd)
+        return;
+    PlayerSignalBuffer generated;
+    (void) player.process(remainder, generated);
+    (void) appendSignals(generated);
+}
+
 void RuntimeGraph::appendVoiceEvents(
     Voice& voice,
     PatternPlayerId triggerSource,
@@ -604,6 +668,22 @@ void RuntimeGraph::resolveTimestamp(
 
             if (item.signal.type == PlayerSignalType::patternCycleBoundary)
             {
+                for (std::size_t player = 0;
+                     player < patternPlayerCount_;
+                     ++player)
+                {
+                    PlayerSignalBuffer generated;
+                    const auto oldWorkSize = workSize_;
+                    if (patternPlayers_[player]->observeCycleBoundary(
+                            item.signal, generated))
+                    {
+                        invalidatePlayerSignalsFrom(
+                            patternPlayers_[player]->playerRef(), ppq,
+                            oldWorkSize);
+                        (void) appendSignals(generated);
+                        appendPlayerRemainder(*patternPlayers_[player], ppq);
+                    }
+                }
                 for (std::size_t slot = 0;
                      slot < armedCycleCommands_.size();
                      ++slot)
@@ -617,9 +697,13 @@ void RuntimeGraph::resolveTimestamp(
                     }
                     if (auto* destination = find(armed.destination))
                     {
+                        const auto oldWorkSize = workSize_;
                         PlayerSignalBuffer generated;
                         destination->command(armed.command, ppq, generated);
+                        invalidatePlayerSignalsFrom(
+                            armed.destination, ppq, oldWorkSize);
                         (void) appendSignals(generated);
+                        appendPlayerRemainder(*destination, ppq);
                     }
                 }
             }
@@ -640,9 +724,13 @@ void RuntimeGraph::resolveTimestamp(
                     continue;
                 if (auto* destination = find(binding.destination))
                 {
+                    const auto oldWorkSize = workSize_;
                     PlayerSignalBuffer generated;
                     destination->command(binding.command, ppq, generated);
+                    invalidatePlayerSignalsFrom(
+                        binding.destination, ppq, oldWorkSize);
                     (void) appendSignals(generated);
+                    appendPlayerRemainder(*destination, ppq);
                 }
             }
         }
@@ -708,6 +796,7 @@ bool RuntimeGraph::process(
     ResolvedVoiceEventBuffer& output) noexcept
 {
     adoptPublishedConfig();
+    currentBlock_ = block;
     if (block.transportDiscontinuity)
         resetOutputs();
     output.clear();
@@ -741,13 +830,13 @@ bool RuntimeGraph::process(
     for (std::size_t index = 0; index < patternPlayerCount_; ++index)
     {
         PlayerSignalBuffer generated;
-        (void) patternPlayers_[index]->process(block, {}, generated);
+        (void) patternPlayers_[index]->process(block, generated);
         (void) appendSignals(generated);
     }
     for (std::size_t index = 0; index < modulationPlayerCount_; ++index)
     {
         PlayerSignalBuffer generated;
-        (void) modulationPlayers_[index]->process(block, {}, generated);
+        (void) modulationPlayers_[index]->process(block, generated);
         (void) appendSignals(generated);
     }
 

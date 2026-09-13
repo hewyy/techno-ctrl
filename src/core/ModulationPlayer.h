@@ -65,7 +65,6 @@ public:
         PlayerSignalBuffer& output) noexcept override;
     [[nodiscard]] PlayerProcessResult process(
         const TimelineBlock& block,
-        const PlayerDirectives& directives,
         PlayerSignalBuffer& output) noexcept override;
     void processClock(
         const TimelineBlock& block,

@@ -237,6 +237,11 @@ private:
     [[nodiscard]] const OutputEndpoint* find(OutputEndpointId id) const noexcept;
     [[nodiscard]] IPlayer* find(PlayerRef ref) const noexcept;
     [[nodiscard]] bool appendSignals(const PlayerSignalBuffer& signals) noexcept;
+    void invalidatePlayerSignalsFrom(
+        PlayerRef player,
+        double ppqPosition,
+        std::size_t limit) noexcept;
+    void appendPlayerRemainder(IPlayer& player, double ppqPosition) noexcept;
     void appendVoiceEvents(
         Voice& voice,
         PatternPlayerId triggerSource,
@@ -278,6 +283,7 @@ private:
         maximumPatternPlayers> suppression_ {};
     std::array<AudibleTriggerState, maximumVoices> audibleTriggers_ {};
     PrepareSpec prepareSpec_;
+    TimelineBlock currentBlock_;
     std::array<WorkSignal, maximumWorkSignals> work_ {};
     std::size_t workSize_ = 0;
     std::uint64_t nextWorkOrder_ = 0;
