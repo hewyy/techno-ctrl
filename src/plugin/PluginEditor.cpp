@@ -42,7 +42,7 @@ constexpr int controlsToGridGap = 30;
 constexpr int clickTargetSize = 41;
 constexpr int modulationPanelHeight = clickTargetSize + 2;
 constexpr int playerBottomPadding = 2;
-constexpr int velocityControlGap = 4;
+constexpr int modulationControlGap = 4;
 constexpr int matrixGridLeft = 82;
 constexpr int matrixGridTop = 112;
 constexpr int matrixCellWidth = clickTargetSize + 4;
@@ -58,10 +58,10 @@ constexpr int patternCellGap = 1;
 constexpr int minimumPatternCellSize = 8;
 constexpr int patternGridLeft = contentHorizontalPadding
     + playerPanelHorizontalPadding + playerControlsWidth + controlsToGridGap;
-constexpr int velocityKnobWidth = clickTargetSize;
-constexpr int velocityKnobHeight = clickTargetSize;
-constexpr int velocityKnobGap = 2;
-constexpr int velocityGridLeft = patternGridLeft;
+constexpr int modulationCellWidth = clickTargetSize;
+constexpr int modulationCellHeight = clickTargetSize;
+constexpr int modulationCellGap = 2;
+constexpr int modulationGridLeft = patternGridLeft;
 
 [[nodiscard]] int patternCellSizeForContentWidth(int contentWidth) noexcept
 {
@@ -81,17 +81,36 @@ constexpr int velocityGridLeft = patternGridLeft;
         + (modified ? " *" : "");
 }
 
-[[nodiscard]] juce::String velocityMenuLabel(
-    std::size_t playerIndex, bool modified)
+using ModulationLane = LivePatternSequencerProcessor::ModulationLane;
+
+constexpr std::array modulationLanes {
+    ModulationLane::velocity,
+    ModulationLane::pitch,
+    ModulationLane::gate
+};
+
+[[nodiscard]] juce::String modulationLaneName(ModulationLane lane)
 {
-    return juce::String(static_cast<int>(playerIndex + 1))
+    switch (lane)
+    {
+        case ModulationLane::velocity: return "Velocity";
+        case ModulationLane::pitch: return "Pitch";
+        case ModulationLane::gate: return "Gate";
+    }
+    return "Modulation";
+}
+
+[[nodiscard]] juce::String modulationMenuLabel(
+    ModulationLane lane, bool modified)
+{
+    return modulationLaneName(lane).toUpperCase()
         + (modified ? " *" : "");
 }
 
 class LaneMenuButton final : public juce::TextButton
 {
 public:
-    enum class Kind { pattern, velocity };
+    enum class Kind { pattern, modulation };
 
     explicit LaneMenuButton(Kind kind) : kind_(kind) {}
 
@@ -149,13 +168,14 @@ public:
         }
 
         graphics.setColour(juce::Colour(primaryText));
+        const bool isPattern = kind_ == Kind::pattern;
         graphics.setFont(juce::Font(
-            juce::FontOptions(13.0f, juce::Font::bold)));
+            juce::FontOptions(isPattern ? 13.0f : 10.0f, juce::Font::bold)));
         graphics.drawText(
             getButtonText(),
-            53,
+            isPattern ? 53 : 36,
             0,
-            getWidth() - 58,
+            getWidth() - (isPattern ? 58 : 39),
             getHeight(),
             juce::Justification::centred);
     }
@@ -260,10 +280,10 @@ public:
     }
 };
 
-class VelocitySliderPopup final : public juce::Component
+class ModulationSliderPopup final : public juce::Component
 {
 public:
-    explicit VelocitySliderPopup(juce::Slider& target)
+    explicit ModulationSliderPopup(juce::Slider& target)
     {
         setInterceptsMouseClicks(false, false);
         slider_.setSliderStyle(juce::Slider::LinearVertical);
@@ -365,7 +385,7 @@ void LivePatternSequencerEditor::MatrixComponent::mouseDown(
     editor_.matrixMouseDown(event);
 }
 
-LivePatternSequencerEditor::VelocityCell::VelocityCell()
+LivePatternSequencerEditor::ModulationCell::ModulationCell()
 {
     setSliderStyle(juce::Slider::RotaryVerticalDrag);
     setRange(0.0, 255.0, 1.0);
@@ -376,7 +396,7 @@ LivePatternSequencerEditor::VelocityCell::VelocityCell()
     setWantsKeyboardFocus(true);
 }
 
-void LivePatternSequencerEditor::VelocityCell::setActive(bool shouldBeActive)
+void LivePatternSequencerEditor::ModulationCell::setActive(bool shouldBeActive)
 {
     if (active_ == shouldBeActive)
         return;
@@ -384,7 +404,7 @@ void LivePatternSequencerEditor::VelocityCell::setActive(bool shouldBeActive)
     repaint();
 }
 
-void LivePatternSequencerEditor::VelocityCell::paint(
+void LivePatternSequencerEditor::ModulationCell::paint(
     juce::Graphics& graphics)
 {
     auto square = getLocalBounds().reduced(1);
@@ -413,7 +433,7 @@ void LivePatternSequencerEditor::VelocityCell::paint(
         juce::Justification::centred);
 }
 
-void LivePatternSequencerEditor::VelocityCell::mouseDown(
+void LivePatternSequencerEditor::ModulationCell::mouseDown(
     const juce::MouseEvent& event)
 {
     auto* editor = findParentComponentOfClass<LivePatternSequencerEditor>();
@@ -423,7 +443,7 @@ void LivePatternSequencerEditor::VelocityCell::mouseDown(
     activePopup_.reset();
 
     juce::Slider::mouseDown(event);
-    auto popup = std::make_unique<VelocitySliderPopup>(*this);
+    auto popup = std::make_unique<ModulationSliderPopup>(*this);
     const auto anchor = editor->getLocalArea(this, getLocalBounds());
     const int popupWidth = popup->getWidth();
     const int popupHeight = popup->getHeight();
@@ -444,13 +464,13 @@ void LivePatternSequencerEditor::VelocityCell::mouseDown(
     activePopup_ = std::move(popup);
 }
 
-void LivePatternSequencerEditor::VelocityCell::mouseDrag(
+void LivePatternSequencerEditor::ModulationCell::mouseDrag(
     const juce::MouseEvent& event)
 {
     juce::Slider::mouseDrag(event);
 }
 
-void LivePatternSequencerEditor::VelocityCell::mouseUp(
+void LivePatternSequencerEditor::ModulationCell::mouseUp(
     const juce::MouseEvent& event)
 {
     juce::Slider::mouseUp(event);
@@ -537,7 +557,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     setLookAndFeel(&lookAndFeel_);
 
     patternMenuButtons_.reserve(playerCount_);
-    velocityMenuButtons_.reserve(playerCount_);
     patternSelectors_.reserve(playerCount_);
     savePatternButtons_.reserve(playerCount_);
     resetToMasterButtons_.reserve(playerCount_);
@@ -545,19 +564,22 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     offsetLeftButtons_.reserve(playerCount_);
     offsetRightButtons_.reserve(playerCount_);
     muteButtons_.reserve(playerCount_);
-    velocityModulationSelectors_.reserve(playerCount_);
-    saveVelocityModulationButtons_.reserve(playerCount_);
-    decreaseVelocityModulationLengthButtons_.reserve(playerCount_);
-    increaseVelocityModulationLengthButtons_.reserve(playerCount_);
-    velocityModulationSliders_.reserve(
-        playerCount_ * lps::Modulation::maxLength);
+    for (const auto lane : modulationLanes)
+    {
+        const auto laneSlot = laneIndex(lane);
+        modulationMenuButtons_[laneSlot].reserve(playerCount_);
+        modulationSelectors_[laneSlot].reserve(playerCount_);
+        saveModulationButtons_[laneSlot].reserve(playerCount_);
+        decreaseModulationLengthButtons_[laneSlot].reserve(playerCount_);
+        increaseModulationLengthButtons_[laneSlot].reserve(playerCount_);
+        modulationSliders_[laneSlot].reserve(
+            playerCount_ * lps::Modulation::maxLength);
+    }
 
     for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
     {
         const bool supportsPattern =
             processor_.playerSupportsPatternEditingForUi(playerIndex);
-        const bool supportsVelocity =
-            processor_.playerSupportsVelocityEditingForUi(playerIndex);
 
         patternMenuButtons_.push_back(std::make_unique<LaneMenuButton>(
             LaneMenuButton::Kind::pattern));
@@ -569,17 +591,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             showPatternMenu(playerIndex);
         };
         content_.addAndMakeVisible(patternMenuButton);
-
-        velocityMenuButtons_.push_back(std::make_unique<LaneMenuButton>(
-            LaneMenuButton::Kind::velocity));
-        auto& velocityMenuButton = *velocityMenuButtons_.back();
-        velocityMenuButton.setButtonText(velocityMenuLabel(playerIndex, false));
-        velocityMenuButton.setTooltip("Choose or save a velocity modulation");
-        velocityMenuButton.onClick = [this, playerIndex]
-        {
-            showVelocityMenu(playerIndex);
-        };
-        content_.addAndMakeVisible(velocityMenuButton);
 
         patternSelectors_.push_back(std::make_unique<juce::ComboBox>());
         auto& selector = *patternSelectors_.back();
@@ -700,145 +711,176 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         };
         content_.addAndMakeVisible(muteButton);
 
-        velocityModulationSelectors_.push_back(
-            std::make_unique<juce::ComboBox>());
-        auto& velocitySelector = *velocityModulationSelectors_.back();
-        for (std::size_t modulationIndex = 0;
-             modulationIndex < processor_.velocityModulationCountForUi();
-             ++modulationIndex)
+        for (const auto lane : modulationLanes)
         {
-            velocitySelector.addItem(
-                processor_.velocityModulationNameForUi(modulationIndex),
-                static_cast<int>(modulationIndex + 1));
-        }
-        velocitySelector.setSelectedItemIndex(
-            static_cast<int>(
-                processor_.selectedModulationForPlayer(playerIndex)),
-            juce::dontSendNotification);
-        velocitySelector.setTooltip(
-            "Choose a velocity modulation independently of the hit pattern");
-        velocitySelector.onChange = [this, playerIndex]
-        {
-            const auto selected =
-                velocityModulationSelectors_[playerIndex]
-                    ->getSelectedItemIndex();
-            if (selected >= 0)
+            const auto laneSlot = laneIndex(lane);
+            const bool supportsModulation =
+                processor_.playerSupportsModulationEditingForUi(
+                    playerIndex, lane);
+            const auto laneName = modulationLaneName(lane);
+
+            modulationMenuButtons_[laneSlot].push_back(
+                std::make_unique<LaneMenuButton>(
+                    LaneMenuButton::Kind::modulation));
+            auto& menuButton = *modulationMenuButtons_[laneSlot].back();
+            menuButton.setButtonText(modulationMenuLabel(lane, false));
+            menuButton.setTooltip("Choose or save a " + laneName
+                + " modulation");
+            menuButton.onClick = [this, playerIndex, lane]
             {
-                processor_.selectModulationForPlayer(
-                    playerIndex, static_cast<std::size_t>(selected));
-            }
-        };
+                showModulationMenu(playerIndex, lane);
+            };
+            content_.addAndMakeVisible(menuButton);
 
-        saveVelocityModulationButtons_.push_back(
-            std::make_unique<juce::TextButton>());
-        auto& velocitySaveButton = *saveVelocityModulationButtons_.back();
-        velocitySaveButton.setButtonText("Save");
-        velocitySaveButton.setTooltip(
-            "Save these values to the persistent velocity modulation library");
-        velocitySaveButton.onClick = [this, playerIndex]
-        {
-            beginSavePlayerVelocityModulation(playerIndex);
-        };
-
-        decreaseVelocityModulationLengthButtons_.push_back(
-            std::make_unique<juce::TextButton>());
-        auto& decreaseLengthButton =
-            *decreaseVelocityModulationLengthButtons_.back();
-        decreaseLengthButton.setButtonText("-");
-        decreaseLengthButton.setTooltip(
-            "Remove the last velocity modulation step");
-        decreaseLengthButton.onClick = [this, playerIndex]
-        {
-            const auto modulation =
-                processor_.velocityModulationForUi(playerIndex);
-            if (modulation.length > 1)
+            modulationSelectors_[laneSlot].push_back(
+                std::make_unique<juce::ComboBox>());
+            auto& modulationSelector =
+                *modulationSelectors_[laneSlot].back();
+            for (std::size_t modulationIndex = 0;
+                 modulationIndex < processor_.modulationCountForUi();
+                 ++modulationIndex)
             {
-                processor_.setPlayerModulationLength(
-                    playerIndex, modulation.length - 1);
-                refreshVelocityModulationControls(playerIndex, true);
-                updateVelocityModulationModifiedIndicators(true);
-                content_.repaint();
+                modulationSelector.addItem(
+                    processor_.modulationNameForUi(modulationIndex),
+                    static_cast<int>(modulationIndex + 1));
             }
-        };
-        content_.addAndMakeVisible(decreaseLengthButton);
-
-        increaseVelocityModulationLengthButtons_.push_back(
-            std::make_unique<juce::TextButton>());
-        auto& increaseLengthButton =
-            *increaseVelocityModulationLengthButtons_.back();
-        increaseLengthButton.setButtonText("+");
-        increaseLengthButton.setTooltip(
-            "Append a velocity modulation step");
-        increaseLengthButton.onClick = [this, playerIndex]
-        {
-            const auto modulation =
-                processor_.velocityModulationForUi(playerIndex);
-            if (modulation.length < lps::Modulation::maxLength)
-            {
-                const auto newLength = std::max<std::size_t>(
-                    1, modulation.length + 1);
-                processor_.setPlayerModulationLength(
-                    playerIndex, newLength);
-                refreshVelocityModulationControls(playerIndex, true);
-                updateVelocityModulationModifiedIndicators(true);
-                content_.repaint();
-            }
-        };
-        content_.addAndMakeVisible(increaseLengthButton);
-
-        const auto modulation =
-            processor_.velocityModulationForUi(playerIndex);
-        for (std::size_t step = 0;
-             step < lps::Modulation::maxLength;
-             ++step)
-        {
-            velocityModulationSliders_.push_back(
-                std::make_unique<VelocityCell>());
-            const auto sliderIndex = velocityModulationSliders_.size() - 1;
-            auto& slider = *velocityModulationSliders_.back();
-            slider.setName(
-                "Velocity modulation step "
-                + juce::String(static_cast<int>(step + 1)));
-            slider.setTooltip(
-                "Velocity step " + juce::String(static_cast<int>(step + 1))
-                + " (0-255)");
-            slider.setDoubleClickReturnValue(true, 255.0);
-            slider.setValue(
-                static_cast<double>(modulation.values[step].raw / 257u),
+            modulationSelector.setSelectedItemIndex(
+                static_cast<int>(processor_.selectedModulationForPlayer(
+                    playerIndex, lane)),
                 juce::dontSendNotification);
-            slider.onValueChange =
-                [this, playerIndex, step, sliderIndex]
+            modulationSelector.setTooltip(
+                "Choose a " + laneName
+                + " modulation independently of the hit pattern");
+            modulationSelector.onChange =
+                [this, playerIndex, lane, laneSlot]
                 {
-                    const auto value = juce::jlimit(
-                        0,
-                        255,
-                        juce::roundToInt(
-                            velocityModulationSliders_[sliderIndex]
-                                ->getValue()));
-                    processor_.setPlayerModulationValue(
-                        playerIndex,
-                        step,
-                        static_cast<std::uint8_t>(value));
-                    updateVelocityModulationModifiedIndicators(true);
-                    content_.repaint();
+                    const auto selected =
+                        modulationSelectors_[laneSlot][playerIndex]
+                            ->getSelectedItemIndex();
+                    if (selected >= 0)
+                        processor_.selectModulationForPlayer(
+                            playerIndex,
+                            lane,
+                            static_cast<std::size_t>(selected));
                 };
-            content_.addAndMakeVisible(slider);
-            slider.setVisible(supportsVelocity && step < modulation.length);
+
+            saveModulationButtons_[laneSlot].push_back(
+                std::make_unique<juce::TextButton>());
+            auto& modulationSaveButton =
+                *saveModulationButtons_[laneSlot].back();
+            modulationSaveButton.setButtonText("Save");
+            modulationSaveButton.setTooltip(
+                "Save these values to the persistent modulation library");
+            modulationSaveButton.onClick = [this, playerIndex, lane]
+            {
+                beginSavePlayerModulation(playerIndex, lane);
+            };
+
+            decreaseModulationLengthButtons_[laneSlot].push_back(
+                std::make_unique<juce::TextButton>());
+            auto& decreaseLengthButton =
+                *decreaseModulationLengthButtons_[laneSlot].back();
+            decreaseLengthButton.setButtonText("-");
+            decreaseLengthButton.setTooltip(
+                "Remove the last " + laneName + " modulation step");
+            decreaseLengthButton.onClick = [this, playerIndex, lane]
+            {
+                const auto modulation =
+                    processor_.modulationForUi(playerIndex, lane);
+                if (modulation.length > 1)
+                {
+                    processor_.setPlayerModulationLength(
+                        playerIndex, lane, modulation.length - 1);
+                    refreshModulationControls(playerIndex, lane, true);
+                    updateModulationModifiedIndicators(true);
+                    content_.repaint();
+                }
+            };
+            content_.addAndMakeVisible(decreaseLengthButton);
+
+            increaseModulationLengthButtons_[laneSlot].push_back(
+                std::make_unique<juce::TextButton>());
+            auto& increaseLengthButton =
+                *increaseModulationLengthButtons_[laneSlot].back();
+            increaseLengthButton.setButtonText("+");
+            increaseLengthButton.setTooltip(
+                "Append a " + laneName + " modulation step");
+            increaseLengthButton.onClick = [this, playerIndex, lane]
+            {
+                const auto modulation =
+                    processor_.modulationForUi(playerIndex, lane);
+                if (modulation.length < lps::Modulation::maxLength)
+                {
+                    processor_.setPlayerModulationLength(
+                        playerIndex,
+                        lane,
+                        std::max<std::size_t>(1, modulation.length + 1));
+                    refreshModulationControls(playerIndex, lane, true);
+                    updateModulationModifiedIndicators(true);
+                    content_.repaint();
+                }
+            };
+            content_.addAndMakeVisible(increaseLengthButton);
+
+            const auto modulation =
+                processor_.modulationForUi(playerIndex, lane);
+            for (std::size_t step = 0;
+                 step < lps::Modulation::maxLength;
+                 ++step)
+            {
+                modulationSliders_[laneSlot].push_back(
+                    std::make_unique<ModulationCell>());
+                const auto sliderIndex =
+                    modulationSliders_[laneSlot].size() - 1;
+                auto& slider = *modulationSliders_[laneSlot].back();
+                slider.setName(laneName + " modulation step "
+                    + juce::String(static_cast<int>(step + 1)));
+                slider.setTooltip(laneName + " step "
+                    + juce::String(static_cast<int>(step + 1))
+                    + " (0-255)");
+                slider.setDoubleClickReturnValue(true, 255.0);
+                slider.setValue(
+                    static_cast<double>(modulation.values[step].raw / 257u),
+                    juce::dontSendNotification);
+                slider.onValueChange =
+                    [this, playerIndex, lane, laneSlot, step, sliderIndex]
+                    {
+                        const auto value = juce::jlimit(
+                            0,
+                            255,
+                            juce::roundToInt(
+                                modulationSliders_[laneSlot][sliderIndex]
+                                    ->getValue()));
+                        processor_.setPlayerModulationValue(
+                            playerIndex,
+                            lane,
+                            step,
+                            static_cast<std::uint8_t>(value));
+                        updateModulationModifiedIndicators(true);
+                        content_.repaint();
+                    };
+                content_.addAndMakeVisible(slider);
+                slider.setVisible(
+                    supportsModulation && step < modulation.length);
+            }
+
+            menuButton.setVisible(supportsModulation);
+            decreaseLengthButton.setVisible(supportsModulation);
+            increaseLengthButton.setVisible(supportsModulation);
         }
 
         patternMenuButton.setVisible(supportsPattern);
         offsetLeftButton.setVisible(supportsPattern);
         offsetRightButton.setVisible(supportsPattern);
-        velocityMenuButton.setVisible(supportsVelocity);
-        decreaseLengthButton.setVisible(supportsVelocity);
-        increaseLengthButton.setVisible(supportsVelocity);
     }
 
     displayedPatternModified_.assign(playerCount_, false);
-    displayedVelocityModulationModified_.assign(playerCount_, false);
+    for (const auto lane : modulationLanes)
+        displayedModulationModified_[laneIndex(lane)].assign(
+            playerCount_, false);
     displayedResetToMasterPending_.assign(playerCount_, false);
     updatePatternModifiedIndicators(true);
-    updateVelocityModulationModifiedIndicators(true);
+    updateModulationModifiedIndicators(true);
     updateResetToMasterIndicators(true);
 
     viewport_.setViewedComponent(&content_, false);
@@ -873,10 +915,10 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     if (catalogError.isNotEmpty())
         showPatternLibraryWarning(catalogError);
 
-    const auto velocityCatalogError =
-        processor_.velocityModulationCatalogErrorForUi();
-    if (velocityCatalogError.isNotEmpty())
-        showVelocityModulationLibraryWarning(velocityCatalogError);
+    const auto modulationCatalogError =
+        processor_.modulationCatalogErrorForUi();
+    if (modulationCatalogError.isNotEmpty())
+        showModulationLibraryWarning(modulationCatalogError);
 }
 
 LivePatternSequencerEditor::~LivePatternSequencerEditor()
@@ -914,15 +956,15 @@ void LivePatternSequencerEditor::resizedContent()
     constexpr int controlsX = contentHorizontalPadding + playerPanelHorizontalPadding;
     constexpr int menuWidth = 86;
     constexpr int resetWidth = 52;
-    constexpr int resetX = controlsX + menuWidth + velocityControlGap;
-    constexpr int offsetLeftX = resetX + resetWidth + velocityControlGap;
+    constexpr int resetX = controlsX + menuWidth + modulationControlGap;
+    constexpr int offsetLeftX = resetX + resetWidth + modulationControlGap;
     constexpr int offsetRightX = offsetLeftX + clickTargetSize
-        + velocityControlGap;
+        + modulationControlGap;
     constexpr int muteX = offsetRightX + clickTargetSize
-        + velocityControlGap;
-    constexpr int decreaseX = controlsX + menuWidth + velocityControlGap;
+        + modulationControlGap;
+    constexpr int decreaseX = controlsX + menuWidth + modulationControlGap;
     constexpr int increaseX = decreaseX + clickTargetSize
-        + velocityControlGap;
+        + modulationControlGap;
 
     for (std::size_t index = 0; index < patternMenuButtons_.size(); ++index)
     {
@@ -938,27 +980,32 @@ void LivePatternSequencerEditor::resizedContent()
         muteButtons_[index]->setBounds(
             muteX, y + 1, 46, clickTargetSize);
 
-        const int modulationY = y + patternPanelHeight() + 1;
-        velocityMenuButtons_[index]->setBounds(
-            controlsX, modulationY, menuWidth, clickTargetSize);
-        decreaseVelocityModulationLengthButtons_[index]->setBounds(
-            decreaseX, modulationY, clickTargetSize, clickTargetSize);
-        increaseVelocityModulationLengthButtons_[index]->setBounds(
-            increaseX, modulationY, clickTargetSize, clickTargetSize);
-
-        for (std::size_t step = 0;
-             step < lps::Modulation::maxLength;
-             ++step)
+        for (const auto lane : modulationLanes)
         {
-            const auto sliderIndex =
-                index * lps::Modulation::maxLength + step;
-            velocityModulationSliders_[sliderIndex]->setBounds(
-                velocityGridLeft
-                    + static_cast<int>(step)
-                        * (velocityKnobWidth + velocityKnobGap),
-                modulationY,
-                velocityKnobWidth,
-                velocityKnobHeight);
+            const auto laneSlot = laneIndex(lane);
+            const int modulationY = y + patternPanelHeight() + 1
+                + static_cast<int>(laneSlot) * modulationPanelHeight;
+            modulationMenuButtons_[laneSlot][index]->setBounds(
+                controlsX, modulationY, menuWidth, clickTargetSize);
+            decreaseModulationLengthButtons_[laneSlot][index]->setBounds(
+                decreaseX, modulationY, clickTargetSize, clickTargetSize);
+            increaseModulationLengthButtons_[laneSlot][index]->setBounds(
+                increaseX, modulationY, clickTargetSize, clickTargetSize);
+
+            for (std::size_t step = 0;
+                 step < lps::Modulation::maxLength;
+                 ++step)
+            {
+                const auto sliderIndex =
+                    index * lps::Modulation::maxLength + step;
+                modulationSliders_[laneSlot][sliderIndex]->setBounds(
+                    modulationGridLeft
+                        + static_cast<int>(step)
+                            * (modulationCellWidth + modulationCellGap),
+                    modulationY,
+                    modulationCellWidth,
+                    modulationCellHeight);
+            }
         }
     }
 }
@@ -994,9 +1041,10 @@ void LivePatternSequencerEditor::timerCallback()
          playerIndex < playerCount_;
          ++playerIndex)
     {
-        refreshVelocityModulationControls(playerIndex);
+        for (const auto lane : modulationLanes)
+            refreshModulationControls(playerIndex, lane);
     }
-    updateVelocityModulationModifiedIndicators();
+    updateModulationModifiedIndicators();
     updateResetToMasterIndicators();
     content_.repaint();
 }
@@ -1103,23 +1151,28 @@ void LivePatternSequencerEditor::handleSaveResult(
     }
 }
 
-void LivePatternSequencerEditor::beginSavePlayerVelocityModulation(
-    std::size_t playerIndex)
+void LivePatternSequencerEditor::beginSavePlayerModulation(
+    std::size_t playerIndex,
+    ModulationLane lane)
 {
-    handleVelocityModulationSaveResult(
+    handleModulationSaveResult(
         playerIndex,
-        processor_.savePlayerModulation(playerIndex));
+        lane,
+        processor_.savePlayerModulation(playerIndex, lane));
 }
 
-void LivePatternSequencerEditor::promptForVelocityModulationName(
+void LivePatternSequencerEditor::promptForModulationName(
     std::size_t playerIndex,
+    ModulationLane lane,
     lps::Modulation candidateModulation)
 {
-    constexpr auto nameEditorId = "velocityModulationName";
+    constexpr auto nameEditorId = "modulationName";
+    const auto laneName = modulationLaneName(lane);
     auto* alert = new juce::AlertWindow(
-        "Save Velocity Modulation",
-        "These velocity values are not in the library yet. Enter a name for "
-        "the new modulation.",
+        "Save " + laneName + " Modulation",
+        "These " + laneName.toLowerCase()
+            + " values are not in the library yet. Enter a name for the new "
+              "modulation.",
         juce::MessageBoxIconType::QuestionIcon,
         this);
     alert->addTextEditor(nameEditorId, {}, "Name:");
@@ -1154,7 +1207,8 @@ void LivePatternSequencerEditor::promptForVelocityModulationName(
     alert->enterModalState(
         true,
         juce::ModalCallbackFunction::create(
-            [safeThis, enteredName, playerIndex, candidateModulation](int result)
+            [safeThis, enteredName, playerIndex, lane,
+                candidateModulation](int result)
             {
                 if (result != 1 || safeThis == nullptr)
                     return;
@@ -1162,33 +1216,34 @@ void LivePatternSequencerEditor::promptForVelocityModulationName(
                 const auto name = enteredName->trim();
                 if (name.isEmpty())
                 {
-                    safeThis->showVelocityModulationSaveWarning(
-                        "Enter a name before saving the new velocity "
-                        "modulation.");
+                    safeThis->showModulationSaveWarning(
+                        lane,
+                        "Enter a name before saving the new modulation.");
                     return;
                 }
 
                 const auto saveResult =
                     safeThis->processor_.savePlayerModulation(
-                        playerIndex, candidateModulation, name);
+                        playerIndex, lane, candidateModulation, name);
                 if (saveResult.status
                     == LivePatternSequencerProcessor::
                         SaveModulationStatus::needsName)
                 {
-                    safeThis->showVelocityModulationSaveWarning(
-                        "Enter a name before saving the new velocity "
-                        "modulation.");
+                    safeThis->showModulationSaveWarning(
+                        lane,
+                        "Enter a name before saving the new modulation.");
                     return;
                 }
 
-                safeThis->handleVelocityModulationSaveResult(
-                    playerIndex, saveResult);
+                safeThis->handleModulationSaveResult(
+                    playerIndex, lane, saveResult);
             }),
         true);
 }
 
-void LivePatternSequencerEditor::handleVelocityModulationSaveResult(
+void LivePatternSequencerEditor::handleModulationSaveResult(
     std::size_t playerIndex,
+    ModulationLane lane,
     LivePatternSequencerProcessor::SaveModulationResult result)
 {
     using Status =
@@ -1196,27 +1251,26 @@ void LivePatternSequencerEditor::handleVelocityModulationSaveResult(
     switch (result.status)
     {
         case Status::needsName:
-            promptForVelocityModulationName(
-                playerIndex, result.candidateModulation);
+            promptForModulationName(
+                playerIndex, lane, result.candidateModulation);
             return;
 
         case Status::selectedExisting:
         case Status::savedNew:
-            refreshVelocityModulationSelectors();
-            refreshVelocityModulationControls(playerIndex, true);
-            updateVelocityModulationModifiedIndicators(true);
+            refreshModulationSelectors();
+            refreshModulationControls(playerIndex, lane, true);
+            updateModulationModifiedIndicators(true);
             content_.repaint();
             return;
 
         case Status::failed:
         {
             const auto catalogError =
-                processor_.velocityModulationCatalogErrorForUi();
-            showVelocityModulationSaveWarning(catalogError.isNotEmpty()
-                ? "The velocity modulation could not be saved.\n\n"
+                processor_.modulationCatalogErrorForUi();
+            showModulationSaveWarning(lane, catalogError.isNotEmpty()
+                ? "The modulation could not be saved.\n\n"
                     + catalogError
-                : juce::String(
-                    "The velocity modulation could not be saved."));
+                : juce::String("The modulation could not be saved."));
             return;
         }
     }
@@ -1247,54 +1301,61 @@ void LivePatternSequencerEditor::refreshPatternSelectors()
     }
 }
 
-void LivePatternSequencerEditor::refreshVelocityModulationSelectors()
+void LivePatternSequencerEditor::refreshModulationSelectors()
 {
-    for (std::size_t playerIndex = 0;
-         playerIndex < velocityModulationSelectors_.size();
-         ++playerIndex)
+    for (const auto lane : modulationLanes)
     {
-        if (!processor_.playerSupportsVelocityEditingForUi(playerIndex))
-            continue;
-        auto& selector = *velocityModulationSelectors_[playerIndex];
-        selector.clear(juce::dontSendNotification);
-        for (std::size_t modulationIndex = 0;
-             modulationIndex < processor_.velocityModulationCountForUi();
-             ++modulationIndex)
+        const auto laneSlot = laneIndex(lane);
+        for (std::size_t playerIndex = 0;
+             playerIndex < modulationSelectors_[laneSlot].size();
+             ++playerIndex)
         {
-            selector.addItem(
-                processor_.velocityModulationNameForUi(modulationIndex),
-                static_cast<int>(modulationIndex + 1));
-        }
+            if (!processor_.playerSupportsModulationEditingForUi(
+                    playerIndex, lane))
+                continue;
+            auto& selector = *modulationSelectors_[laneSlot][playerIndex];
+            selector.clear(juce::dontSendNotification);
+            for (std::size_t modulationIndex = 0;
+                 modulationIndex < processor_.modulationCountForUi();
+                 ++modulationIndex)
+            {
+                selector.addItem(
+                    processor_.modulationNameForUi(modulationIndex),
+                    static_cast<int>(modulationIndex + 1));
+            }
 
-        selector.setSelectedItemIndex(
-            static_cast<int>(
-                processor_.selectedModulationForPlayer(playerIndex)),
-            juce::dontSendNotification);
+            selector.setSelectedItemIndex(
+                static_cast<int>(processor_.selectedModulationForPlayer(
+                    playerIndex, lane)),
+                juce::dontSendNotification);
+        }
     }
 }
 
-void LivePatternSequencerEditor::refreshVelocityModulationControls(
+void LivePatternSequencerEditor::refreshModulationControls(
     std::size_t playerIndex,
+    ModulationLane lane,
     bool force)
 {
+    const auto laneSlot = laneIndex(lane);
     if (playerIndex >= playerCount_
-        || !processor_.playerSupportsVelocityEditingForUi(playerIndex)
-        || playerIndex >= decreaseVelocityModulationLengthButtons_.size()
-        || playerIndex >= increaseVelocityModulationLengthButtons_.size())
+        || !processor_.playerSupportsModulationEditingForUi(playerIndex, lane)
+        || playerIndex >= decreaseModulationLengthButtons_[laneSlot].size()
+        || playerIndex >= increaseModulationLengthButtons_[laneSlot].size())
     {
         return;
     }
 
     const auto modulation =
-        processor_.velocityModulationForUi(playerIndex);
+        processor_.modulationForUi(playerIndex, lane);
     const auto length = std::min<std::size_t>(
         modulation.length, lps::Modulation::maxLength);
     const bool playing = processor_.playingForUi();
     const int currentStep =
-        processor_.currentModulationStepForUi(playerIndex);
-    decreaseVelocityModulationLengthButtons_[playerIndex]->setEnabled(
+        processor_.currentModulationStepForUi(playerIndex, lane);
+    decreaseModulationLengthButtons_[laneSlot][playerIndex]->setEnabled(
         length > 1);
-    increaseVelocityModulationLengthButtons_[playerIndex]->setEnabled(
+    increaseModulationLengthButtons_[laneSlot][playerIndex]->setEnabled(
         length < lps::Modulation::maxLength);
 
     for (std::size_t step = 0;
@@ -1303,10 +1364,10 @@ void LivePatternSequencerEditor::refreshVelocityModulationControls(
     {
         const auto sliderIndex =
             playerIndex * lps::Modulation::maxLength + step;
-        if (sliderIndex >= velocityModulationSliders_.size())
+        if (sliderIndex >= modulationSliders_[laneSlot].size())
             break;
 
-        auto& slider = *velocityModulationSliders_[sliderIndex];
+        auto& slider = *modulationSliders_[laneSlot][sliderIndex];
         const bool shouldBeVisible = step < length;
         slider.setActive(
             playing && shouldBeVisible
@@ -1371,58 +1432,65 @@ void LivePatternSequencerEditor::updatePatternModifiedIndicators(bool force)
     }
 }
 
-void LivePatternSequencerEditor::updateVelocityModulationModifiedIndicators(
+void LivePatternSequencerEditor::updateModulationModifiedIndicators(
     bool force)
 {
-    for (std::size_t playerIndex = 0;
-         playerIndex < saveVelocityModulationButtons_.size();
-         ++playerIndex)
+    for (const auto lane : modulationLanes)
     {
-        if (!processor_.playerSupportsVelocityEditingForUi(playerIndex))
-            continue;
-        const bool modified =
-            processor_.playerModulationModifiedForUi(playerIndex);
-        if (!force
-            && displayedVelocityModulationModified_[playerIndex] == modified)
+        const auto laneSlot = laneIndex(lane);
+        for (std::size_t playerIndex = 0;
+             playerIndex < saveModulationButtons_[laneSlot].size();
+             ++playerIndex)
         {
-            continue;
-        }
+            if (!processor_.playerSupportsModulationEditingForUi(
+                    playerIndex, lane))
+                continue;
+            const bool modified =
+                processor_.playerModulationModifiedForUi(playerIndex, lane);
+            if (!force
+                && displayedModulationModified_[laneSlot][playerIndex]
+                    == modified)
+                continue;
 
-        displayedVelocityModulationModified_[playerIndex] = modified;
-        auto& selector = *velocityModulationSelectors_[playerIndex];
-        auto& saveButton = *saveVelocityModulationButtons_[playerIndex];
-        auto& menuButton = *velocityMenuButtons_[playerIndex];
-        saveButton.setEnabled(modified);
-        saveButton.setButtonText(modified ? "Save *" : "Save");
-        menuButton.setButtonText(velocityMenuLabel(playerIndex, modified));
+            displayedModulationModified_[laneSlot][playerIndex] = modified;
+            auto& selector =
+                *modulationSelectors_[laneSlot][playerIndex];
+            auto& saveButton =
+                *saveModulationButtons_[laneSlot][playerIndex];
+            auto& menuButton =
+                *modulationMenuButtons_[laneSlot][playerIndex];
+            saveButton.setEnabled(modified);
+            saveButton.setButtonText(modified ? "Save *" : "Save");
+            menuButton.setButtonText(modulationMenuLabel(lane, modified));
 
-        if (modified)
-        {
-            selector.setColour(
-                juce::ComboBox::outlineColourId, juce::Colour(amber));
-            selector.setColour(
-                juce::ComboBox::textColourId, juce::Colour(amber));
-            selector.setColour(
-                juce::ComboBox::arrowColourId, juce::Colour(amber));
-            saveButton.setColour(
-                juce::TextButton::buttonColourId,
-                juce::Colour(amber).darker(0.45f));
-            menuButton.setColour(
-                juce::TextButton::buttonColourId,
-                juce::Colour(amber).darker(0.45f));
-        }
-        else
-        {
-            selector.removeColour(juce::ComboBox::outlineColourId);
-            selector.removeColour(juce::ComboBox::textColourId);
-            selector.removeColour(juce::ComboBox::arrowColourId);
-            saveButton.removeColour(juce::TextButton::buttonColourId);
-            menuButton.removeColour(juce::TextButton::buttonColourId);
-        }
+            if (modified)
+            {
+                selector.setColour(
+                    juce::ComboBox::outlineColourId, juce::Colour(amber));
+                selector.setColour(
+                    juce::ComboBox::textColourId, juce::Colour(amber));
+                selector.setColour(
+                    juce::ComboBox::arrowColourId, juce::Colour(amber));
+                saveButton.setColour(
+                    juce::TextButton::buttonColourId,
+                    juce::Colour(amber).darker(0.45f));
+                menuButton.setColour(
+                    juce::TextButton::buttonColourId,
+                    juce::Colour(amber).darker(0.45f));
+            }
+            else
+            {
+                selector.removeColour(juce::ComboBox::outlineColourId);
+                selector.removeColour(juce::ComboBox::textColourId);
+                selector.removeColour(juce::ComboBox::arrowColourId);
+                saveButton.removeColour(juce::TextButton::buttonColourId);
+                menuButton.removeColour(juce::TextButton::buttonColourId);
+            }
 
-        selector.repaint();
-        saveButton.repaint();
-        menuButton.repaint();
+            selector.repaint();
+            saveButton.repaint();
+            menuButton.repaint();
+        }
     }
 }
 
@@ -1493,12 +1561,13 @@ void LivePatternSequencerEditor::showSaveWarning(const juce::String& message)
         this);
 }
 
-void LivePatternSequencerEditor::showVelocityModulationSaveWarning(
+void LivePatternSequencerEditor::showModulationSaveWarning(
+    ModulationLane lane,
     const juce::String& message)
 {
     juce::AlertWindow::showMessageBoxAsync(
         juce::MessageBoxIconType::WarningIcon,
-        "Velocity Modulation Not Saved",
+        modulationLaneName(lane) + " Modulation Not Saved",
         message,
         "OK",
         this);
@@ -1515,12 +1584,12 @@ void LivePatternSequencerEditor::showPatternLibraryWarning(
         this);
 }
 
-void LivePatternSequencerEditor::showVelocityModulationLibraryWarning(
+void LivePatternSequencerEditor::showModulationLibraryWarning(
     const juce::String& message)
 {
     juce::AlertWindow::showMessageBoxAsync(
         juce::MessageBoxIconType::WarningIcon,
-        "Velocity Modulation Library Unavailable",
+        "Modulation Library Unavailable",
         message,
         "OK",
         this);
@@ -1553,7 +1622,8 @@ int LivePatternSequencerEditor::patternPanelHeight() const
 
 int LivePatternSequencerEditor::playerStride() const
 {
-    return patternPanelHeight() + modulationPanelHeight;
+    return patternPanelHeight()
+        + static_cast<int>(modulationLanes.size()) * modulationPanelHeight;
 }
 
 int LivePatternSequencerEditor::requiredContentWidth() const
@@ -1761,11 +1831,6 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
             static_cast<int>(playerIndex) * playerStride(),
             content_.getWidth() - contentHorizontalPadding * 2,
             patternPanelHeight());
-        const juce::Rectangle<int> modulationPanel(
-            contentHorizontalPadding,
-            patternPanel.getBottom(),
-            content_.getWidth() - contentHorizontalPadding * 2,
-            modulationPanelHeight);
         graphics.setColour(juce::Colour(panel));
         graphics.fillRect(patternPanel);
         graphics.setColour(juce::Colour(border).brighter(0.08f));
@@ -1773,12 +1838,22 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
             patternPanel.getX(), patternPanel.getBottom() - 2,
             patternPanel.getWidth(), 2);
 
-        graphics.setColour(juce::Colour(panel));
-        graphics.fillRect(modulationPanel);
-        graphics.setColour(juce::Colour(border).brighter(0.08f));
-        graphics.fillRect(
-            modulationPanel.getX(), modulationPanel.getBottom() - 3,
-            modulationPanel.getWidth(), 3);
+        for (const auto lane : modulationLanes)
+        {
+            const juce::Rectangle<int> modulationPanel(
+                contentHorizontalPadding,
+                patternPanel.getBottom()
+                    + static_cast<int>(laneIndex(lane))
+                        * modulationPanelHeight,
+                content_.getWidth() - contentHorizontalPadding * 2,
+                modulationPanelHeight);
+            graphics.setColour(juce::Colour(panel));
+            graphics.fillRect(modulationPanel);
+            graphics.setColour(juce::Colour(border).brighter(0.08f));
+            graphics.fillRect(
+                modulationPanel.getX(), modulationPanel.getBottom() - 2,
+                modulationPanel.getWidth(), 2);
+        }
 
         graphics.setColour(juce::Colour(border).withMultipliedAlpha(0.65f));
         graphics.drawVerticalLine(
@@ -1993,22 +2068,26 @@ void LivePatternSequencerEditor::showPatternMenu(std::size_t playerIndex)
         });
 }
 
-void LivePatternSequencerEditor::showVelocityMenu(std::size_t playerIndex)
+void LivePatternSequencerEditor::showModulationMenu(
+    std::size_t playerIndex,
+    ModulationLane lane)
 {
-    if (playerIndex >= playerCount_ || playerIndex >= velocityMenuButtons_.size())
+    const auto laneSlot = laneIndex(lane);
+    if (playerIndex >= playerCount_
+        || playerIndex >= modulationMenuButtons_[laneSlot].size())
         return;
 
     constexpr int saveItemId = 20000;
     juce::PopupMenu menu;
     const auto selected =
-        processor_.selectedModulationForPlayer(playerIndex);
+        processor_.selectedModulationForPlayer(playerIndex, lane);
     for (std::size_t modulationIndex = 0;
-         modulationIndex < processor_.velocityModulationCountForUi();
+         modulationIndex < processor_.modulationCountForUi();
          ++modulationIndex)
     {
         menu.addItem(
             static_cast<int>(modulationIndex + 1),
-            processor_.velocityModulationNameForUi(modulationIndex),
+            processor_.modulationNameForUi(modulationIndex),
             true,
             modulationIndex == selected);
     }
@@ -2016,31 +2095,33 @@ void LivePatternSequencerEditor::showVelocityMenu(std::size_t playerIndex)
     menu.addItem(
         saveItemId,
         "SAVE MODULATION",
-        processor_.playerModulationModifiedForUi(playerIndex));
+        processor_.playerModulationModifiedForUi(playerIndex, lane));
 
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
     menu.showMenuAsync(
         juce::PopupMenu::Options {}
-            .withTargetComponent(velocityMenuButtons_[playerIndex].get()),
-        [safeThis, playerIndex](int result)
+            .withTargetComponent(
+                modulationMenuButtons_[laneSlot][playerIndex].get()),
+        [safeThis, playerIndex, lane](int result)
         {
             if (safeThis == nullptr || result == 0)
                 return;
 
             if (result == saveItemId)
             {
-                safeThis->beginSavePlayerVelocityModulation(playerIndex);
+                safeThis->beginSavePlayerModulation(playerIndex, lane);
                 return;
             }
 
             const auto modulationIndex = static_cast<std::size_t>(result - 1);
             if (modulationIndex
-                < safeThis->processor_.velocityModulationCountForUi())
+                < safeThis->processor_.modulationCountForUi())
             {
                 safeThis->processor_.selectModulationForPlayer(
-                    playerIndex, modulationIndex);
-                safeThis->refreshVelocityModulationControls(playerIndex, true);
-                safeThis->updateVelocityModulationModifiedIndicators(true);
+                    playerIndex, lane, modulationIndex);
+                safeThis->refreshModulationControls(
+                    playerIndex, lane, true);
+                safeThis->updateModulationModifiedIndicators(true);
                 safeThis->content_.repaint();
             }
         });

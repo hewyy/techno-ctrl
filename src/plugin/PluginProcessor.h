@@ -23,6 +23,15 @@
 class LivePatternSequencerProcessor final : public juce::AudioProcessor
 {
 public:
+    enum class ModulationLane : std::uint8_t
+    {
+        velocity,
+        pitch,
+        gate
+    };
+
+    static constexpr std::size_t modulationLaneCount = 3;
+
     enum class SavePatternStatus
     {
         failed,
@@ -90,14 +99,16 @@ public:
         std::size_t playerIndex) const noexcept;
     [[nodiscard]] int currentStepForUi(std::size_t playerIndex = 0) const noexcept;
     [[nodiscard]] int currentModulationStepForUi(
-        std::size_t playerIndex = 0) const noexcept;
+        std::size_t playerIndex,
+        ModulationLane lane) const noexcept;
     [[nodiscard]] bool playingForUi() const noexcept;
     [[nodiscard]] lps::PatternView patternForUi(std::size_t playerIndex = 0) const noexcept;
     [[nodiscard]] juce::String playerNameForUi(std::size_t playerIndex) const;
     [[nodiscard]] bool playerSupportsPatternEditingForUi(
         std::size_t playerIndex) const noexcept;
-    [[nodiscard]] bool playerSupportsVelocityEditingForUi(
-        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] bool playerSupportsModulationEditingForUi(
+        std::size_t playerIndex,
+        ModulationLane lane) const noexcept;
     [[nodiscard]] bool playerCanResetToMasterForUi(
         std::size_t playerIndex) const noexcept;
     [[nodiscard]] int playerMidiNoteForUi(std::size_t playerIndex) const noexcept;
@@ -131,32 +142,40 @@ public:
     [[nodiscard]] std::size_t playerPlaybackEnd(std::size_t playerIndex) const noexcept;
     void togglePlayerStep(std::size_t playerIndex, std::size_t step) noexcept;
 
-    [[nodiscard]] std::size_t velocityModulationCountForUi() const noexcept;
-    [[nodiscard]] juce::String velocityModulationNameForUi(
+    [[nodiscard]] std::size_t modulationCountForUi() const noexcept;
+    [[nodiscard]] juce::String modulationNameForUi(
         std::size_t modulationIndex) const;
-    [[nodiscard]] juce::String velocityModulationCatalogErrorForUi() const;
-    [[nodiscard]] lps::Modulation velocityModulationForUi(
-        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] juce::String modulationCatalogErrorForUi() const;
+    [[nodiscard]] lps::Modulation modulationForUi(
+        std::size_t playerIndex,
+        ModulationLane lane) const noexcept;
     [[nodiscard]] bool playerModulationModifiedForUi(
-        std::size_t playerIndex) const noexcept;
+        std::size_t playerIndex,
+        ModulationLane lane) const noexcept;
     [[nodiscard]] SaveModulationResult savePlayerModulation(
         std::size_t playerIndex,
+        ModulationLane lane,
         const juce::String& name = {});
     [[nodiscard]] SaveModulationResult savePlayerModulation(
         std::size_t playerIndex,
+        ModulationLane lane,
         const lps::Modulation& candidateModulation,
         const juce::String& name);
     void selectModulationForPlayer(
         std::size_t playerIndex,
+        ModulationLane lane,
         std::size_t modulationIndex) noexcept;
     [[nodiscard]] std::size_t selectedModulationForPlayer(
-        std::size_t playerIndex) const noexcept;
+        std::size_t playerIndex,
+        ModulationLane lane) const noexcept;
     void setPlayerModulationValue(
         std::size_t playerIndex,
+        ModulationLane lane,
         std::size_t step,
         std::uint8_t value) noexcept;
     void setPlayerModulationLength(
         std::size_t playerIndex,
+        ModulationLane lane,
         std::size_t length) noexcept;
     void setPlayerMuted(std::size_t playerIndex, bool muted) noexcept;
     [[nodiscard]] bool playerMutedForUi(std::size_t playerIndex) const noexcept;
@@ -181,7 +200,6 @@ private:
     {
         juce::String name;
         int midiNote = -1;
-        bool supportsVelocityEditing = false;
     };
 
     struct PlayerBundle
@@ -194,7 +212,6 @@ private:
         PlayerDescriptor descriptor;
         lps::PatternPlayer* patternController = nullptr;
         lps::IPatternEditorModel* patternModel = nullptr;
-        lps::IModulationEditorModel* modulationModel = nullptr;
         lps::RouteId midiRouteId;
         lps::RouteId cvRouteId;
     };
@@ -205,17 +222,21 @@ private:
     [[nodiscard]] const lps::PatternPlayer* patternPlayerAt(
         std::size_t playerIndex) const noexcept;
     [[nodiscard]] lps::ModulationPlayer* modulationPlayerAt(
-        std::size_t playerIndex) noexcept;
+        std::size_t playerIndex,
+        ModulationLane lane) noexcept;
     [[nodiscard]] const lps::ModulationPlayer* modulationPlayerAt(
-        std::size_t playerIndex) const noexcept;
+        std::size_t playerIndex,
+        ModulationLane lane) const noexcept;
+    [[nodiscard]] static constexpr std::size_t modulationLaneIndex(
+        ModulationLane lane) noexcept
+    {
+        return static_cast<std::size_t>(lane);
+    }
 
     // The library must outlive every player because players keep a read-only
     // reference to its immutable, append-only entries.
     lps::PatternLibrary patternLibrary_;
     lps::ModulationLibrary modulationLibrary_;
-    // Runtime-only reusable constants are kept out of the user-editable
-    // catalog while still using ordinary immutable Modulation records.
-    lps::ModulationLibrary fixedModulationLibrary_;
     PatternLibraryFileStore patternLibraryFileStore_;
     ModulationLibraryFileStore modulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
