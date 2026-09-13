@@ -29,8 +29,8 @@ namespace
         ? lps::SequencerEvent::triggerStart(0.0, { trigger }, intensity)
         : lps::SequencerEvent::triggerEnd(0.0, { trigger });
     routed.frameOffset = frameOffset;
-    routed.mappedPitchSemitones = note;
-    routed.hasMappedPitch = true;
+    routed.event.hasMusicalPitch = true;
+    routed.event.musicalPitchSemitones = note;
     return routed;
 }
 
@@ -150,7 +150,6 @@ void testTriggerEndUsesThePitchRememberedForItsStart()
     start.routeId = { 7 };
     end.sourceVoiceId = start.sourceVoiceId;
     end.routeId = start.routeId;
-    end.hasMappedPitch = false;
     const std::array events { start, end };
 
     CHECK(renderer.renderBlock({}, { events.data(), events.size() }));

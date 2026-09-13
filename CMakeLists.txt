@@ -34,8 +34,6 @@ add_library(sequencer_core STATIC
     src/core/PatternPlayer.h
     src/core/RuntimeGraph.cpp
     src/core/RuntimeGraph.h
-    src/core/SequencerEngine.cpp
-    src/core/SequencerEngine.h
     src/core/SequencerTypes.h
     src/core/ModulationLibrary.cpp
     src/core/ModulationLibrary.h

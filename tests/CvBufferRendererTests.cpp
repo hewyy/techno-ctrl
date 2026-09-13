@@ -29,8 +29,8 @@ lps::RoutedEvent trigger(
     event.sourceVoiceId = { 0 };
     event.routeId = { 1 };
     event.frameOffset = frame;
-    event.mappedPitchSemitones = pitch;
-    event.hasMappedPitch = true;
+    event.event.hasMusicalPitch = true;
+    event.event.musicalPitchSemitones = pitch;
     return event;
 }
 
@@ -63,7 +63,6 @@ void testGateHoldsAcrossEmptyBlocksAndReleasesAtExactFrame()
     checkChannel(buffer, 0, { 1, 1, 1, 1, 1, 1, 1, 1 });
 
     auto end = trigger(lps::SemanticEventType::triggerEnd, 7, 3);
-    end.hasMappedPitch = false;
     CHECK(renderer.renderBlock({}, { &end, 1 }));
     checkChannel(buffer, 0, { 1, 1, 1, 0, 0, 0, 0, 0 });
 }

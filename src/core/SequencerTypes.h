@@ -151,24 +151,6 @@ struct PlayerSyncCapabilities
     bool acceptsExternalRestart = false;
 };
 
-struct PlayerId
-{
-    static constexpr std::uint32_t invalidValue =
-        std::numeric_limits<std::uint32_t>::max();
-
-    std::uint32_t value = invalidValue;
-
-    friend constexpr bool operator==(PlayerId left, PlayerId right) noexcept
-    {
-        return left.value == right.value;
-    }
-
-    friend constexpr bool operator!=(PlayerId left, PlayerId right) noexcept
-    {
-        return !(left == right);
-    }
-};
-
 struct RouteId
 {
     static constexpr std::uint32_t invalidValue =
@@ -398,18 +380,6 @@ struct SequencerEvent
     }
 };
 
-struct RouteMapping
-{
-    bool usesFixedPitch = false;
-    float fixedPitchSemitones = 60.0f;
-
-    [[nodiscard]] static constexpr RouteMapping fixedPitch(
-        float semitones) noexcept
-    {
-        return { true, semitones };
-    }
-};
-
 struct RoutedEvent
 {
     SequencerEvent event;
@@ -417,8 +387,6 @@ struct RoutedEvent
     RouteId routeId;
     std::uint32_t frameOffset = 0;
     std::uint64_t stableOrder = 0;
-    float mappedPitchSemitones = 0.0f;
-    bool hasMappedPitch = false;
 };
 
 static_assert(std::is_trivially_copyable_v<SequencerEvent>);

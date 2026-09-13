@@ -42,13 +42,11 @@ bool MidiBufferRenderer::renderBlock(
         std::optional<std::uint8_t> note;
         if (routed.event.type == SemanticEventType::triggerStart)
         {
-            if (!routed.event.hasMusicalPitch && !routed.hasMappedPitch)
+            if (!routed.event.hasMusicalPitch)
                 return false;
             note = static_cast<std::uint8_t>(std::clamp(
                 static_cast<int>(std::lround(
-                    routed.event.hasMusicalPitch
-                        ? routed.event.musicalPitchSemitones
-                        : routed.mappedPitchSemitones)),
+                    routed.event.musicalPitchSemitones)),
                 0,
                 127));
             if (!rememberStart(routed, *note))

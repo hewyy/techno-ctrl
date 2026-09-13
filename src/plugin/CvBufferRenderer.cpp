@@ -102,11 +102,9 @@ bool CvBufferRenderer::renderBlock(
             ++state->activeTriggerCount;
             state->gate = 1.0f;
             fillFrom(state->config.gateChannel, frame, state->gate);
-            if (event.event.hasMusicalPitch || event.hasMappedPitch)
+            if (event.event.hasMusicalPitch)
             {
-                const auto pitchSemitones = event.event.hasMusicalPitch
-                    ? event.event.musicalPitchSemitones
-                    : event.mappedPitchSemitones;
+                const auto pitchSemitones = event.event.musicalPitchSemitones;
                 state->pitch = state->config.voltsAtReferencePitch
                     + (pitchSemitones
                         - state->config.referencePitchSemitones)

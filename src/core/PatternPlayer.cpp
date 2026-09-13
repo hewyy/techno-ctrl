@@ -662,7 +662,7 @@ PlayerProcessResult PatternPlayer::process(
     }
 
     // Both directives originate from the same validated master boundary in
-    // SequencerEngine. A synchronized pattern activation itself restarts the
+    // RuntimeGraph. A synchronized pattern activation itself restarts the
     // follower, while a manual reset can do so without a pattern change.
     auto transitionPpq = hasSynchronizedPatternChange
         ? masterBoundaryPpq
