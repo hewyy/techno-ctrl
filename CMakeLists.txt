@@ -28,6 +28,8 @@ add_library(sequencer_core STATIC
     src/core/IOutputRenderer.h
     src/core/ModulationLane.cpp
     src/core/ModulationLane.h
+    src/core/NormalizedValue.cpp
+    src/core/NormalizedValue.h
     src/core/PatternLibrary.cpp
     src/core/PatternLibrary.h
     src/core/PatternPlayer.cpp

@@ -6,9 +6,102 @@
 #include <limits>
 #include <optional>
 #include <type_traits>
+#include <variant>
 
 namespace lps
 {
+
+template <typename Tag, typename Storage = std::uint32_t>
+struct StableId
+{
+    static constexpr Storage invalidValue =
+        std::numeric_limits<Storage>::max();
+
+    Storage value = invalidValue;
+
+    [[nodiscard]] constexpr bool isValid() const noexcept
+    {
+        return value != invalidValue;
+    }
+
+    friend constexpr bool operator==(StableId left, StableId right) noexcept
+    {
+        return left.value == right.value;
+    }
+
+    friend constexpr bool operator!=(StableId left, StableId right) noexcept
+    {
+        return !(left == right);
+    }
+};
+
+struct PatternPlayerIdTag;
+struct ModulationPlayerIdTag;
+struct VoiceIdTag;
+struct VoiceParameterIdTag;
+struct TriggerBindingIdTag;
+struct ParameterBindingIdTag;
+struct CommandBindingIdTag;
+struct OutputBindingIdTag;
+
+using PatternPlayerId = StableId<PatternPlayerIdTag>;
+using ModulationPlayerId = StableId<ModulationPlayerIdTag>;
+using VoiceId = StableId<VoiceIdTag>;
+using VoiceParameterId = StableId<VoiceParameterIdTag, std::uint16_t>;
+using TriggerBindingId = StableId<TriggerBindingIdTag>;
+using ParameterBindingId = StableId<ParameterBindingIdTag>;
+using CommandBindingId = StableId<CommandBindingIdTag>;
+using OutputBindingId = StableId<OutputBindingIdTag>;
+
+enum class PlayerRefType : std::uint8_t
+{
+    pattern,
+    modulation
+};
+
+struct PlayerRef
+{
+    std::uint32_t value = PatternPlayerId::invalidValue;
+    PlayerRefType type = PlayerRefType::pattern;
+
+    [[nodiscard]] static constexpr PlayerRef pattern(
+        PatternPlayerId id) noexcept
+    {
+        return { id.value, PlayerRefType::pattern };
+    }
+
+    [[nodiscard]] static constexpr PlayerRef modulation(
+        ModulationPlayerId id) noexcept
+    {
+        return { id.value, PlayerRefType::modulation };
+    }
+};
+
+enum class PlayMode : std::uint8_t
+{
+    continuous,
+    oneShot
+};
+
+enum class PlayerCommand : std::uint8_t
+{
+    play,
+    stop,
+    reset,
+    resetAndPlay
+};
+
+struct ClockAdvance
+{
+    double stepLengthPpq = 0.25;
+};
+
+struct PatternHitAdvance
+{
+    PatternPlayerId source;
+};
+
+using AdvanceSource = std::variant<ClockAdvance, PatternHitAdvance>;
 
 struct PrepareSpec
 {

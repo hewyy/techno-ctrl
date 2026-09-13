@@ -6,13 +6,6 @@
 namespace lps
 {
 
-NormalizedValue NormalizedValue::fromFloat(float value) noexcept
-{
-    const auto clamped = std::clamp(value, 0.0f, 1.0f);
-    return { static_cast<std::uint16_t>(std::lround(
-        clamped * static_cast<float>(maximum))) };
-}
-
 float ValueMapping::map(NormalizedValue value) const noexcept
 {
     return minimum + (maximum - minimum) * value.toFloat();
