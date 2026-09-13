@@ -5,6 +5,7 @@
 #include "core/Voice.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -122,6 +123,13 @@ public:
     [[nodiscard]] GraphValidationError validate(
         const RuntimeGraphConfig& candidate) const noexcept;
     [[nodiscard]] bool activate(const RuntimeGraphConfig& candidate) noexcept;
+    [[nodiscard]] bool configureArmedCycleCommand(
+        std::size_t slot,
+        PatternPlayerId source,
+        PlayerRef destination,
+        PlayerCommand command) noexcept;
+    [[nodiscard]] bool armCycleCommand(std::size_t slot) noexcept;
+    [[nodiscard]] bool cycleCommandPending(std::size_t slot) const noexcept;
     void prepare(const PrepareSpec& spec) noexcept;
     void reset() noexcept;
     [[nodiscard]] bool process(
@@ -136,6 +144,9 @@ public:
     {
         return workOverflowed_;
     }
+    [[nodiscard]] bool patternHitOccurred(
+        PatternPlayerId source,
+        double ppqPosition) const noexcept;
 
 private:
     struct WorkSignal
@@ -144,6 +155,14 @@ private:
         std::uint64_t order = 0;
         bool propagated = false;
         bool resolved = false;
+    };
+
+    struct ArmedCycleCommand
+    {
+        PatternPlayerId source;
+        PlayerRef destination;
+        PlayerCommand command = PlayerCommand::resetAndPlay;
+        bool configured = false;
     };
 
     [[nodiscard]] PatternPlayer* find(PatternPlayerId id) const noexcept;
@@ -167,6 +186,8 @@ private:
     std::size_t modulationPlayerCount_ = 0;
     std::size_t voiceCount_ = 0;
     RuntimeGraphConfig config_;
+    std::array<ArmedCycleCommand, maximumPatternPlayers> armedCycleCommands_ {};
+    std::array<std::atomic_bool, maximumPatternPlayers> armedCyclePending_ {};
     PrepareSpec prepareSpec_;
     std::array<WorkSignal, maximumWorkSignals> work_ {};
     std::size_t workSize_ = 0;

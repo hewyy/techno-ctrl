@@ -1,10 +1,11 @@
 #pragma once
 
 #include "core/PatternLibrary.h"
-#include "core/SequencerEngine.h"
 #include "core/PatternPlayer.h"
 #include "core/ModulationLibrary.h"
 #include "core/ModulationPlayer.h"
+#include "core/RuntimeGraph.h"
+#include "core/Voice.h"
 #include "plugin/CvBufferRenderer.h"
 #include "plugin/MidiBufferRenderer.h"
 #include "plugin/PatternLibraryFileStore.h"
@@ -13,6 +14,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <atomic>
+#include <array>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -183,7 +185,10 @@ private:
     struct PlayerBundle
     {
         std::unique_ptr<lps::IPlayer> realtime;
+        std::unique_ptr<lps::ModulationPlayer> pitchPlayer;
         std::unique_ptr<lps::ModulationPlayer> velocityPlayer;
+        std::unique_ptr<lps::ModulationPlayer> gatePlayer;
+        std::unique_ptr<lps::Voice> voice;
         PlayerDescriptor descriptor;
         lps::PatternPlayer* patternController = nullptr;
         lps::IPatternEditorModel* patternModel = nullptr;
@@ -201,17 +206,39 @@ private:
         std::size_t playerIndex) noexcept;
     [[nodiscard]] const lps::ModulationPlayer* modulationPlayerAt(
         std::size_t playerIndex) const noexcept;
+    [[nodiscard]] bool routeGraphOutput(
+        const lps::TimelineBlock& block,
+        const lps::ResolvedVoiceEventBuffer& events) noexcept;
+    void resetGraphOutputs() noexcept;
+
+    struct AudibleTriggerState
+    {
+        lps::TriggerId id;
+        bool eligible = false;
+        bool active = false;
+    };
 
     // The library must outlive every player because players keep a read-only
     // reference to its immutable, append-only entries.
     lps::PatternLibrary patternLibrary_;
     lps::ModulationLibrary modulationLibrary_;
+    // Runtime-only reusable constants are kept out of the user-editable
+    // catalog while still using ordinary immutable Modulation records.
+    lps::ModulationLibrary fixedModulationLibrary_;
     PatternLibraryFileStore patternLibraryFileStore_;
     ModulationLibraryFileStore modulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
     std::unique_ptr<lps::CvBufferRenderer> cvRenderer_;
-    std::unique_ptr<lps::SequencerEngine> engine_;
+    std::unique_ptr<lps::RuntimeGraph> runtimeGraph_;
+    std::array<lps::RoutedEvent, lps::ResolvedVoiceEventBuffer::capacity>
+        midiRoutedEvents_ {};
+    std::array<lps::RoutedEvent, lps::ResolvedVoiceEventBuffer::capacity>
+        cvRoutedEvents_ {};
+    std::array<AudibleTriggerState, cvPlayerCapacity> audibleTriggers_ {};
+    std::array<std::atomic_bool, cvPlayerCapacity> muted_ {};
+    std::array<std::array<std::atomic_bool, cvPlayerCapacity>, cvPlayerCapacity>
+        suppression_ {};
 
     std::optional<double> expectedNextPpq_;
     bool wasPlaying_ = false;

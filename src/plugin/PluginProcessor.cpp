@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 namespace
 {
@@ -49,6 +50,14 @@ constexpr std::size_t configuredMasterIndex() noexcept
 
 static_assert(configuredMasterCount() == 1,
     "Exactly one statically configured drum voice must be the master");
+
+lps::Modulation constantModulation(float value) noexcept
+{
+    lps::Modulation modulation;
+    modulation.length = 1;
+    modulation.values[0] = lps::NormalizedValue::fromFloat(value);
+    return modulation;
+}
 }
 
 LivePatternSequencerProcessor::LivePatternSequencerProcessor()
@@ -69,7 +78,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
           patternCatalogFile.getSiblingFile("modulations.json")),
       drumRenderer_(std::make_unique<lps::MidiBufferRenderer>(drumMidiChannel)),
       cvRenderer_(std::make_unique<lps::CvBufferRenderer>()),
-      engine_(std::make_unique<lps::SequencerEngine>())
+      runtimeGraph_(std::make_unique<lps::RuntimeGraph>())
 {
     // Catalog replacement is startup-only and must finish before PatternPlayer
     // instances retain references to the library.
@@ -82,46 +91,91 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     currentSteps_.reserve(totalPlayerCount);
     currentModulationSteps_.reserve(totalPlayerCount);
 
+    const auto gateRecord = fixedModulationLibrary_.addOrFind(
+        "Constant Gate 1/2", constantModulation(0.5f));
+    jassert(gateRecord.entry != nullptr);
+    lps::RuntimeGraphConfig graphConfig;
+
     for (std::size_t index = 0; index < defaultDrumVoices.size(); ++index)
     {
         const auto& voice = defaultDrumVoices[index];
         auto player = std::make_unique<lps::PatternPlayer>(patternLibrary_);
+        player->setRuntimeId(static_cast<std::uint32_t>(index));
         if (patternLibrary_.size() != 0)
         {
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))
                 player->selectPattern(pattern->id);
         }
         auto* patternController = player.get();
-        const auto playerId = engine_->registerPlayer(*patternController);
-        jassert(playerId.has_value());
+        const auto patternId = lps::PatternPlayerId {
+            static_cast<std::uint32_t>(index) };
+        const auto voiceId = lps::VoiceId {
+            static_cast<std::uint32_t>(index) };
+        const auto modulationBase = static_cast<std::uint32_t>(index * 3);
+        const auto pitchModulationId = lps::ModulationPlayerId {modulationBase};
+        const auto velocityModulationId = lps::ModulationPlayerId {
+            modulationBase + 1 };
+        const auto gateModulationId = lps::ModulationPlayerId {
+            modulationBase + 2 };
+
+        const auto pitchRecord = fixedModulationLibrary_.addOrFind(
+            "Constant Pitch " + std::to_string(voice.midiNote),
+            constantModulation(static_cast<float>(voice.midiNote) / 127.0f));
+        jassert(pitchRecord.entry != nullptr);
+        auto pitchPlayer = std::make_unique<lps::ModulationPlayer>(
+            fixedModulationLibrary_, pitchModulationId);
         auto velocityPlayer = std::make_unique<lps::ModulationPlayer>(
-            modulationLibrary_,
-            lps::ModulationPlayerId {static_cast<std::uint32_t>(index)});
-        if (playerId.has_value())
-        {
-            velocityPlayer->setAdvanceSource(lps::PatternHitAdvance {
-                lps::PatternPlayerId {playerId->value}});
-        }
-        const auto routeId = playerId.has_value()
-            ? engine_->connect(
-                *playerId,
-                *drumRenderer_,
-                lps::RouteMapping::fixedPitch(
-                    static_cast<float>(voice.midiNote)))
-            : std::nullopt;
-        jassert(routeId.has_value());
-        (void) routeId;
-        const auto cvRouteId = playerId.has_value()
-            ? engine_->connect(
-                *playerId,
-                *cvRenderer_,
-                lps::RouteMapping::fixedPitch(
-                    static_cast<float>(voice.midiNote)))
-            : std::nullopt;
+            modulationLibrary_, velocityModulationId);
+        auto gatePlayer = std::make_unique<lps::ModulationPlayer>(
+            fixedModulationLibrary_, gateModulationId);
+        pitchPlayer->selectModulation(pitchRecord.entry->id);
+        gatePlayer->selectModulation(gateRecord.entry->id);
+        const auto hitAdvance = lps::PatternHitAdvance {patternId};
+        pitchPlayer->setAdvanceSource(hitAdvance);
+        velocityPlayer->setAdvanceSource(hitAdvance);
+        gatePlayer->setAdvanceSource(hitAdvance);
+
+        auto resolvedVoice = std::make_unique<lps::Voice>(voiceId);
+        constexpr lps::VoiceParameterId pitchParameter {0};
+        constexpr lps::VoiceParameterId intensityParameter {1};
+        constexpr lps::VoiceParameterId gateParameter {2};
+        const bool voiceConfigured = resolvedVoice->addParameter(
+                lps::VoiceParameterDescriptor::pitch(pitchParameter))
+            && resolvedVoice->addParameter(
+                lps::VoiceParameterDescriptor::intensity(intensityParameter))
+            && resolvedVoice->addParameter(
+                lps::VoiceParameterDescriptor::gate(gateParameter));
+        jassert(voiceConfigured);
+        (void) voiceConfigured;
+
+        const bool nodesRegistered = runtimeGraph_->registerPatternPlayer(*player)
+            && runtimeGraph_->registerModulationPlayer(*pitchPlayer)
+            && runtimeGraph_->registerModulationPlayer(*velocityPlayer)
+            && runtimeGraph_->registerModulationPlayer(*gatePlayer)
+            && runtimeGraph_->registerVoice(*resolvedVoice);
+        jassert(nodesRegistered);
+        (void) nodesRegistered;
+
+        const bool bindingsAdded = graphConfig.add(lps::TriggerBinding {
+                lps::TriggerBindingId {static_cast<std::uint32_t>(index)},
+                patternId, voiceId})
+            && graphConfig.add(lps::ParameterBinding {
+                lps::ParameterBindingId {modulationBase},
+                pitchModulationId, voiceId, pitchParameter})
+            && graphConfig.add(lps::ParameterBinding {
+                lps::ParameterBindingId {modulationBase + 1},
+                velocityModulationId, voiceId, intensityParameter})
+            && graphConfig.add(lps::ParameterBinding {
+                lps::ParameterBindingId {modulationBase + 2},
+                gateModulationId, voiceId, gateParameter});
+        jassert(bindingsAdded);
+        (void) bindingsAdded;
+
+        const auto routeId = lps::RouteId {static_cast<std::uint32_t>(index)};
+        const auto cvRouteId = routeId;
         const int cvChannel = static_cast<int>(index) * cvChannelsPerPlayer;
-        const bool cvConfigured = cvRouteId.has_value()
-            && cvRenderer_->configureRoute(
-                *cvRouteId,
+        const bool cvConfigured = cvRenderer_->configureRoute(
+                cvRouteId,
                 { cvChannel, cvChannel + 1, cvChannel + 2 });
         jassert(cvConfigured);
         (void) cvConfigured;
@@ -135,9 +189,12 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         bundle.patternController = patternController;
         bundle.patternModel = patternController;
         bundle.modulationModel = velocityPlayer.get();
+        bundle.pitchPlayer = std::move(pitchPlayer);
         bundle.velocityPlayer = std::move(velocityPlayer);
-        bundle.midiRouteId = routeId.value_or(lps::RouteId {});
-        bundle.cvRouteId = cvRouteId.value_or(lps::RouteId {});
+        bundle.gatePlayer = std::move(gatePlayer);
+        bundle.voice = std::move(resolvedVoice);
+        bundle.midiRouteId = routeId;
+        bundle.cvRouteId = cvRouteId;
         bundle.realtime = std::move(player);
         players_.push_back(std::move(bundle));
         currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
@@ -145,11 +202,23 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
             std::make_unique<std::atomic<int>>(-1));
     }
 
-    const auto masterId = engine_->playerIdAt(configuredMasterIndex());
-    const bool masterConfigured = masterId.has_value()
-        && engine_->setMasterPlayer(*masterId);
-    jassert(masterConfigured);
-    (void) masterConfigured;
+    const bool graphActivated = runtimeGraph_->activate(graphConfig);
+    jassert(graphActivated);
+    (void) graphActivated;
+    for (std::size_t index = 0; index < players_.size(); ++index)
+    {
+        if (index == configuredMasterIndex())
+            continue;
+        const bool configured = runtimeGraph_->configureArmedCycleCommand(
+            index,
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(configuredMasterIndex()) },
+            lps::PlayerRef::pattern(lps::PatternPlayerId {
+                static_cast<std::uint32_t>(index) }),
+            lps::PlayerCommand::resetAndPlay);
+        jassert(configured);
+        (void) configured;
+    }
 }
 
 const juce::String LivePatternSequencerProcessor::getName() const
@@ -169,10 +238,15 @@ void LivePatternSequencerProcessor::prepareToPlay(
     double sampleRate,
     int maximumExpectedSamplesPerBlock)
 {
-    engine_->prepare({
+    const lps::PrepareSpec spec {
         sampleRate,
         static_cast<std::uint32_t>(std::max(maximumExpectedSamplesPerBlock, 0))
-    });
+    };
+    runtimeGraph_->prepare(spec);
+    drumRenderer_->prepare({spec.sampleRate, spec.maximumBlockSize});
+    cvRenderer_->prepare({spec.sampleRate, spec.maximumBlockSize});
+    for (auto& trigger : audibleTriggers_)
+        trigger = {};
     expectedNextPpq_.reset();
     wasPlaying_ = false;
     updateUiSnapshot();
@@ -180,7 +254,8 @@ void LivePatternSequencerProcessor::prepareToPlay(
 
 void LivePatternSequencerProcessor::releaseResources()
 {
-    engine_->reset();
+    runtimeGraph_->reset();
+    resetGraphOutputs();
     expectedNextPpq_.reset();
     wasPlaying_ = false;
     updateUiSnapshot();
@@ -237,11 +312,123 @@ void LivePatternSequencerProcessor::processBlock(
     wasPlaying_ = block.playing;
     drumRenderer_->setMidiBuffer(midi);
     cvRenderer_->setAudioBuffer(audio);
-    engine_->run(block);
+    if (block.transportDiscontinuity)
+        resetGraphOutputs();
+
+    lps::ResolvedVoiceEventBuffer resolvedEvents;
+    if (!runtimeGraph_->process(block, resolvedEvents)
+        || !routeGraphOutput(block, resolvedEvents))
+    {
+        runtimeGraph_->reset();
+        resetGraphOutputs();
+    }
     cvRenderer_->clearAudioBuffer();
     drumRenderer_->clearMidiBuffer();
 
     updateUiSnapshot();
+}
+
+bool LivePatternSequencerProcessor::routeGraphOutput(
+    const lps::TimelineBlock& block,
+    const lps::ResolvedVoiceEventBuffer& events) noexcept
+{
+    std::size_t midiCount = 0;
+    std::size_t cvCount = 0;
+
+    for (const auto& resolved : events)
+    {
+        const auto voiceIndex = static_cast<std::size_t>(
+            resolved.sourceVoiceId.value);
+        if (voiceIndex >= players_.size())
+            return false;
+
+        bool eligible = true;
+        if (resolved.event.type == lps::SemanticEventType::triggerStart)
+        {
+            eligible = !muted_[voiceIndex].load(std::memory_order_relaxed);
+            for (std::size_t suppressor = 0;
+                 eligible && suppressor < players_.size();
+                 ++suppressor)
+            {
+                if (!suppression_[suppressor][voiceIndex].load(
+                        std::memory_order_relaxed))
+                    continue;
+                if (runtimeGraph_->patternHitOccurred(
+                        lps::PatternPlayerId {
+                            static_cast<std::uint32_t>(suppressor) },
+                        resolved.event.ppqPosition))
+                {
+                    eligible = false;
+                }
+            }
+            audibleTriggers_[voiceIndex] = {
+                resolved.event.triggerId, eligible, true };
+        }
+        else if (resolved.event.type == lps::SemanticEventType::triggerEnd)
+        {
+            auto& trigger = audibleTriggers_[voiceIndex];
+            eligible = trigger.active
+                && trigger.id == resolved.event.triggerId
+                && trigger.eligible;
+            if (trigger.active && trigger.id == resolved.event.triggerId)
+                trigger = {};
+        }
+
+        if (!eligible
+            && resolved.event.type != lps::SemanticEventType::controlPoint)
+            continue;
+        if (!std::isfinite(resolved.event.ppqPosition))
+            return false;
+
+        std::uint32_t frameOffset = 0;
+        if (block.sampleCount != 0)
+        {
+            if (!std::isfinite(block.ppqStart)
+                || !std::isfinite(block.tempoBpm)
+                || !std::isfinite(block.sampleRate)
+                || block.tempoBpm <= 0.0 || block.sampleRate <= 0.0)
+                return false;
+            const auto ppqPerSample = block.tempoBpm
+                / (60.0 * block.sampleRate);
+            const auto rawOffset = (resolved.event.ppqPosition - block.ppqStart)
+                / ppqPerSample;
+            if (!std::isfinite(rawOffset) || rawOffset < -0.5
+                || rawOffset > static_cast<double>(block.sampleCount) - 0.5)
+                return false;
+            frameOffset = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+                std::llround(rawOffset), 0,
+                static_cast<std::int64_t>(block.sampleCount - 1)));
+        }
+
+        lps::RoutedEvent routed;
+        routed.event = resolved.event;
+        routed.sourceVoiceId = resolved.sourceVoiceId;
+        routed.frameOffset = frameOffset;
+        routed.stableOrder = resolved.stableOrder;
+        routed.routeId = players_[voiceIndex].midiRouteId;
+        if (midiCount == midiRoutedEvents_.size())
+            return false;
+        midiRoutedEvents_[midiCount++] = routed;
+
+        routed.routeId = players_[voiceIndex].cvRouteId;
+        if (cvCount == cvRoutedEvents_.size())
+            return false;
+        cvRoutedEvents_[cvCount++] = routed;
+    }
+
+    const auto midiOk = drumRenderer_->renderBlock(
+        block, {midiRoutedEvents_.data(), midiCount});
+    const auto cvOk = cvRenderer_->renderBlock(
+        block, {cvRoutedEvents_.data(), cvCount});
+    return midiOk && cvOk;
+}
+
+void LivePatternSequencerProcessor::resetGraphOutputs() noexcept
+{
+    for (auto& trigger : audibleTriggers_)
+        trigger = {};
+    drumRenderer_->resetOutputs();
+    cvRenderer_->resetOutputs();
 }
 
 juce::AudioProcessorEditor* LivePatternSequencerProcessor::createEditor()
@@ -948,15 +1135,14 @@ void LivePatternSequencerProcessor::setStateInformation(
 
 std::size_t LivePatternSequencerProcessor::playerCountForUi() const noexcept
 {
-    return engine_->playerCount();
+    return players_.size();
 }
 
 std::optional<std::size_t>
 LivePatternSequencerProcessor::masterPlayerIndexForUi() const noexcept
 {
-    const auto masterId = engine_->masterPlayerId();
-    return masterId && masterId->value < playerCountForUi()
-        ? std::optional<std::size_t> { masterId->value }
+    return configuredMasterIndex() < playerCountForUi()
+        ? std::optional<std::size_t> {configuredMasterIndex()}
         : std::nullopt;
 }
 
@@ -973,17 +1159,15 @@ bool LivePatternSequencerProcessor::resetPlayerToMaster(
     if (playerIndex >= playerCountForUi() || playerIsMasterForUi(playerIndex))
         return false;
 
-    const auto playerId = engine_->playerIdAt(playerIndex);
-    return playerId.has_value() && engine_->requestResetToMaster(*playerId);
+    return runtimeGraph_->armCycleCommand(playerIndex);
 }
 
 bool LivePatternSequencerProcessor::playerResetToMasterPendingForUi(
     std::size_t playerIndex) const noexcept
 {
-    const auto playerId = engine_->playerIdAt(playerIndex);
-    return playerId.has_value()
+    return playerIndex < playerCountForUi()
         && !playerIsMasterForUi(playerIndex)
-        && engine_->resetToMasterPending(*playerId);
+        && runtimeGraph_->cycleCommandPending(playerIndex);
 }
 
 int LivePatternSequencerProcessor::currentStepForUi(std::size_t playerIndex) const noexcept
@@ -1441,15 +1625,15 @@ void LivePatternSequencerProcessor::setPlayerMuted(
     std::size_t playerIndex,
     bool muted) noexcept
 {
-    if (const auto playerId = engine_->playerIdAt(playerIndex))
-        engine_->setPlayerMuted(*playerId, muted);
+    if (playerIndex < players_.size())
+        muted_[playerIndex].store(muted, std::memory_order_relaxed);
 }
 
 bool LivePatternSequencerProcessor::playerMutedForUi(
     std::size_t playerIndex) const noexcept
 {
-    const auto playerId = engine_->playerIdAt(playerIndex);
-    return playerId.has_value() && engine_->playerMuted(*playerId);
+    return playerIndex < players_.size()
+        && muted_[playerIndex].load(std::memory_order_relaxed);
 }
 
 void LivePatternSequencerProcessor::setSuppression(
@@ -1457,20 +1641,24 @@ void LivePatternSequencerProcessor::setSuppression(
     std::size_t suppressedIndex,
     bool enabled) noexcept
 {
-    const auto suppressorId = engine_->playerIdAt(suppressorIndex);
-    const auto suppressedId = engine_->playerIdAt(suppressedIndex);
-    if (suppressorId && suppressedId)
-        engine_->setSuppression(*suppressorId, *suppressedId, enabled);
+    if (suppressorIndex < players_.size()
+        && suppressedIndex < players_.size()
+        && suppressorIndex != suppressedIndex)
+    {
+        suppression_[suppressorIndex][suppressedIndex].store(
+            enabled, std::memory_order_relaxed);
+    }
 }
 
 bool LivePatternSequencerProcessor::suppression(
     std::size_t suppressorIndex,
     std::size_t suppressedIndex) const noexcept
 {
-    const auto suppressorId = engine_->playerIdAt(suppressorIndex);
-    const auto suppressedId = engine_->playerIdAt(suppressedIndex);
-    return suppressorId && suppressedId
-        && engine_->suppression(*suppressorId, *suppressedId);
+    return suppressorIndex < players_.size()
+        && suppressedIndex < players_.size()
+        && suppressorIndex != suppressedIndex
+        && suppression_[suppressorIndex][suppressedIndex].load(
+            std::memory_order_relaxed);
 }
 
 void LivePatternSequencerProcessor::updateUiSnapshot() noexcept

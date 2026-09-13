@@ -75,6 +75,62 @@ bool RuntimeGraph::registerVoice(Voice& voice) noexcept
     return true;
 }
 
+bool RuntimeGraph::configureArmedCycleCommand(
+    std::size_t slot,
+    PatternPlayerId source,
+    PlayerRef destination,
+    PlayerCommand command) noexcept
+{
+    if (prepared_ || slot >= armedCycleCommands_.size()
+        || find(source) == nullptr || find(destination) == nullptr
+        || (destination.type == PlayerRefType::pattern
+            && destination.value == source.value))
+    {
+        return false;
+    }
+
+    armedCycleCommands_[slot] = {source, destination, command, true};
+    armedCyclePending_[slot].store(false, std::memory_order_relaxed);
+    return true;
+}
+
+bool RuntimeGraph::armCycleCommand(std::size_t slot) noexcept
+{
+    if (slot >= armedCycleCommands_.size()
+        || !armedCycleCommands_[slot].configured)
+    {
+        return false;
+    }
+    armedCyclePending_[slot].store(true, std::memory_order_release);
+    return true;
+}
+
+bool RuntimeGraph::cycleCommandPending(std::size_t slot) const noexcept
+{
+    return slot < armedCycleCommands_.size()
+        && armedCycleCommands_[slot].configured
+        && armedCyclePending_[slot].load(std::memory_order_acquire);
+}
+
+bool RuntimeGraph::patternHitOccurred(
+    PatternPlayerId source,
+    double ppqPosition) const noexcept
+{
+    constexpr double simultaneousTolerancePpq = 1.0e-9;
+    for (std::size_t index = 0; index < workSize_; ++index)
+    {
+        const auto& signal = work_[index].signal;
+        if (signal.type == PlayerSignalType::patternHit
+            && signal.patternPlayerId == source
+            && std::abs(signal.ppqPosition - ppqPosition)
+                <= simultaneousTolerancePpq)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 PatternPlayer* RuntimeGraph::find(PatternPlayerId id) const noexcept
 {
     for (std::size_t index = 0; index < patternPlayerCount_; ++index)
@@ -356,6 +412,28 @@ void RuntimeGraph::resolveTimestamp(
                 }
             }
 
+            if (item.signal.type == PlayerSignalType::patternCycleBoundary)
+            {
+                for (std::size_t slot = 0;
+                     slot < armedCycleCommands_.size();
+                     ++slot)
+                {
+                    const auto& armed = armedCycleCommands_[slot];
+                    if (!armed.configured || armed.source != item.signal.patternPlayerId
+                        || !armedCyclePending_[slot].exchange(
+                            false, std::memory_order_acq_rel))
+                    {
+                        continue;
+                    }
+                    if (auto* destination = find(armed.destination))
+                    {
+                        PlayerSignalBuffer generated;
+                        destination->command(armed.command, ppq, generated);
+                        (void) appendSignals(generated);
+                    }
+                }
+            }
+
             for (std::size_t bindingIndex = 0;
                  bindingIndex < config_.commandBindingCount;
                  ++bindingIndex)
@@ -456,6 +534,8 @@ bool RuntimeGraph::process(
 
     if (block.transportDiscontinuity)
     {
+        for (std::size_t index = 0; index < voiceCount_; ++index)
+            voices_[index]->reset();
         for (std::size_t index = 0; index < modulationPlayerCount_; ++index)
         {
             PlayerSignalBuffer generated;
