@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/NormalizedValue.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -186,6 +188,117 @@ struct TriggerId
     {
         return left.value == right.value;
     }
+};
+
+enum class PlayerSignalType : std::uint8_t
+{
+    patternCycleBoundary,
+    modulationValue,
+    patternHit
+};
+
+struct PlayerSignal
+{
+    double ppqPosition = 0.0;
+    double nominalStepLengthPpq = 0.0;
+    TriggerId triggerId;
+    PatternPlayerId patternPlayerId;
+    ModulationPlayerId modulationPlayerId;
+    NormalizedValue normalizedValue;
+    std::uint8_t sourceStep = 0;
+    PlayerSignalType type = PlayerSignalType::patternCycleBoundary;
+
+    [[nodiscard]] static constexpr PlayerSignal patternHit(
+        double ppq,
+        PatternPlayerId source,
+        TriggerId id,
+        double nominalStepLength) noexcept
+    {
+        PlayerSignal signal;
+        signal.ppqPosition = ppq;
+        signal.nominalStepLengthPpq = nominalStepLength;
+        signal.triggerId = id;
+        signal.patternPlayerId = source;
+        signal.type = PlayerSignalType::patternHit;
+        return signal;
+    }
+
+    [[nodiscard]] static constexpr PlayerSignal patternCycleBoundary(
+        double ppq,
+        PatternPlayerId source) noexcept
+    {
+        PlayerSignal signal;
+        signal.ppqPosition = ppq;
+        signal.patternPlayerId = source;
+        signal.type = PlayerSignalType::patternCycleBoundary;
+        return signal;
+    }
+
+    [[nodiscard]] static constexpr PlayerSignal modulationValue(
+        double ppq,
+        ModulationPlayerId source,
+        NormalizedValue value,
+        std::uint8_t step) noexcept
+    {
+        PlayerSignal signal;
+        signal.ppqPosition = ppq;
+        signal.modulationPlayerId = source;
+        signal.normalizedValue = value;
+        signal.sourceStep = step;
+        signal.type = PlayerSignalType::modulationValue;
+        return signal;
+    }
+};
+
+static_assert(std::is_trivially_copyable_v<PlayerSignal>);
+
+class PlayerSignalBuffer
+{
+public:
+    static constexpr std::size_t capacity = 128;
+
+    void clear() noexcept
+    {
+        size_ = 0;
+        overflowed_ = false;
+        droppedCount_ = 0;
+    }
+
+    [[nodiscard]] bool push(PlayerSignal signal) noexcept
+    {
+        if (size_ == capacity)
+        {
+            overflowed_ = true;
+            ++droppedCount_;
+            return false;
+        }
+        signals_[size_++] = signal;
+        return true;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    [[nodiscard]] bool overflowed() const noexcept { return overflowed_; }
+    [[nodiscard]] std::size_t droppedCount() const noexcept { return droppedCount_; }
+    [[nodiscard]] const PlayerSignal& operator[](
+        std::size_t index) const noexcept
+    {
+        return signals_[index];
+    }
+    [[nodiscard]] const PlayerSignal* begin() const noexcept
+    {
+        return signals_.data();
+    }
+    [[nodiscard]] const PlayerSignal* end() const noexcept
+    {
+        return signals_.data() + size_;
+    }
+
+private:
+    std::array<PlayerSignal, capacity> signals_ {};
+    std::size_t size_ = 0;
+    bool overflowed_ = false;
+    std::size_t droppedCount_ = 0;
 };
 
 enum class SemanticEventType : std::uint8_t
