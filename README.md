@@ -5,6 +5,10 @@ For the native macOS build and installation workflow, start with `README-MACOS.m
 This project is a deliberately narrow end-to-end proof:
 
 - REAPER supplies transport position and tempo.
+- The editor also provides a local audition Play/Stop clock while REAPER is
+  stopped. It starts from the current host cursor and uses the latest host
+  tempo, but it does not start or stop REAPER's own transport; host playback
+  automatically takes authority when it begins.
 - Independent C++ pattern players drive a configurable number of drum voices.
 - Ten built-in patterns cover basic drum figures and odd-length 3/5/7/9-step pulses.
 - Every drum voice emits its own fixed MIDI note on MIDI channel 1, with velocity driven by an independently selected modulation.

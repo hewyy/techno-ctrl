@@ -101,6 +101,9 @@ public:
         std::size_t playerIndex,
         ModulationLane lane) const noexcept;
     [[nodiscard]] bool playingForUi() const noexcept;
+    void setInternalTransportPlayingForUi(bool playing) noexcept;
+    [[nodiscard]] bool internalTransportPlayingForUi() const noexcept;
+    [[nodiscard]] bool hostTransportPlayingForUi() const noexcept;
     [[nodiscard]] lps::PatternView patternForUi(std::size_t playerIndex = 0) const noexcept;
     [[nodiscard]] juce::String playerNameForUi(std::size_t playerIndex) const;
     [[nodiscard]] bool playerSupportsPatternEditingForUi(
@@ -252,11 +255,17 @@ private:
 
     std::optional<double> expectedNextPpq_;
     bool wasPlaying_ = false;
+    bool internalTransportWasPlaying_ = false;
+    double internalPpqPosition_ = 0.0;
+    double lastKnownTempoBpm_ = 120.0;
 
     std::vector<std::unique_ptr<std::atomic<int>>> currentSteps_;
     std::vector<std::unique_ptr<std::atomic<int>>>
         currentModulationSteps_;
     std::atomic<bool> playing_ { false };
+    std::atomic<bool> internalTransportRequested_ { false };
+    std::atomic<bool> internalTransportPlaying_ { false };
+    std::atomic<bool> hostTransportPlaying_ { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LivePatternSequencerProcessor)
 };

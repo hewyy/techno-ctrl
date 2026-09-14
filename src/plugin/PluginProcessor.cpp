@@ -339,6 +339,11 @@ void LivePatternSequencerProcessor::prepareToPlay(
     runtimeGraph_->prepare(spec);
     expectedNextPpq_.reset();
     wasPlaying_ = false;
+    internalTransportWasPlaying_ = false;
+    internalPpqPosition_ = 0.0;
+    internalTransportRequested_.store(false, std::memory_order_relaxed);
+    internalTransportPlaying_.store(false, std::memory_order_relaxed);
+    hostTransportPlaying_.store(false, std::memory_order_relaxed);
     updateUiSnapshot();
 }
 
@@ -348,6 +353,11 @@ void LivePatternSequencerProcessor::releaseResources()
     runtimeGraph_->resetOutputs();
     expectedNextPpq_.reset();
     wasPlaying_ = false;
+    internalTransportWasPlaying_ = false;
+    internalPpqPosition_ = 0.0;
+    internalTransportRequested_.store(false, std::memory_order_relaxed);
+    internalTransportPlaying_.store(false, std::memory_order_relaxed);
+    hostTransportPlaying_.store(false, std::memory_order_relaxed);
     updateUiSnapshot();
 }
 
@@ -361,21 +371,66 @@ void LivePatternSequencerProcessor::processBlock(
     lps::TimelineBlock block;
     block.sampleRate = getSampleRate();
     block.sampleCount = static_cast<std::uint32_t>(audio.getNumSamples());
+    block.tempoBpm = lastKnownTempoBpm_;
 
+    bool hostPlaying = false;
+    bool hostPpqAvailable = false;
     if (const auto* playHead = getPlayHead())
     {
         if (const auto position = playHead->getPosition())
         {
-            block.playing = position->getIsPlaying();
+            hostPlaying = position->getIsPlaying();
 
             if (const auto bpm = position->getBpm())
-                block.tempoBpm = *bpm;
+            {
+                if (*bpm > 0.0)
+                {
+                    block.tempoBpm = *bpm;
+                    lastKnownTempoBpm_ = *bpm;
+                }
+            }
 
             if (const auto ppq = position->getPpqPosition())
+            {
                 block.ppqStart = *ppq;
+                hostPpqAvailable = true;
+            }
             else
-                block.playing = false;
+                hostPlaying = false;
         }
+    }
+
+    hostTransportPlaying_.store(hostPlaying, std::memory_order_relaxed);
+    const bool wasInternalTransport = internalTransportWasPlaying_;
+    bool usingInternalTransport = false;
+    if (hostPlaying)
+    {
+        block.playing = true;
+        internalTransportRequested_.store(false, std::memory_order_release);
+        internalTransportPlaying_.store(false, std::memory_order_relaxed);
+        internalTransportWasPlaying_ = false;
+    }
+    else if (internalTransportRequested_.load(std::memory_order_acquire))
+    {
+        if (!internalTransportWasPlaying_)
+        {
+            internalPpqPosition_ = hostPpqAvailable
+                ? block.ppqStart
+                : 0.0;
+        }
+        block.playing = true;
+        block.tempoBpm = lastKnownTempoBpm_;
+        block.ppqStart = internalPpqPosition_;
+        usingInternalTransport = true;
+        internalTransportWasPlaying_ = true;
+        internalTransportPlaying_.store(true, std::memory_order_relaxed);
+    }
+    else
+    {
+        block.playing = false;
+        internalTransportWasPlaying_ = false;
+        internalPpqPosition_ = 0.0;
+        internalTransportPlaying_.store(false, std::memory_order_relaxed);
     }
 
     const double ppqPerSample = block.tempoBpm > 0.0 && block.sampleRate > 0.0
@@ -383,11 +438,14 @@ void LivePatternSequencerProcessor::processBlock(
         : 0.0;
     block.ppqEnd = block.ppqStart
         + static_cast<double>(block.sampleCount) * ppqPerSample;
+    if (usingInternalTransport)
+        internalPpqPosition_ = block.ppqEnd;
 
     if (block.playing)
     {
         const double tolerance = ppqPerSample * 4.0 + 1.0e-7;
         block.transportDiscontinuity = !wasPlaying_
+            || wasInternalTransport != usingInternalTransport
             || (expectedNextPpq_.has_value()
                 && std::abs(block.ppqStart - *expectedNextPpq_) > tolerance);
 
@@ -697,6 +755,23 @@ int LivePatternSequencerProcessor::currentModulationStepForUi(
 bool LivePatternSequencerProcessor::playingForUi() const noexcept
 {
     return playing_.load(std::memory_order_relaxed);
+}
+
+void LivePatternSequencerProcessor::setInternalTransportPlayingForUi(
+    bool playing) noexcept
+{
+    internalTransportRequested_.store(playing, std::memory_order_release);
+    internalTransportPlaying_.store(playing, std::memory_order_relaxed);
+}
+
+bool LivePatternSequencerProcessor::internalTransportPlayingForUi() const noexcept
+{
+    return internalTransportPlaying_.load(std::memory_order_relaxed);
+}
+
+bool LivePatternSequencerProcessor::hostTransportPlayingForUi() const noexcept
+{
+    return hostTransportPlaying_.load(std::memory_order_relaxed);
 }
 
 lps::PatternView LivePatternSequencerProcessor::patternForUi(std::size_t playerIndex) const noexcept

@@ -5,6 +5,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -48,6 +49,45 @@ private:
         LivePatternSequencerEditor& editor_;
     };
 
+    class ControlPaneComponent final : public juce::Component
+    {
+    public:
+        explicit ControlPaneComponent(LivePatternSequencerEditor&) noexcept;
+
+        void paint(juce::Graphics&) override;
+        void resized() override;
+
+    private:
+        LivePatternSequencerEditor& editor_;
+    };
+
+    class PagedViewport final : public juce::Viewport
+    {
+    public:
+        void mouseWheelMove(
+            const juce::MouseEvent&,
+            const juce::MouseWheelDetails&) override;
+    };
+
+    class SpeedSelector final : public juce::ComboBox
+    {
+    public:
+        void paint(juce::Graphics&) override;
+    };
+
+    class UtilityButton final : public juce::TextButton
+    {
+    public:
+        enum class Kind { previousPage, nextPage, play, pause, matrix };
+
+        explicit UtilityButton(Kind kind) noexcept;
+        void paintButton(juce::Graphics&, bool isMouseOverButton,
+            bool isButtonDown) override;
+
+    private:
+        Kind kind_;
+    };
+
     class ModulationCell final : public juce::Slider
     {
     public:
@@ -68,8 +108,14 @@ private:
 
     void timerCallback() override;
     void paintContent(juce::Graphics&);
+    void paintModulationPreview(
+        juce::Graphics&,
+        std::size_t playerIndex,
+        juce::Rectangle<int> bounds);
+    void paintControlPane(juce::Graphics&);
     void paintMatrix(juce::Graphics&);
     void resizedContent();
+    void resizedControlPane();
     void resizedMatrix();
     void showSuppressionMatrix();
     void matrixMouseDown(const juce::MouseEvent&);
@@ -94,6 +140,17 @@ private:
         LivePatternSequencerProcessor::SaveModulationResult result);
     void refreshPatternSelectors();
     void refreshModulationSelectors();
+    void selectVoice(std::size_t playerIndex, bool additiveSelection);
+    void refreshSelectedControls(bool force = false);
+    void applyToSelectedPatternPlayers(
+        const std::function<void(std::size_t)>& action);
+    void applyToSelectedPlayers(
+        const std::function<void(std::size_t)>& action);
+    [[nodiscard]] std::size_t selectedVoiceCount() const noexcept;
+    [[nodiscard]] std::size_t controlPatternPlayerIndex() const noexcept;
+    [[nodiscard]] std::size_t pageSize() const noexcept;
+    void pageVoices(int direction);
+    void updatePageButtons();
     void refreshModulationControls(
         std::size_t playerIndex,
         ModulationLane lane,
@@ -112,9 +169,22 @@ private:
     const std::size_t playerCount_;
     juce::LookAndFeel_V4 lookAndFeel_;
     ContentComponent content_;
-    juce::Viewport viewport_;
+    PagedViewport viewport_;
+    ControlPaneComponent controlPane_;
     MatrixComponent matrix_;
-    juce::TextButton suppressionButton_;
+    UtilityButton suppressionButton_;
+    UtilityButton previousPageButton_;
+    UtilityButton nextPageButton_;
+    UtilityButton globalPlayButton_;
+    UtilityButton globalStopButton_;
+    juce::Label selectionLabel_;
+    std::unique_ptr<juce::TextButton> controlPatternMenuButton_;
+    SpeedSelector controlSpeedSelector_;
+    juce::TextButton controlResetButton_;
+    juce::TextButton controlShiftLeftButton_;
+    juce::TextButton controlShiftRightButton_;
+    juce::TextButton controlMuteButton_;
+    juce::TextButton controlUnmuteButton_;
     juce::TextButton suppressionCloseButton_;
     juce::Component::SafePointer<juce::DialogWindow> suppressionWindow_;
     std::vector<std::unique_ptr<juce::TextButton>> patternMenuButtons_;
@@ -128,6 +198,7 @@ private:
     std::vector<std::unique_ptr<juce::TextButton>> offsetLeftButtons_;
     std::vector<std::unique_ptr<juce::TextButton>> offsetRightButtons_;
     std::vector<std::unique_ptr<juce::TextButton>> muteButtons_;
+    std::vector<std::unique_ptr<juce::TextButton>> voiceSelectButtons_;
     std::array<std::vector<std::unique_ptr<juce::ComboBox>>,
         LivePatternSequencerProcessor::modulationLaneCount>
         modulationSelectors_;
@@ -148,6 +219,9 @@ private:
         LivePatternSequencerProcessor::modulationLaneCount>
         displayedModulationModified_;
     std::vector<bool> displayedResetToMasterPending_;
+    std::vector<bool> selectedVoices_;
+    std::size_t primaryPlayerIndex_ = 0;
+    std::size_t firstVisiblePlayer_ = 0;
 
     enum class DraggedRangeHandle { none, start, end };
     DraggedRangeHandle draggedRangeHandle_ = DraggedRangeHandle::none;
@@ -157,6 +231,8 @@ private:
     bool rangeHandleWasDragged_ = false;
 
     [[nodiscard]] juce::Rectangle<int> cellsAreaForPlayer(std::size_t playerIndex) const;
+    [[nodiscard]] juce::Rectangle<int> modulationPreviewAreaForPlayer(
+        std::size_t playerIndex) const;
     [[nodiscard]] int cellWidth() const;
     [[nodiscard]] int patternPanelHeight() const;
     [[nodiscard]] int playerStride() const;
