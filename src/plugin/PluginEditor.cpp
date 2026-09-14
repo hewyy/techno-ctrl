@@ -69,6 +69,7 @@ constexpr int patternGridLeft = contentHorizontalPadding
     + playerPanelHorizontalPadding + clickTargetSize
     + perVoiceControlGap + clickTargetSize
     + perVoiceControlGap + clickTargetSize
+    + perVoiceControlGap + clickTargetSize
     + perVoiceControlGap + modulationPreviewWidth
     + controlsToGridGap;
 constexpr int modulationCellHeight = clickTargetSize;
@@ -1029,9 +1030,10 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             LaneMenuButton::Kind::pattern));
         auto& patternMenuButton = *patternMenuButtons_.back();
         patternMenuButton.setButtonText(patternMenuLabel(playerIndex, false));
-        patternMenuButton.setTooltip("Choose a pattern, playback speed, or save");
+        patternMenuButton.setTooltip("Choose a pattern for this voice");
         patternMenuButton.onClick = [this, playerIndex]
         {
+            selectVoice(playerIndex, false);
             showPatternMenu(playerIndex);
         };
         content_.addAndMakeVisible(patternMenuButton);
@@ -1328,7 +1330,8 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
 
     for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
     {
-        patternMenuButtons_[playerIndex]->setVisible(false);
+        patternMenuButtons_[playerIndex]->setVisible(
+            processor_.playerSupportsPatternEditingForUi(playerIndex));
         offsetLeftButtons_[playerIndex]->setVisible(false);
         offsetRightButtons_[playerIndex]->setVisible(false);
         for (const auto lane : modulationLanes)
@@ -1517,6 +1520,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     addAndMakeVisible(globalStopButton_);
 
     suppressionButton_.setTooltip("Open or close the suppression matrix");
+    suppressionButton_.setClickingTogglesState(true);
     suppressionButton_.onClick = [this] { showSuppressionMatrix(); };
     addAndMakeVisible(suppressionButton_);
     addAndMakeVisible(controlPane_);
@@ -1624,6 +1628,8 @@ void LivePatternSequencerEditor::resizedContent()
         + perVoiceControlGap;
     constexpr int muteX = resetX + clickTargetSize
         + perVoiceControlGap;
+    constexpr int patternPickerX = muteX + clickTargetSize
+        + perVoiceControlGap;
     for (std::size_t index = 0; index < voiceSelectButtons_.size(); ++index)
     {
         const int y = static_cast<int>(index) * playerStride();
@@ -1643,6 +1649,11 @@ void LivePatternSequencerEditor::resizedContent()
             buttonSize);
         muteButtons_[index]->setBounds(
             muteX + slotInset,
+            controlY,
+            buttonSize,
+            buttonSize);
+        patternMenuButtons_[index]->setBounds(
+            patternPickerX + slotInset,
             controlY,
             buttonSize,
             buttonSize);
@@ -1769,6 +1780,12 @@ void LivePatternSequencerEditor::timerCallback()
         juce::dontSendNotification);
     globalPlayButton_.setEnabled(!hostPlaying && !internalPlaying);
     globalStopButton_.setEnabled(!hostPlaying && internalPlaying);
+    if (suppressionWindow_ == nullptr
+        && suppressionButton_.getToggleState())
+    {
+        suppressionButton_.setToggleState(
+            false, juce::dontSendNotification);
+    }
     content_.repaint();
 }
 
@@ -3076,9 +3093,12 @@ void LivePatternSequencerEditor::showSuppressionMatrix()
 {
     if (suppressionWindow_ != nullptr)
     {
+        suppressionButton_.setToggleState(false, juce::dontSendNotification);
         suppressionWindow_->closeButtonPressed();
         return;
     }
+
+    suppressionButton_.setToggleState(true, juce::dontSendNotification);
 
     matrix_.setSize(
         matrixPanelWidth(),
@@ -3093,6 +3113,39 @@ void LivePatternSequencerEditor::showSuppressionMatrix()
     options.useNativeTitleBar = true;
     options.resizable = false;
     suppressionWindow_ = options.launchAsync();
+
+    if (suppressionWindow_ == nullptr)
+    {
+        suppressionButton_.setToggleState(false, juce::dontSendNotification);
+        return;
+    }
+
+    const auto anchor = suppressionButton_.getScreenBounds();
+    auto popupBounds = suppressionWindow_->getBounds();
+    popupBounds.setPosition(
+        anchor.getRight() - popupBounds.getWidth(),
+        anchor.getY() - popupBounds.getHeight() - sectionGap * 4);
+
+    if (const auto* display = juce::Desktop::getInstance()
+            .getDisplays().getDisplayForRect(anchor))
+    {
+        const auto available = display->userBounds.toNearestInt();
+        if (popupBounds.getY() < available.getY())
+            popupBounds.setY(anchor.getBottom() + sectionGap * 4);
+        popupBounds.setPosition(
+            juce::jlimit(
+                available.getX(),
+                std::max(available.getX(),
+                    available.getRight() - popupBounds.getWidth()),
+                popupBounds.getX()),
+            juce::jlimit(
+                available.getY(),
+                std::max(available.getY(),
+                    available.getBottom() - popupBounds.getHeight()),
+                popupBounds.getY()));
+    }
+
+    suppressionWindow_->setBounds(popupBounds);
 }
 
 void LivePatternSequencerEditor::showPatternMenu(std::size_t playerIndex)
