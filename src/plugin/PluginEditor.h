@@ -36,13 +36,13 @@ private:
         LivePatternSequencerEditor& editor_;
     };
 
-    class MatrixComponent final : public juce::Component
+    class MatrixComponent final : public juce::PopupMenu::CustomComponent
     {
     public:
         explicit MatrixComponent(LivePatternSequencerEditor&) noexcept;
 
+        void getIdealSize(int& idealWidth, int& idealHeight) override;
         void paint(juce::Graphics&) override;
-        void resized() override;
         void mouseDown(const juce::MouseEvent&) override;
 
     private:
@@ -113,13 +113,14 @@ private:
         std::size_t playerIndex,
         juce::Rectangle<int> bounds);
     void paintControlPane(juce::Graphics&);
-    void paintMatrix(juce::Graphics&);
+    void paintMatrix(juce::Graphics&, const juce::Component&);
     void resizedContent();
     void resizedControlPane();
-    void resizedMatrix();
     void showSuppressionMatrix();
-    void matrixMouseDown(const juce::MouseEvent&);
-    void showPatternMenu(std::size_t playerIndex);
+    void matrixMouseDown(const juce::MouseEvent&, juce::Component&);
+    void showPatternMenu(
+        std::size_t playerIndex,
+        juce::Component* targetComponent);
     void showModulationMenu(std::size_t playerIndex, ModulationLane lane);
     void contentMouseDown(const juce::MouseEvent&);
     void contentMouseDrag(const juce::MouseEvent&);
@@ -171,7 +172,6 @@ private:
     ContentComponent content_;
     PagedViewport viewport_;
     ControlPaneComponent controlPane_;
-    MatrixComponent matrix_;
     UtilityButton suppressionButton_;
     UtilityButton previousPageButton_;
     UtilityButton nextPageButton_;
@@ -185,8 +185,7 @@ private:
     juce::TextButton controlShiftRightButton_;
     juce::TextButton controlMuteButton_;
     juce::TextButton controlUnmuteButton_;
-    juce::TextButton suppressionCloseButton_;
-    juce::Component::SafePointer<juce::DialogWindow> suppressionWindow_;
+    bool suppressionMenuOpen_ = false;
     std::vector<std::unique_ptr<juce::TextButton>> patternMenuButtons_;
     std::array<std::vector<std::unique_ptr<juce::TextButton>>,
         LivePatternSequencerProcessor::modulationLaneCount>

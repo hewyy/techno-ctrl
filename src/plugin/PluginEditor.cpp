@@ -333,25 +333,33 @@ public:
 
     void paint(juce::Graphics& graphics) override
     {
-        if (isItemHighlighted())
+        const auto bounds = getLocalBounds();
+        if (selected_)
+        {
+            graphics.setColour(juce::Colour(uiBlue).withAlpha(0.22f));
+            graphics.fillRect(bounds);
+            graphics.setColour(juce::Colour(uiBlue));
+            graphics.drawRect(bounds.reduced(1), 2);
+        }
+        else if (isItemHighlighted())
+        {
             graphics.fillAll(juce::Colour(uiBlue).withAlpha(0.3f));
+        }
+
+        graphics.setOpacity(selected_ ? 1.0f
+            : (isItemHighlighted() ? 0.82f : 0.50f));
 
         const int stepCount = juce::jlimit(
             1, static_cast<int>(lps::Pattern::maxLength),
             static_cast<int>(pattern_.length));
         constexpr int gap = 2;
-        const int availableWidth = getWidth() - 20;
+        constexpr int horizontalPadding = 10;
+        const int availableWidth = getWidth() - horizontalPadding * 2;
         const int cellSize = juce::jlimit(
             6, 20, (availableWidth - gap * (stepCount - 1)) / stepCount);
         const int previewWidth = stepCount * cellSize + (stepCount - 1) * gap;
-        int x = 10;
+        int x = horizontalPadding;
         const int y = (getHeight() - cellSize) / 2;
-
-        if (selected_)
-        {
-            graphics.setColour(juce::Colour(uiBlue));
-            graphics.fillRect(2, 4, 4, getHeight() - 8);
-        }
 
         for (int step = 0; step < stepCount; ++step)
         {
@@ -370,7 +378,7 @@ public:
         {
             graphics.setColour(juce::Colour(uiBlack));
             graphics.drawVerticalLine(
-                10 + previewWidth,
+                horizontalPadding + previewWidth,
                 static_cast<float>(y),
                 static_cast<float>(y + cellSize));
         }
@@ -697,25 +705,30 @@ void LivePatternSequencerEditor::SpeedSelector::paint(juce::Graphics& graphics)
 
 LivePatternSequencerEditor::MatrixComponent::MatrixComponent(
     LivePatternSequencerEditor& editor) noexcept
-    : editor_(editor)
+    : juce::PopupMenu::CustomComponent(false),
+      editor_(editor)
 {
     setOpaque(true);
 }
 
-void LivePatternSequencerEditor::MatrixComponent::paint(juce::Graphics& graphics)
+void LivePatternSequencerEditor::MatrixComponent::getIdealSize(
+    int& idealWidth,
+    int& idealHeight)
 {
-    editor_.paintMatrix(graphics);
+    idealWidth = editor_.matrixPanelWidth();
+    idealHeight = matrixGridTop
+        + static_cast<int>(editor_.playerCount_) * matrixCellHeight + 10;
 }
 
-void LivePatternSequencerEditor::MatrixComponent::resized()
+void LivePatternSequencerEditor::MatrixComponent::paint(juce::Graphics& graphics)
 {
-    editor_.resizedMatrix();
+    editor_.paintMatrix(graphics, *this);
 }
 
 void LivePatternSequencerEditor::MatrixComponent::mouseDown(
     const juce::MouseEvent& event)
 {
-    editor_.matrixMouseDown(event);
+    editor_.matrixMouseDown(event, *this);
 }
 
 LivePatternSequencerEditor::ModulationCell::ModulationCell()
@@ -900,7 +913,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
       playerCount_(processorToEdit.playerCountForUi()),
       content_(*this),
       controlPane_(*this),
-      matrix_(*this),
       suppressionButton_(UtilityButton::Kind::matrix),
       previousPageButton_(UtilityButton::Kind::previousPage),
       nextPageButton_(UtilityButton::Kind::nextPage),
@@ -1034,7 +1046,8 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         patternMenuButton.onClick = [this, playerIndex]
         {
             selectVoice(playerIndex, false);
-            showPatternMenu(playerIndex);
+            showPatternMenu(
+                playerIndex, patternMenuButtons_[playerIndex].get());
         };
         content_.addAndMakeVisible(patternMenuButton);
 
@@ -1373,7 +1386,8 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     {
         const auto patternPlayerIndex = controlPatternPlayerIndex();
         if (patternPlayerIndex < playerCount_)
-            showPatternMenu(patternPlayerIndex);
+            showPatternMenu(
+                patternPlayerIndex, controlPatternMenuButton_.get());
     };
     controlPane_.addAndMakeVisible(*controlPatternMenuButton_);
 
@@ -1525,15 +1539,6 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     addAndMakeVisible(suppressionButton_);
     addAndMakeVisible(controlPane_);
 
-    suppressionCloseButton_.setButtonText("CLOSE");
-    suppressionCloseButton_.setTooltip("Close the suppression matrix");
-    suppressionCloseButton_.setColour(
-        juce::TextButton::buttonColourId, juce::Colour(uiRed));
-    suppressionCloseButton_.setColour(
-        juce::TextButton::textColourOffId, juce::Colour(darkGray));
-    suppressionCloseButton_.onClick = [this] { showSuppressionMatrix(); };
-    matrix_.addAndMakeVisible(suppressionCloseButton_);
-
     refreshSelectedControls(true);
 
     content_.setSize(requiredContentWidth(), 1);
@@ -1560,11 +1565,6 @@ LivePatternSequencerEditor::~LivePatternSequencerEditor()
     stopTimer();
     setLookAndFeel(nullptr);
     viewport_.setViewedComponent(nullptr, false);
-    if (suppressionWindow_ != nullptr)
-    {
-        suppressionWindow_->clearContentComponent();
-        suppressionWindow_->exitModalState(0);
-    }
 }
 
 void LivePatternSequencerEditor::paint(juce::Graphics& graphics)
@@ -1735,13 +1735,9 @@ void LivePatternSequencerEditor::resizedControlPane()
 
 }
 
-void LivePatternSequencerEditor::resizedMatrix()
-{
-    suppressionCloseButton_.setBounds(matrix_.getWidth() - 92, 10, 78, 32);
-}
-
 void LivePatternSequencerEditor::matrixMouseDown(
-    const juce::MouseEvent& event)
+    const juce::MouseEvent& event,
+    juce::Component& matrix)
 {
     const int relativeX = event.x - matrixGridLeft;
     const int relativeY = event.y - matrixGridTop;
@@ -1755,7 +1751,7 @@ void LivePatternSequencerEditor::matrixMouseDown(
 
     processor_.setSuppression(
         row, column, !processor_.suppression(row, column));
-    matrix_.repaint();
+    matrix.repaint();
 }
 
 void LivePatternSequencerEditor::timerCallback()
@@ -1780,12 +1776,6 @@ void LivePatternSequencerEditor::timerCallback()
         juce::dontSendNotification);
     globalPlayButton_.setEnabled(!hostPlaying && !internalPlaying);
     globalStopButton_.setEnabled(!hostPlaying && internalPlaying);
-    if (suppressionWindow_ == nullptr
-        && suppressionButton_.getToggleState())
-    {
-        suppressionButton_.setToggleState(
-            false, juce::dontSendNotification);
-    }
     content_.repaint();
 }
 
@@ -3091,64 +3081,40 @@ void LivePatternSequencerEditor::paintControlPane(juce::Graphics& graphics)
 
 void LivePatternSequencerEditor::showSuppressionMatrix()
 {
-    if (suppressionWindow_ != nullptr)
+    if (suppressionMenuOpen_)
     {
+        suppressionMenuOpen_ = false;
         suppressionButton_.setToggleState(false, juce::dontSendNotification);
-        suppressionWindow_->closeButtonPressed();
+        juce::PopupMenu::dismissAllActiveMenus();
         return;
     }
 
+    suppressionMenuOpen_ = true;
     suppressionButton_.setToggleState(true, juce::dontSendNotification);
+    juce::PopupMenu menu;
+    menu.addSectionHeader("SUPPRESSION MATRIX");
+    menu.addCustomItem(
+        1,
+        std::make_unique<MatrixComponent>(*this),
+        nullptr,
+        "Suppression Matrix");
 
-    matrix_.setSize(
-        matrixPanelWidth(),
-        matrixGridTop + static_cast<int>(playerCount_) * matrixCellHeight + 10);
-
-    juce::DialogWindow::LaunchOptions options;
-    options.dialogTitle = "Suppression Matrix";
-    options.dialogBackgroundColour = juce::Colour(background);
-    options.content.setNonOwned(&matrix_);
-    options.componentToCentreAround = this;
-    options.escapeKeyTriggersCloseButton = true;
-    options.useNativeTitleBar = true;
-    options.resizable = false;
-    suppressionWindow_ = options.launchAsync();
-
-    if (suppressionWindow_ == nullptr)
-    {
-        suppressionButton_.setToggleState(false, juce::dontSendNotification);
-        return;
-    }
-
-    const auto anchor = suppressionButton_.getScreenBounds();
-    auto popupBounds = suppressionWindow_->getBounds();
-    popupBounds.setPosition(
-        anchor.getRight() - popupBounds.getWidth(),
-        anchor.getY() - popupBounds.getHeight() - sectionGap * 4);
-
-    if (const auto* display = juce::Desktop::getInstance()
-            .getDisplays().getDisplayForRect(anchor))
-    {
-        const auto available = display->userBounds.toNearestInt();
-        if (popupBounds.getY() < available.getY())
-            popupBounds.setY(anchor.getBottom() + sectionGap * 4);
-        popupBounds.setPosition(
-            juce::jlimit(
-                available.getX(),
-                std::max(available.getX(),
-                    available.getRight() - popupBounds.getWidth()),
-                popupBounds.getX()),
-            juce::jlimit(
-                available.getY(),
-                std::max(available.getY(),
-                    available.getBottom() - popupBounds.getHeight()),
-                popupBounds.getY()));
-    }
-
-    suppressionWindow_->setBounds(popupBounds);
+    const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
+    menu.showMenuAsync(
+        juce::PopupMenu::Options {}.withTargetComponent(&suppressionButton_),
+        [safeThis](int)
+        {
+            if (safeThis == nullptr)
+                return;
+            safeThis->suppressionMenuOpen_ = false;
+            safeThis->suppressionButton_.setToggleState(
+                false, juce::dontSendNotification);
+        });
 }
 
-void LivePatternSequencerEditor::showPatternMenu(std::size_t playerIndex)
+void LivePatternSequencerEditor::showPatternMenu(
+    std::size_t playerIndex,
+    juce::Component* targetComponent)
 {
     if (playerIndex >= playerCount_ || playerIndex >= patternMenuButtons_.size())
         return;
@@ -3180,7 +3146,7 @@ void LivePatternSequencerEditor::showPatternMenu(std::size_t playerIndex)
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
     menu.showMenuAsync(
         juce::PopupMenu::Options {}
-            .withTargetComponent(controlPatternMenuButton_.get()),
+            .withTargetComponent(targetComponent),
         [safeThis, playerIndex](int result)
         {
             if (safeThis == nullptr || result == 0)
@@ -3279,10 +3245,12 @@ void LivePatternSequencerEditor::showModulationMenu(
         });
 }
 
-void LivePatternSequencerEditor::paintMatrix(juce::Graphics& graphics)
+void LivePatternSequencerEditor::paintMatrix(
+    juce::Graphics& graphics,
+    const juce::Component& matrix)
 {
     graphics.fillAll(juce::Colour(background));
-    const auto panelBounds = matrix_.getLocalBounds();
+    const auto panelBounds = matrix.getLocalBounds();
     graphics.setColour(juce::Colour(panel));
     graphics.fillRoundedRectangle(panelBounds.toFloat(), 7.0f);
     graphics.setColour(juce::Colour(border));
@@ -3292,7 +3260,7 @@ void LivePatternSequencerEditor::paintMatrix(juce::Graphics& graphics)
     graphics.setColour(juce::Colour(primaryText));
     graphics.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
     graphics.drawText("SUPPRESSION: ROW suppresses COLUMN", 16, 14,
-        matrix_.getWidth() - 32, 24,
+        matrix.getWidth() - 32, 24,
         juce::Justification::centredLeft);
 
     for (std::size_t row = 0; row < playerCount_; ++row)
