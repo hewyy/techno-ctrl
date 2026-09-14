@@ -250,6 +250,120 @@ private:
     bool selected_ = false;
 };
 
+class ModulationPreviewMenuItem final : public juce::PopupMenu::CustomComponent
+{
+public:
+    ModulationPreviewMenuItem(lps::Modulation modulation, bool selected)
+        : juce::PopupMenu::CustomComponent(true),
+          modulation_(modulation),
+          selected_(selected)
+    {
+    }
+
+    void getIdealSize(int& idealWidth, int& idealHeight) override
+    {
+        idealWidth = 310;
+        idealHeight = 76;
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        if (isItemHighlighted())
+            graphics.fillAll(juce::Colour(uiBlue).withAlpha(0.3f));
+
+        if (selected_)
+        {
+            graphics.setColour(juce::Colour(uiBlue));
+            graphics.fillRect(2, 4, 4, getHeight() - 8);
+        }
+
+        const juce::Rectangle<float> graphBounds {
+            12.0f,
+            7.0f,
+            static_cast<float>(getWidth()) - 24.0f,
+            36.0f
+        };
+
+        const auto valueCount = juce::jlimit(
+            1,
+            static_cast<int>(lps::Modulation::maxLength),
+            static_cast<int>(modulation_.length));
+        std::array<juce::Point<float>, lps::Modulation::maxLength> points;
+        for (int index = 0; index < valueCount; ++index)
+        {
+            const float proportion = valueCount == 1
+                ? 0.5f
+                : static_cast<float>(index) / static_cast<float>(valueCount - 1);
+            points[static_cast<std::size_t>(index)] = {
+                graphBounds.getX() + graphBounds.getWidth() * proportion,
+                graphBounds.getBottom()
+                    - graphBounds.getHeight()
+                        * modulation_.values[static_cast<std::size_t>(index)].toFloat()
+            };
+        }
+
+        juce::Path curve;
+        if (valueCount > 1)
+        {
+            curve.startNewSubPath(points[0]);
+            for (int index = 1; index < valueCount; ++index)
+            {
+                const auto previous = points[static_cast<std::size_t>(index - 1)];
+                const auto current = points[static_cast<std::size_t>(index)];
+                const float controlDistance = (current.getX() - previous.getX()) / 3.0f;
+                curve.cubicTo(
+                    previous.getX() + controlDistance, previous.getY(),
+                    current.getX() - controlDistance, current.getY(),
+                    current.getX(), current.getY());
+            }
+        }
+
+        if (valueCount > 1)
+        {
+            graphics.setColour(juce::Colour(warmIvory));
+            graphics.strokePath(
+                curve,
+                juce::PathStrokeType(
+                    2.2f,
+                    juce::PathStrokeType::curved,
+                    juce::PathStrokeType::rounded));
+        }
+
+        graphics.setColour(juce::Colour(uiYellow));
+        for (int index = 0; index < valueCount; ++index)
+        {
+            const auto point = points[static_cast<std::size_t>(index)];
+            graphics.fillEllipse(
+                point.getX() - 2.5f, point.getY() - 2.5f, 5.0f, 5.0f);
+        }
+
+        graphics.setColour(juce::Colour(primaryText));
+        graphics.setFont(juce::Font(juce::FontOptions(8.0f)));
+        constexpr int labelWidth = 22;
+        constexpr int labelHeight = 12;
+        for (int index = 0; index < valueCount; ++index)
+        {
+            const auto point = points[static_cast<std::size_t>(index)];
+            const auto value = modulation_.values[static_cast<std::size_t>(index)].raw
+                / 257u;
+            const int labelY = 46 + (index % 2) * labelHeight;
+            graphics.drawFittedText(
+                juce::String(static_cast<int>(value)),
+                juce::roundToInt(point.getX()) - labelWidth / 2,
+                labelY,
+                labelWidth,
+                labelHeight,
+                juce::Justification::centred,
+                1,
+                0.7f);
+        }
+    }
+
+private:
+    lps::Modulation modulation_;
+    bool selected_ = false;
+};
+
 class MuteButton final : public juce::TextButton
 {
 public:
@@ -1051,88 +1165,15 @@ void LivePatternSequencerEditor::timerCallback()
 
 void LivePatternSequencerEditor::beginSavePlayerPattern(std::size_t playerIndex)
 {
-    handleSaveResult(playerIndex, processor_.savePlayerPattern(playerIndex));
-}
-
-void LivePatternSequencerEditor::promptForPatternName(
-    std::size_t playerIndex,
-    lps::Pattern candidatePattern)
-{
-    constexpr auto nameEditorId = "patternName";
-    auto* alert = new juce::AlertWindow(
-        "Save Pattern",
-        "This loop is not in the library yet. Enter a name for the new pattern.",
-        juce::MessageBoxIconType::QuestionIcon,
-        this);
-    alert->addTextEditor(nameEditorId, {}, "Name:");
-    alert->addButton(
-        "Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
-    alert->addButton(
-        "Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-
-    const juce::Component::SafePointer<juce::Button> safeSaveButton(
-        alert->getButton("Save"));
-    if (safeSaveButton != nullptr)
-        safeSaveButton->setEnabled(false);
-
-    // Keep the editor contents independently so the callback does not depend
-    // on the AlertWindow object's lifetime.
-    auto enteredName = std::make_shared<juce::String>();
-    if (auto* textEditor = alert->getTextEditor(nameEditorId))
-    {
-        const juce::Component::SafePointer<juce::TextEditor> safeTextEditor(textEditor);
-        textEditor->onTextChange = [safeTextEditor, safeSaveButton, enteredName]
-        {
-            if (safeTextEditor != nullptr)
-                *enteredName = safeTextEditor->getText();
-            if (safeSaveButton != nullptr)
-                safeSaveButton->setEnabled(!enteredName->trim().isEmpty());
-        };
-    }
-
-    const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
-    alert->enterModalState(
-        true,
-        juce::ModalCallbackFunction::create(
-            [safeThis, enteredName, playerIndex, candidatePattern](int result)
-            {
-                if (result != 1 || safeThis == nullptr)
-                    return;
-
-                const auto name = enteredName->trim();
-                if (name.isEmpty())
-                {
-                    safeThis->showSaveWarning(
-                        "Enter a name before saving the new pattern.");
-                    return;
-                }
-
-                const auto saveResult = safeThis->processor_.savePlayerPattern(
-                    playerIndex, candidatePattern, name);
-                if (saveResult.status
-                    == LivePatternSequencerProcessor::SavePatternStatus::needsName)
-                {
-                    safeThis->showSaveWarning(
-                        "Enter a name before saving the new pattern.");
-                    return;
-                }
-
-                safeThis->handleSaveResult(playerIndex, saveResult);
-            }),
-        true);
+    handleSaveResult(processor_.savePlayerPattern(playerIndex));
 }
 
 void LivePatternSequencerEditor::handleSaveResult(
-    std::size_t playerIndex,
     LivePatternSequencerProcessor::SavePatternResult result)
 {
     using Status = LivePatternSequencerProcessor::SavePatternStatus;
     switch (result.status)
     {
-        case Status::needsName:
-            promptForPatternName(playerIndex, result.candidatePattern);
-            return;
-
         case Status::selectedExisting:
         case Status::savedNew:
             refreshPatternSelectors();
@@ -2086,17 +2127,26 @@ void LivePatternSequencerEditor::showModulationMenu(
          modulationIndex < processor_.modulationCountForUi();
          ++modulationIndex)
     {
-        menu.addItem(
+        const auto modulation = processor_.modulationAtForUi(modulationIndex);
+        if (modulation.length <= 1)
+            continue;
+
+        menu.addCustomItem(
             static_cast<int>(modulationIndex + 1),
-            processor_.modulationNameForUi(modulationIndex),
-            true,
-            modulationIndex == selected);
+            std::make_unique<ModulationPreviewMenuItem>(
+                modulation,
+                modulationIndex == selected),
+            nullptr,
+            processor_.modulationNameForUi(modulationIndex));
     }
     menu.addSeparator();
+    const auto editedModulation =
+        processor_.modulationForUi(playerIndex, lane);
     menu.addItem(
         saveItemId,
         "SAVE MODULATION",
-        processor_.playerModulationModifiedForUi(playerIndex, lane));
+        editedModulation.length > 1
+            && processor_.playerModulationModifiedForUi(playerIndex, lane));
 
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
     menu.showMenuAsync(

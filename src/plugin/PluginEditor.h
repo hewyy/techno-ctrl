@@ -79,11 +79,7 @@ private:
     void contentMouseDrag(const juce::MouseEvent&);
     void contentMouseUp(const juce::MouseEvent&);
     void beginSavePlayerPattern(std::size_t playerIndex);
-    void promptForPatternName(
-        std::size_t playerIndex,
-        lps::Pattern candidatePattern);
     void handleSaveResult(
-        std::size_t playerIndex,
         LivePatternSequencerProcessor::SavePatternResult result);
     void beginSavePlayerModulation(
         std::size_t playerIndex,

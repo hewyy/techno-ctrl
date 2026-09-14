@@ -122,6 +122,27 @@ void testExternalCycleActivatesPendingSelection()
     CHECK(output[0].type == lps::PlayerSignalType::patternCycleBoundary);
     CHECK(output[1].type == lps::PlayerSignalType::patternHit);
 }
+
+void testSelectingActivePatternReloadsItAndResetsOffset()
+{
+    lps::PatternLibrary library;
+    lps::PatternPlayer player(library);
+    player.prepare({});
+
+    const auto original = player.patternView();
+    CHECK(original.isHit(0));
+    player.toggleStep(0);
+    player.offsetPatternRight();
+    CHECK(player.patternOffset() == 1);
+    CHECK(player.hasUnsavedPatternChanges());
+
+    player.selectPattern(player.selectedPatternId());
+    player.prepare({});
+
+    CHECK(player.patternOffset() == 0);
+    CHECK(player.patternView().isHit(0));
+    CHECK(!player.hasUnsavedPatternChanges());
+}
 } // namespace
 
 int main()
@@ -131,6 +152,7 @@ int main()
     testOneShotCountsRestsAndStops();
     testHitAdvanceAndCommands();
     testExternalCycleActivatesPendingSelection();
+    testSelectingActivePatternReloadsItAndResetsOffset();
     std::cout << "PatternPlayer signal tests passed\n";
     return EXIT_SUCCESS;
 }

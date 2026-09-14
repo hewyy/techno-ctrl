@@ -35,7 +35,6 @@ public:
     enum class SavePatternStatus
     {
         failed,
-        needsName,
         selectedExisting,
         savedNew
     };
@@ -120,13 +119,10 @@ public:
     [[nodiscard]] juce::String patternCatalogErrorForUi() const;
     [[nodiscard]] bool playerPatternModifiedForUi(
         std::size_t playerIndex) const noexcept;
+    [[nodiscard]] SavePatternResult savePlayerPattern(std::size_t playerIndex);
     [[nodiscard]] SavePatternResult savePlayerPattern(
         std::size_t playerIndex,
-        const juce::String& name = {});
-    [[nodiscard]] SavePatternResult savePlayerPattern(
-        std::size_t playerIndex,
-        const lps::Pattern& candidatePattern,
-        const juce::String& name);
+        const lps::Pattern& candidatePattern);
     void selectPatternForPlayer(std::size_t playerIndex, std::size_t patternIndex) noexcept;
     [[nodiscard]] std::size_t selectedPatternForPlayer(std::size_t playerIndex) const noexcept;
     void offsetPlayerPatternLeft(std::size_t playerIndex) noexcept;
@@ -143,6 +139,8 @@ public:
     void togglePlayerStep(std::size_t playerIndex, std::size_t step) noexcept;
 
     [[nodiscard]] std::size_t modulationCountForUi() const noexcept;
+    [[nodiscard]] lps::Modulation modulationAtForUi(
+        std::size_t modulationIndex) const noexcept;
     [[nodiscard]] juce::String modulationNameForUi(
         std::size_t modulationIndex) const;
     [[nodiscard]] juce::String modulationCatalogErrorForUi() const;

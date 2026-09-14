@@ -765,7 +765,11 @@ juce::String LivePatternSequencerProcessor::patternNameForUi(
     std::size_t patternIndex) const
 {
     const auto* pattern = patternLibrary_.recordAt(patternIndex);
-    return pattern != nullptr ? juce::String(pattern->name) : juce::String {};
+    if (pattern == nullptr)
+        return {};
+    return pattern->name.empty()
+        ? juce::String(static_cast<juce::int64>(pattern->id.value()))
+        : juce::String(pattern->name);
 }
 
 juce::String LivePatternSequencerProcessor::patternCatalogErrorForUi() const
@@ -781,22 +785,19 @@ bool LivePatternSequencerProcessor::playerPatternModifiedForUi(
 }
 
 LivePatternSequencerProcessor::SavePatternResult
-LivePatternSequencerProcessor::savePlayerPattern(
-    std::size_t playerIndex,
-    const juce::String& name)
+LivePatternSequencerProcessor::savePlayerPattern(std::size_t playerIndex)
 {
     auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr)
         return {};
 
-    return savePlayerPattern(playerIndex, player->patternForSave(), name);
+    return savePlayerPattern(playerIndex, player->patternForSave());
 }
 
 LivePatternSequencerProcessor::SavePatternResult
 LivePatternSequencerProcessor::savePlayerPattern(
     std::size_t playerIndex,
-    const lps::Pattern& candidatePattern,
-    const juce::String& name)
+    const lps::Pattern& candidatePattern)
 {
     auto* player = patternPlayerAt(playerIndex);
     if (player == nullptr
@@ -822,16 +823,7 @@ LivePatternSequencerProcessor::savePlayerPattern(
             };
         }
 
-        const auto trimmedName = name.trim();
-        if (trimmedName.isEmpty())
-            return {
-                SavePatternStatus::needsName,
-                std::numeric_limits<std::size_t>::max(),
-                candidatePattern
-            };
-
         const auto insertion = patternLibrary_.addOrFind(
-            trimmedName.toStdString(),
             candidatePattern,
             [this](lps::PatternLibraryEntry& stagedEntry)
             {
@@ -991,6 +983,13 @@ void LivePatternSequencerProcessor::togglePlayerStep(
 std::size_t LivePatternSequencerProcessor::modulationCountForUi() const noexcept
 {
     return modulationLibrary_.size();
+}
+
+lps::Modulation LivePatternSequencerProcessor::modulationAtForUi(
+    std::size_t modulationIndex) const noexcept
+{
+    const auto* entry = modulationLibrary_.recordAt(modulationIndex);
+    return entry != nullptr ? entry->modulation : lps::Modulation {};
 }
 
 juce::String LivePatternSequencerProcessor::modulationNameForUi(

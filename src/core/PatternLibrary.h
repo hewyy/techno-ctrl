@@ -87,13 +87,20 @@ public:
         const std::vector<PatternLibraryEntry>& entries);
 
     // Single-writer operation intended for the UI thread. Duplicate content
-    // returns the existing entry regardless of name. New content must have a
-    // non-empty name and a valid length. beforePublish may persist and adjust
-    // the staged entry (for example, to resolve an ID allocated by another
-    // process); returning false leaves the library unchanged.
+    // returns the existing entry regardless of name. Names are optional; an
+    // unnamed entry is identified in the UI and persisted by its stable ID.
+    // beforePublish may persist and adjust the staged entry (for example, to
+    // resolve an ID allocated by another process); returning false leaves the
+    // library unchanged.
     [[nodiscard]] PatternLibraryInsertResult addOrFind(std::string name,
                                                        const Pattern& pattern,
                                                        const BeforePublish& beforePublish = {});
+    [[nodiscard]] PatternLibraryInsertResult addOrFind(
+        const Pattern& pattern,
+        const BeforePublish& beforePublish = {})
+    {
+        return addOrFind({}, pattern, beforePublish);
+    }
 
 private:
     [[nodiscard]] PatternId nextAvailableId() const noexcept;

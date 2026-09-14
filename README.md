@@ -51,8 +51,8 @@ and a checklist for replacing JUCE or the VST3 wrapper.
 catalog entries; each `PatternPlayer`
 copies the selected hits into its own unsaved 32-step draft before playback or editing. Saving
 crops and rebases the selected loop, including any pattern offset. Exact content duplicates
-select the existing entry without asking for a name. New content asks for a name and is added
-to the shared per-user JSON catalog. Edits outside the brackets are marked as draft
+select the existing entry. New content is assigned a stable ID and added to the shared per-user
+JSON catalog without requiring a name. Edits outside the brackets are marked as draft
 changes but are excluded from the saved pattern. The saved or matching library entry follows
 the same timing as other pattern selections: while playing, follower voices wait for the next
 start of the master voice's loop, and the master waits for its own loop start. While stopped,
@@ -96,15 +96,15 @@ Each entry stores a contiguous `values` array containing 1–10 integers from 0 
 }
 ```
 
-The versioned JSON is human-readable. Each entry has a stable numeric `id`, a `name`, and a
-`steps` string in which `x` is a hit and `-` is a rest:
+The versioned JSON is human-readable. Each entry has a stable numeric `id` and a `steps` string
+in which `x` is a hit and `-` is a rest. Existing named entries retain their optional `name`:
 
 ```json
 {
   "format": "live-pattern-sequencer-pattern-library",
   "schemaVersion": 1,
   "patterns": [
-    { "id": 1, "name": "Basic Kick", "steps": "x---" }
+    { "id": 11, "steps": "x---x---" }
   ]
 }
 ```

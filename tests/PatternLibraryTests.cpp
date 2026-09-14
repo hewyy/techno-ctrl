@@ -205,12 +205,16 @@ void testSameHitsWithDifferentLengthsAreDistinct()
     CHECK(longResult.entry->pattern.length == 3);
 }
 
-void testInvalidNewPatternsAreRejected()
+void testUnnamedPatternsAreAcceptedAndInvalidPatternsAreRejected()
 {
     lps::PatternLibrary library;
     const auto initialSize = library.size();
 
-    CHECK(library.addOrFind({}, makePattern("-x")).entry == nullptr);
+    const auto unnamed = library.addOrFind(makePattern("-x"));
+    CHECK(unnamed.inserted);
+    CHECK(unnamed.entry != nullptr);
+    CHECK(unnamed.entry->name.empty());
+    CHECK(unnamed.entry->id == lps::PatternId {11});
 
     lps::Pattern empty;
     CHECK(library.addOrFind("Empty", empty).entry == nullptr);
@@ -219,7 +223,7 @@ void testInvalidNewPatternsAreRejected()
     tooLong.length = lps::Pattern::maxLength + 1;
     CHECK(library.addOrFind("Too Long", tooLong).entry == nullptr);
     CHECK(library.findEquivalent(tooLong) == nullptr);
-    CHECK(library.size() == initialSize);
+    CHECK(library.size() == initialSize + 1);
 }
 
 void testCapacityAndDuplicateLookupWhenFull()
@@ -274,7 +278,7 @@ void testStartupReplacementPublishesValidatedCatalogInFileOrder()
 
     const std::vector<lps::PatternLibraryEntry> loadedEntries {
         {lps::PatternId {1}, "Loaded First", firstPattern},
-        {lps::PatternId {2}, "Loaded Second", makePattern("-x-x-")},
+        {lps::PatternId {2}, {}, makePattern("-x-x-")},
         {lps::PatternId {3}, "Loaded 32 Steps",
             makePattern("x------------------------------x")}
     };
@@ -339,10 +343,6 @@ void testStartupReplacementRejectsInvalidCatalogAtomically()
     checkStartupReplacementRejected({
         {lps::PatternId {1}, "First", makePattern("x-")},
         {lps::PatternId {1}, "Duplicate ID", makePattern("-x")}
-    });
-
-    checkStartupReplacementRejected({
-        {lps::PatternId {1}, "", makePattern("x-")}
     });
 
     checkStartupReplacementRejected({
@@ -448,7 +448,7 @@ int main()
     testDuplicateContentReturnsExistingEntry();
     testInsertionNormalizesTailAndPreservesStableOrder();
     testSameHitsWithDifferentLengthsAreDistinct();
-    testInvalidNewPatternsAreRejected();
+    testUnnamedPatternsAreAcceptedAndInvalidPatternsAreRejected();
     testCapacityAndDuplicateLookupWhenFull();
     testStartupReplacementPublishesValidatedCatalogInFileOrder();
     testStartupReplacementRejectsInvalidCatalogAtomically();

@@ -88,7 +88,6 @@ private:
         const auto& candidate = entries[index];
         if (!candidate.id.isValid()
             || candidate.id.value() > lps::PatternLibrary::maxEntryCount
-            || candidate.name.empty()
             || candidate.pattern.length == 0
             || candidate.pattern.length > lps::Pattern::maxLength)
         {
@@ -180,7 +179,9 @@ private:
         auto* serialized = new juce::DynamicObject();
         serialized->setProperty(
             "id", static_cast<juce::int64>(entry.id.value()));
-        serialized->setProperty("name", juce::String::fromUTF8(entry.name.c_str()));
+        if (!entry.name.empty())
+            serialized->setProperty(
+                "name", juce::String::fromUTF8(entry.name.c_str()));
         serialized->setProperty("steps", patternSteps(entry.pattern));
         serializedPatterns.add(juce::var(serialized));
     }
@@ -382,7 +383,7 @@ bool PatternLibraryFileStore::readEntries(
         const auto& nameValue = serialized->getProperty("name");
         const auto& stepsValue = serialized->getProperty("steps");
         if (!(idValue.isInt() || idValue.isInt64())
-            || !nameValue.isString()
+            || (!nameValue.isVoid() && !nameValue.isString())
             || !stepsValue.isString())
         {
             return false;
@@ -393,8 +394,6 @@ bool PatternLibraryFileStore::readEntries(
         const auto steps = stepsValue.toString();
         if (id <= 0
             || id > static_cast<juce::int64>(lps::PatternLibrary::maxEntryCount)
-            || name.isEmpty()
-            || name.trim().isEmpty()
             || steps.isEmpty()
             || steps.length() > static_cast<int>(lps::Pattern::maxLength))
         {

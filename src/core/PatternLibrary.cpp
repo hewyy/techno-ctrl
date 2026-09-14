@@ -108,7 +108,6 @@ bool PatternLibrary::replaceEntriesForStartup(
         const auto& candidate = entries[index];
         if (!candidate.id.isValid()
             || candidate.id.value() > maxEntryCount
-            || candidate.name.empty()
             || candidate.pattern.length == 0
             || candidate.pattern.length > Pattern::maxLength)
         {
@@ -160,7 +159,7 @@ PatternLibraryInsertResult PatternLibrary::addOrFind(std::string name,
     if (const auto* existing = findEquivalent(pattern))
         return {existing, false};
 
-    if (name.empty() || pattern.length == 0 || pattern.length > Pattern::maxLength)
+    if (pattern.length == 0 || pattern.length > Pattern::maxLength)
         return {};
 
     const auto insertionIndex = publishedEntryCount_.load(std::memory_order_acquire);
@@ -195,7 +194,6 @@ PatternLibraryInsertResult PatternLibrary::addOrFind(std::string name,
     if (!entry.id.isValid()
         || entry.id.value() > maxEntryCount
         || find(entry.id) != nullptr
-        || entry.name.empty()
         || entry.pattern.length == 0
         || entry.pattern.length > Pattern::maxLength
         || findEquivalent(entry.pattern) != nullptr)

@@ -43,11 +43,7 @@ void PatternPlayer::setTransitionPolicy(PatternTransitionPolicy policy) noexcept
 
 void PatternPlayer::selectPattern(PatternId patternId) noexcept
 {
-    if (patternLibrary_.find(patternId) != nullptr
-        && (patternId.value() & resetOffsetOnActivationFlag) == 0)
-    {
-        requestedPatternSelection_.store(patternId.value(), std::memory_order_release);
-    }
+    selectSavedPattern(patternId);
 }
 
 void PatternPlayer::selectSavedPattern(PatternId patternId) noexcept
