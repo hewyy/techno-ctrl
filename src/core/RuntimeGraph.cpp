@@ -634,6 +634,8 @@ void RuntimeGraph::applyActivePlayerConfigs() noexcept
         {
             player->setAdvanceSource(playerConfig.advanceSource);
             player->setPlayMode(playerConfig.playMode);
+            player->setSelectionQuantizedToPatternCycle(
+                playerConfig.quantizeSelectionToPatternCycle);
         }
     }
 }
@@ -828,6 +830,13 @@ void RuntimeGraph::resolveTimestamp(
                         (void) appendSignals(generated);
                         appendPlayerRemainder(*patternPlayers_[player], ppq);
                     }
+                }
+                for (std::size_t player = 0;
+                     player < modulationPlayerCount_;
+                     ++player)
+                {
+                    (void) modulationPlayers_[player]
+                        ->observeCycleBoundary(item.signal);
                 }
                 for (std::size_t slot = 0;
                      slot < armedCycleCommands_.size();

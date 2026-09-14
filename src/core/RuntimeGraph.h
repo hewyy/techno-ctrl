@@ -78,6 +78,7 @@ struct ModulationPlayerRuntimeConfig
     ModulationPlayerId player;
     AdvanceSource advanceSource {ClockAdvance {0.25}};
     PlayMode playMode = PlayMode::continuous;
+    bool quantizeSelectionToPatternCycle = false;
 };
 
 struct RuntimeGraphConfig

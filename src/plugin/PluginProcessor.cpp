@@ -186,20 +186,22 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         jassert(nodesRegistered);
         (void) nodesRegistered;
 
-        const auto transitionPolicy = index == configuredMasterIndex()
+        const auto transitionPolicy = waitForCycleBeforeSelection
             ? lps::PatternTransitionPolicy {}
-            : lps::PatternTransitionPolicy::externalCycle(
-                lps::PatternPlayerId {static_cast<std::uint32_t>(
-                    configuredMasterIndex())});
+            : lps::PatternTransitionPolicy {
+                lps::PatternTransitionPolicyType::immediate, {}};
         const bool playerConfigsAdded = graphConfig.addPlayerConfig(
                 {patternId, lps::ClockAdvance {0.25},
                     lps::PlayMode::continuous, transitionPolicy})
             && graphConfig.addPlayerConfig(
-                {pitchModulationId, hitAdvance, lps::PlayMode::continuous})
+                {pitchModulationId, hitAdvance, lps::PlayMode::continuous,
+                    waitForCycleBeforeSelection})
             && graphConfig.addPlayerConfig(
-                {velocityModulationId, hitAdvance, lps::PlayMode::continuous})
+                {velocityModulationId, hitAdvance, lps::PlayMode::continuous,
+                    waitForCycleBeforeSelection})
             && graphConfig.addPlayerConfig(
-                {gateModulationId, hitAdvance, lps::PlayMode::continuous});
+                {gateModulationId, hitAdvance, lps::PlayMode::continuous,
+                    waitForCycleBeforeSelection});
         jassert(playerConfigsAdded);
         (void) playerConfigsAdded;
 

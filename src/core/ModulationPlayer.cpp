@@ -194,7 +194,9 @@ void ModulationPlayer::scheduleNextClock(double commandPpq) noexcept
 bool ModulationPlayer::evaluateStep(
     double ppqPosition, PlayerSignalBuffer& output) noexcept
 {
-    if (!std::isfinite(ppqPosition) || !activateRequestedSelection())
+    if (!std::isfinite(ppqPosition)
+        || (!selectionQuantizedToPatternCycle_
+            && !activateRequestedSelection()))
         return false;
 
     Modulation modulation;
@@ -243,6 +245,7 @@ void ModulationPlayer::command(
             reset();
             return;
         case PlayerCommand::resetAndPlay:
+            (void) activateRequestedSelection();
             resetPosition();
             playing_.store(true, std::memory_order_release);
             lastResetAndPlayPpq_ = ppqPosition;
@@ -316,6 +319,22 @@ void ModulationPlayer::advanceFromPatternHit(
 {
     if (hit.type == PlayerSignalType::patternHit)
         advanceFromPatternHit(hit.patternPlayerId, hit.ppqPosition, output);
+}
+
+bool ModulationPlayer::observeCycleBoundary(
+    const PlayerSignal& boundary) noexcept
+{
+    const auto* hitAdvance = std::get_if<PatternHitAdvance>(&advanceSource_);
+    if (!selectionQuantizedToPatternCycle_
+        || boundary.type != PlayerSignalType::patternCycleBoundary
+        || hitAdvance == nullptr
+        || hitAdvance->source != boundary.patternPlayerId
+        || selectedModulationId() == activeModulationId())
+    {
+        return false;
+    }
+
+    return activateRequestedSelection();
 }
 
 ModulationPlayerStatus ModulationPlayer::status() const noexcept

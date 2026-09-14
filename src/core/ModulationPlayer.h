@@ -46,6 +46,14 @@ public:
     [[nodiscard]] const AdvanceSource& advanceSource() const noexcept;
     void setPlayMode(PlayMode mode) noexcept { playMode_ = mode; }
     [[nodiscard]] PlayMode playMode() const noexcept { return playMode_; }
+    void setSelectionQuantizedToPatternCycle(bool enabled) noexcept
+    {
+        selectionQuantizedToPatternCycle_ = enabled;
+    }
+    [[nodiscard]] bool selectionQuantizedToPatternCycle() const noexcept
+    {
+        return selectionQuantizedToPatternCycle_;
+    }
 
     void selectModulation(ModulationId id) noexcept;
     [[nodiscard]] ModulationId selectedModulationId() const noexcept;
@@ -76,6 +84,8 @@ public:
     void advanceFromPatternHit(
         const PlayerSignal& hit,
         PlayerSignalBuffer& output) noexcept override;
+    [[nodiscard]] bool observeCycleBoundary(
+        const PlayerSignal& boundary) noexcept;
     [[nodiscard]] PlayerSyncCapabilities syncCapabilities() const noexcept override
     {
         return {};
@@ -112,6 +122,7 @@ private:
     ModulationPlayerId id_;
     AdvanceSource advanceSource_ { ClockAdvance {} };
     PlayMode playMode_ = PlayMode::continuous;
+    bool selectionQuantizedToPatternCycle_ = false;
 
     std::atomic<std::uint64_t> requestedModulationId_ {0};
     std::atomic<std::uint64_t> activeModulationId_ {0};

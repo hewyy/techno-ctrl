@@ -70,6 +70,36 @@ void testPlayersSharingARecordKeepIndependentCursors()
     CHECK(first.activeModulationId() == second.activeModulationId());
 }
 
+void testSelectionCanWaitForOwningPatternCycle()
+{
+    lps::ModulationLibrary library;
+    lps::ModulationPlayer player(library, lps::ModulationPlayerId {5});
+    player.setAdvanceSource(
+        lps::PatternHitAdvance {lps::PatternPlayerId {3}});
+    player.setSelectionQuantizedToPatternCycle(true);
+    player.prepare({});
+
+    lps::PlayerSignalBuffer output;
+    player.command(lps::PlayerCommand::resetAndPlay, 0.0, output);
+    CHECK(player.activeModulationId() == lps::ModulationId {1});
+
+    player.selectModulation(lps::ModulationId {2});
+    player.advanceFromPatternHit(
+        lps::PatternPlayerId {3}, 0.25, output);
+    CHECK(player.activeModulationId() == lps::ModulationId {1});
+    CHECK(!player.observeCycleBoundary(
+        lps::PlayerSignal::patternCycleBoundary(
+            1.0, lps::PatternPlayerId {2})));
+    CHECK(player.observeCycleBoundary(
+        lps::PlayerSignal::patternCycleBoundary(
+            1.0, lps::PatternPlayerId {3})));
+    CHECK(player.activeModulationId() == lps::ModulationId {2});
+
+    player.advanceFromPatternHit(
+        lps::PatternPlayerId {3}, 1.0, output);
+    CHECK(output[output.size() - 1].sourceStep == 0);
+}
+
 void testOneShotAndCommandSemantics()
 {
     lps::ModulationLibrary library;
@@ -132,6 +162,7 @@ int main()
 {
     testHitAdvanceAndCoincidentReset();
     testPlayersSharingARecordKeepIndependentCursors();
+    testSelectionCanWaitForOwningPatternCycle();
     testOneShotAndCommandSemantics();
     testClockUsesHalfOpenBlocks();
     testNonFiniteNormalizedInputIsDeterministic();

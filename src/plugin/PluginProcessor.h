@@ -190,6 +190,9 @@ public:
 private:
     static constexpr int existingVoiceMidiChannel = 2;
     static constexpr int newVoiceMidiChannel = 1;
+    // This is intentionally a policy switch so a future configuration menu
+    // can expose immediate selection without changing the graph topology.
+    static constexpr bool waitForCycleBeforeSelection = true;
     static constexpr std::size_t cvPlayerCapacity = 10;
     static constexpr int cvChannelsPerPlayer = 3;
     static constexpr int cvOutputChannelCount =
