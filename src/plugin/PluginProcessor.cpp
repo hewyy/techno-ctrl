@@ -14,21 +14,24 @@ struct DrumVoiceDefinition
     const char* name;
     std::uint8_t midiNote;
     bool isMaster;
+    std::uint8_t midiChannel;
+    bool hasCvOutput;
 };
 
 // Default drum-machine map. Mark exactly one voice as the master. Adding or
 // removing definitions here does not require routing, matrix, or editor changes.
 constexpr std::array defaultDrumVoices {
-    DrumVoiceDefinition { "BD1", 36, true },
-    DrumVoiceDefinition { "BD2", 37, false },
-    DrumVoiceDefinition { "Machine", 38, false },
-    DrumVoiceDefinition { "Snare", 39, false },
-    DrumVoiceDefinition { "Clap", 40, false },
-    DrumVoiceDefinition { "Rimshot", 41, false },
-    DrumVoiceDefinition { "OH", 42, false },
-    DrumVoiceDefinition { "CH", 43, false },
-    DrumVoiceDefinition { "Crash", 44, false },
-    DrumVoiceDefinition { "Ride", 45, false }
+    DrumVoiceDefinition { "BD1", 36, true, 2, true },
+    DrumVoiceDefinition { "BD2", 37, false, 2, true },
+    DrumVoiceDefinition { "Machine", 38, false, 2, true },
+    DrumVoiceDefinition { "Snare", 39, false, 2, true },
+    DrumVoiceDefinition { "Clap", 40, false, 2, true },
+    DrumVoiceDefinition { "Rimshot", 41, false, 2, true },
+    DrumVoiceDefinition { "OH", 42, false, 2, true },
+    DrumVoiceDefinition { "CH", 43, false, 2, true },
+    DrumVoiceDefinition { "Crash", 44, false, 2, true },
+    DrumVoiceDefinition { "Ride", 45, false, 2, true },
+    DrumVoiceDefinition { "Voice 11", 46, false, 1, false }
 };
 
 constexpr std::size_t configuredMasterCount() noexcept
@@ -76,7 +79,10 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
       patternLibraryFileStore_(patternCatalogFile),
       modulationLibraryFileStore_(
           patternCatalogFile.getSiblingFile("modulations.json")),
-      drumRenderer_(std::make_unique<lps::MidiBufferRenderer>(drumMidiChannel)),
+      drumRenderer_(std::make_unique<lps::MidiBufferRenderer>(
+          existingVoiceMidiChannel)),
+      channelOneRenderer_(std::make_unique<lps::MidiBufferRenderer>(
+          newVoiceMidiChannel)),
       cvRenderer_(std::make_unique<lps::CvBufferRenderer>()),
       runtimeGraph_(std::make_unique<lps::RuntimeGraph>())
 {
@@ -115,9 +121,11 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     jassert(gateRecord.entry != nullptr);
     lps::RuntimeGraphConfig graphConfig;
     const bool outputsRegistered = runtimeGraph_->registerOutputEndpoint(
-            midiOutputEndpoint, *drumRenderer_)
+            channelTwoMidiOutputEndpoint, *drumRenderer_)
         && runtimeGraph_->registerOutputEndpoint(
-            cvOutputEndpoint, *cvRenderer_);
+            cvOutputEndpoint, *cvRenderer_)
+        && runtimeGraph_->registerOutputEndpoint(
+            channelOneMidiOutputEndpoint, *channelOneRenderer_);
     jassert(outputsRegistered);
     (void) outputsRegistered;
 
@@ -195,7 +203,10 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         jassert(playerConfigsAdded);
         (void) playerConfigsAdded;
 
-        const bool bindingsAdded = graphConfig.add(lps::TriggerBinding {
+        const auto midiEndpoint = voice.midiChannel == newVoiceMidiChannel
+            ? channelOneMidiOutputEndpoint
+            : channelTwoMidiOutputEndpoint;
+        bool bindingsAdded = graphConfig.add(lps::TriggerBinding {
                 lps::TriggerBindingId {static_cast<std::uint32_t>(index)},
                 patternId, voiceId})
             && graphConfig.add(lps::ParameterBinding {
@@ -210,31 +221,42 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
             && graphConfig.add(lps::OutputBinding {
                 lps::OutputBindingId {
                     static_cast<std::uint32_t>(index * 2) },
-                voiceId, midiOutputEndpoint,
+                voiceId, midiEndpoint,
                 lps::RouteId {static_cast<std::uint32_t>(index)}, {},
-                lps::OutputSignalType::triggers})
-            && graphConfig.add(lps::OutputBinding {
+                lps::OutputSignalType::triggers});
+        if (voice.hasCvOutput)
+        {
+            bindingsAdded = bindingsAdded
+                && graphConfig.add(lps::OutputBinding {
                 lps::OutputBindingId {
                     static_cast<std::uint32_t>(index * 2 + 1) },
                 voiceId, cvOutputEndpoint,
                 lps::RouteId {static_cast<std::uint32_t>(index)}, {},
                 lps::OutputSignalType::triggers});
+        }
         jassert(bindingsAdded);
         (void) bindingsAdded;
 
         const auto routeId = lps::RouteId {static_cast<std::uint32_t>(index)};
         const auto cvRouteId = routeId;
-        const int cvChannel = static_cast<int>(index) * cvChannelsPerPlayer;
-        const bool cvConfigured = cvRenderer_->configureRoute(
-                cvRouteId,
-                { cvChannel, cvChannel + 1, cvChannel + 2 });
-        jassert(cvConfigured);
-        (void) cvConfigured;
+        if (voice.hasCvOutput)
+        {
+            jassert(index < cvPlayerCapacity);
+            const int cvChannel = static_cast<int>(index)
+                * cvChannelsPerPlayer;
+            const bool cvConfigured = cvRenderer_->configureRoute(
+                    cvRouteId,
+                    { cvChannel, cvChannel + 1, cvChannel + 2 });
+            jassert(cvConfigured);
+            (void) cvConfigured;
+        }
 
         PlayerBundle bundle;
         bundle.descriptor = {
             voice.name,
-            voice.midiNote
+            voice.midiNote,
+            voice.midiChannel,
+            voice.hasCvOutput
         };
         bundle.patternController = patternController;
         bundle.patternModel = patternController;
@@ -357,6 +379,7 @@ void LivePatternSequencerProcessor::processBlock(
 
     wasPlaying_ = block.playing;
     drumRenderer_->setMidiBuffer(midi);
+    channelOneRenderer_->setMidiBuffer(midi);
     cvRenderer_->setAudioBuffer(audio);
     lps::ResolvedVoiceEventBuffer resolvedEvents;
     if (!runtimeGraph_->process(block, resolvedEvents)
@@ -367,6 +390,7 @@ void LivePatternSequencerProcessor::processBlock(
     }
     cvRenderer_->clearAudioBuffer();
     drumRenderer_->clearMidiBuffer();
+    channelOneRenderer_->clearMidiBuffer();
 
     updateUiSnapshot();
 }
@@ -457,7 +481,8 @@ void LivePatternSequencerProcessor::setStateInformation(
 
     const auto* serializedPlayers = root->getProperty("players").getArray();
     if (serializedPlayers == nullptr
-        || serializedPlayers->size() != static_cast<int>(players_.size()))
+        || serializedPlayers->isEmpty()
+        || serializedPlayers->size() > static_cast<int>(players_.size()))
         return;
 
     for (int index = 0; index < serializedPlayers->size(); ++index)
@@ -699,7 +724,7 @@ int LivePatternSequencerProcessor::playerMidiNoteForUi(std::size_t playerIndex) 
 
 int LivePatternSequencerProcessor::drumMidiChannelForUi() const noexcept
 {
-    return drumMidiChannel;
+    return existingVoiceMidiChannel;
 }
 
 std::size_t LivePatternSequencerProcessor::patternCountForUi() const noexcept

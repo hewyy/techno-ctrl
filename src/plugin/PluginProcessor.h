@@ -188,18 +188,22 @@ public:
         std::size_t suppressedIndex) const noexcept;
 
 private:
-    static constexpr int drumMidiChannel = 1;
+    static constexpr int existingVoiceMidiChannel = 2;
+    static constexpr int newVoiceMidiChannel = 1;
     static constexpr std::size_t cvPlayerCapacity = 10;
     static constexpr int cvChannelsPerPlayer = 3;
     static constexpr int cvOutputChannelCount =
         static_cast<int>(cvPlayerCapacity) * cvChannelsPerPlayer;
-    static constexpr lps::OutputEndpointId midiOutputEndpoint {0};
+    static constexpr lps::OutputEndpointId channelTwoMidiOutputEndpoint {0};
     static constexpr lps::OutputEndpointId cvOutputEndpoint {1};
+    static constexpr lps::OutputEndpointId channelOneMidiOutputEndpoint {2};
 
     struct PlayerDescriptor
     {
         juce::String name;
         int midiNote = -1;
+        int midiChannel = 1;
+        bool hasCvOutput = false;
     };
 
     struct PlayerBundle
@@ -241,6 +245,7 @@ private:
     ModulationLibraryFileStore modulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
+    std::unique_ptr<lps::MidiBufferRenderer> channelOneRenderer_;
     std::unique_ptr<lps::CvBufferRenderer> cvRenderer_;
     std::unique_ptr<lps::RuntimeGraph> runtimeGraph_;
 
