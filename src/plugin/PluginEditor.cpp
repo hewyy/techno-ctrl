@@ -52,10 +52,10 @@ constexpr int controlPaneHeight = controlPanePadding * 2
     + controlPaneTopRowHeight
     + 3 * modulationPanelHeight
     + sectionGap;
-constexpr int matrixGridLeft = 82;
-constexpr int matrixGridTop = 112;
-constexpr int matrixCellWidth = clickTargetSize + 4;
-constexpr int matrixCellHeight = clickTargetSize + 4;
+constexpr int matrixGridLeft = 64;
+constexpr int matrixGridTop = 82;
+constexpr int matrixCellWidth = 32;
+constexpr int matrixCellHeight = 32;
 constexpr int rangeHandleExtension = 0;
 constexpr int rangeHandleCapLength = 18;
 constexpr int rangeHandleCapGrabRadius = clickTargetSize / 2 + 6;
@@ -828,6 +828,14 @@ LivePatternSequencerEditor::UtilityButton::UtilityButton(Kind kind) noexcept
 {
 }
 
+void LivePatternSequencerEditor::UtilityButton::setKind(Kind kind) noexcept
+{
+    if (kind_ == kind)
+        return;
+    kind_ = kind;
+    repaint();
+}
+
 void LivePatternSequencerEditor::UtilityButton::paintButton(
     juce::Graphics& graphics,
     bool isMouseOverButton,
@@ -916,8 +924,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
       suppressionButton_(UtilityButton::Kind::matrix),
       previousPageButton_(UtilityButton::Kind::previousPage),
       nextPageButton_(UtilityButton::Kind::nextPage),
-      globalPlayButton_(UtilityButton::Kind::play),
-      globalStopButton_(UtilityButton::Kind::pause)
+      globalPlayButton_(UtilityButton::Kind::play)
 {
     lookAndFeel_.setColour(
         juce::TextButton::buttonColourId, juce::Colour(panel));
@@ -1511,27 +1518,15 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     globalPlayButton_.setTooltip(
         "Start the internal audition clock from REAPER's current cursor; "
         "REAPER's own transport remains the authority");
+    globalPlayButton_.setClickingTogglesState(true);
     globalPlayButton_.setColour(
         juce::TextButton::buttonColourId, juce::Colour(uiBlue).darker(0.35f));
     globalPlayButton_.onClick = [this]
     {
-        processor_.setInternalTransportPlayingForUi(true);
+        processor_.setInternalTransportPlayingForUi(
+            globalPlayButton_.getToggleState());
     };
     addAndMakeVisible(globalPlayButton_);
-
-    globalStopButton_.setTooltip(
-        "Pause the internal audition clock; pause REAPER from its host "
-        "transport");
-    globalStopButton_.setColour(
-        juce::TextButton::buttonColourId, juce::Colour(muteRed));
-    globalStopButton_.setColour(
-        juce::TextButton::textColourOffId, juce::Colour(muteRedDark));
-    globalStopButton_.setEnabled(false);
-    globalStopButton_.onClick = [this]
-    {
-        processor_.setInternalTransportPlayingForUi(false);
-    };
-    addAndMakeVisible(globalStopButton_);
 
     suppressionButton_.setTooltip("Open or close the suppression matrix");
     suppressionButton_.setClickingTogglesState(true);
@@ -1595,9 +1590,6 @@ void LivePatternSequencerEditor::resized()
         utilityLeft, utilityY, utilityButtonSize, utilityButtonSize);
     utilityLeft += utilityButtonSize + perVoiceControlGap;
     globalPlayButton_.setBounds(
-        utilityLeft, utilityY, utilityButtonSize, utilityButtonSize);
-    utilityLeft += utilityButtonSize + perVoiceControlGap;
-    globalStopButton_.setBounds(
         utilityLeft, utilityY, utilityButtonSize, utilityButtonSize);
 
     int utilityRight = utilityBar.getRight();
@@ -1771,11 +1763,19 @@ void LivePatternSequencerEditor::timerCallback()
     const bool hostPlaying = processor_.hostTransportPlayingForUi();
     const bool internalPlaying =
         processor_.internalTransportPlayingForUi();
+    const bool transportPlaying = hostPlaying || internalPlaying;
     globalPlayButton_.setToggleState(
-        hostPlaying || internalPlaying,
+        transportPlaying,
         juce::dontSendNotification);
-    globalPlayButton_.setEnabled(!hostPlaying && !internalPlaying);
-    globalStopButton_.setEnabled(!hostPlaying && internalPlaying);
+    globalPlayButton_.setKind(transportPlaying
+        ? UtilityButton::Kind::pause
+        : UtilityButton::Kind::play);
+    globalPlayButton_.setEnabled(!hostPlaying);
+    globalPlayButton_.setTooltip(hostPlaying
+        ? "REAPER is playing; use REAPER's transport to pause or stop"
+        : (internalPlaying
+            ? "Pause the internal audition clock"
+            : "Start the internal audition clock from REAPER's current cursor"));
     content_.repaint();
 }
 
@@ -3092,7 +3092,6 @@ void LivePatternSequencerEditor::showSuppressionMatrix()
     suppressionMenuOpen_ = true;
     suppressionButton_.setToggleState(true, juce::dontSendNotification);
     juce::PopupMenu menu;
-    menu.addSectionHeader("SUPPRESSION MATRIX");
     menu.addCustomItem(
         1,
         std::make_unique<MatrixComponent>(*this),
@@ -3100,8 +3099,13 @@ void LivePatternSequencerEditor::showSuppressionMatrix()
         "Suppression Matrix");
 
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
+    const auto buttonBounds = suppressionButton_.getScreenBounds();
     menu.showMenuAsync(
-        juce::PopupMenu::Options {}.withTargetComponent(&suppressionButton_),
+        juce::PopupMenu::Options {}
+            .withTargetComponent(&suppressionButton_)
+            .withTargetScreenArea(
+                juce::Rectangle<int> {}.withPosition(
+                    buttonBounds.getX(), buttonBounds.getCentreY())),
         [safeThis](int)
         {
             if (safeThis == nullptr)
@@ -3144,9 +3148,18 @@ void LivePatternSequencerEditor::showPatternMenu(
         processor_.playerPatternModifiedForUi(playerIndex));
 
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
+    auto menuOptions = juce::PopupMenu::Options {}
+        .withTargetComponent(targetComponent);
+    if (targetComponent != nullptr
+        && targetComponent != controlPatternMenuButton_.get())
+    {
+        const auto buttonBounds = targetComponent->getScreenBounds();
+        menuOptions = menuOptions.withTargetScreenArea(
+            juce::Rectangle<int> {}.withPosition(
+                buttonBounds.getRight(), buttonBounds.getCentreY()));
+    }
     menu.showMenuAsync(
-        juce::PopupMenu::Options {}
-            .withTargetComponent(targetComponent),
+        menuOptions,
         [safeThis, playerIndex](int result)
         {
             if (safeThis == nullptr || result == 0)
@@ -3258,9 +3271,9 @@ void LivePatternSequencerEditor::paintMatrix(
         panelBounds.toFloat().reduced(0.5f), 7.0f, 1.0f);
 
     graphics.setColour(juce::Colour(primaryText));
-    graphics.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
-    graphics.drawText("SUPPRESSION: ROW suppresses COLUMN", 16, 14,
-        matrix.getWidth() - 32, 24,
+    graphics.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+    graphics.drawText("ROW suppresses COLUMN", 8, 3,
+        matrix.getWidth() - 16, 16,
         juce::Justification::centredLeft);
 
     for (std::size_t row = 0; row < playerCount_; ++row)
@@ -3298,7 +3311,7 @@ void LivePatternSequencerEditor::paintMatrix(
         const float columnCentreX = static_cast<float>(
             matrixGridLeft + static_cast<int>(index) * matrixCellWidth
                 + matrixCellWidth / 2);
-        constexpr float columnCentreY = static_cast<float>(matrixGridTop - 38);
+        constexpr float columnCentreY = static_cast<float>(matrixGridTop - 32);
         {
             juce::Graphics::ScopedSaveState savedState(graphics);
             graphics.addTransform(juce::AffineTransform::rotation(
@@ -3318,9 +3331,9 @@ void LivePatternSequencerEditor::paintMatrix(
 
         graphics.drawFittedText(
             label,
-            8,
-            matrixGridTop + static_cast<int>(index) * matrixCellHeight + 3,
-            matrixGridLeft - 14,
+            4,
+            matrixGridTop + static_cast<int>(index) * matrixCellHeight + 4,
+            matrixGridLeft - 9,
             24,
             juce::Justification::centredRight,
             1,

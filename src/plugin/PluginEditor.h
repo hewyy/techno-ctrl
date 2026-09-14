@@ -81,6 +81,7 @@ private:
         enum class Kind { previousPage, nextPage, play, pause, matrix };
 
         explicit UtilityButton(Kind kind) noexcept;
+        void setKind(Kind kind) noexcept;
         void paintButton(juce::Graphics&, bool isMouseOverButton,
             bool isButtonDown) override;
 
@@ -176,7 +177,6 @@ private:
     UtilityButton previousPageButton_;
     UtilityButton nextPageButton_;
     UtilityButton globalPlayButton_;
-    UtilityButton globalStopButton_;
     juce::Label selectionLabel_;
     std::unique_ptr<juce::TextButton> controlPatternMenuButton_;
     SpeedSelector controlSpeedSelector_;
