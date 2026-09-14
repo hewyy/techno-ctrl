@@ -164,6 +164,7 @@ public:
     static constexpr std::size_t maximumPatternPlayers = 16;
     static constexpr std::size_t maximumModulationPlayers = 64;
     static constexpr std::size_t maximumVoices = 16;
+    static constexpr std::size_t maximumArmedCycleCommands = 64;
     static constexpr std::size_t maximumWorkSignals = 1024;
     static constexpr std::size_t maximumOutputEndpoints = 8;
     static constexpr std::size_t maximumRoutedEventsPerEndpoint = 1024;
@@ -236,6 +237,7 @@ private:
 
     struct ArmedCycleCommand
     {
+        std::size_t group = 0;
         PatternPlayerId source;
         PlayerRef destination;
         PlayerCommand command = PlayerCommand::resetAndPlay;
@@ -304,7 +306,9 @@ private:
     std::atomic<std::uint64_t> activeGeneration_ {0};
     std::uint64_t nextPublicationGeneration_ = 0;
     std::uint8_t audioSnapshot_ = 0;
-    std::array<ArmedCycleCommand, maximumPatternPlayers> armedCycleCommands_ {};
+    std::array<ArmedCycleCommand, maximumArmedCycleCommands>
+        armedCycleCommands_ {};
+    std::size_t armedCycleCommandCount_ = 0;
     std::array<std::atomic_bool, maximumPatternPlayers> armedCyclePending_ {};
     std::array<std::atomic_bool, maximumVoices> voiceMuted_ {};
     std::array<std::array<std::atomic_bool, maximumPatternPlayers>,

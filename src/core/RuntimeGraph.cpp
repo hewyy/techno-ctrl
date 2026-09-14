@@ -123,7 +123,8 @@ bool RuntimeGraph::configureArmedCycleCommand(
     PlayerRef destination,
     PlayerCommand command) noexcept
 {
-    if (prepared_ || slot >= armedCycleCommands_.size()
+    if (prepared_ || slot >= armedCyclePending_.size()
+        || armedCycleCommandCount_ == armedCycleCommands_.size()
         || find(source) == nullptr || find(destination) == nullptr
         || (destination.type == PlayerRefType::pattern
             && destination.value == source.value))
@@ -131,26 +132,46 @@ bool RuntimeGraph::configureArmedCycleCommand(
         return false;
     }
 
-    armedCycleCommands_[slot] = {source, destination, command, true};
+    for (std::size_t index = 0; index < armedCycleCommandCount_; ++index)
+    {
+        const auto& configured = armedCycleCommands_[index];
+        if (configured.group != slot)
+            continue;
+        if (configured.source != source
+            || (configured.destination.type == destination.type
+                && configured.destination.value == destination.value))
+            return false;
+    }
+
+    armedCycleCommands_[armedCycleCommandCount_++] = {
+        slot, source, destination, command, true};
     armedCyclePending_[slot].store(false, std::memory_order_relaxed);
     return true;
 }
 
 bool RuntimeGraph::armCycleCommand(std::size_t slot) noexcept
 {
-    if (slot >= armedCycleCommands_.size()
-        || !armedCycleCommands_[slot].configured)
+    if (slot >= armedCyclePending_.size())
     {
         return false;
     }
+    const bool configured = std::any_of(
+        armedCycleCommands_.begin(),
+        armedCycleCommands_.begin()
+            + static_cast<std::ptrdiff_t>(armedCycleCommandCount_),
+        [slot](const auto& command)
+        {
+            return command.configured && command.group == slot;
+        });
+    if (!configured)
+        return false;
     armedCyclePending_[slot].store(true, std::memory_order_release);
     return true;
 }
 
 bool RuntimeGraph::cycleCommandPending(std::size_t slot) const noexcept
 {
-    return slot < armedCycleCommands_.size()
-        && armedCycleCommands_[slot].configured
+    return slot < armedCyclePending_.size()
         && armedCyclePending_[slot].load(std::memory_order_acquire);
 }
 
@@ -838,19 +859,40 @@ void RuntimeGraph::resolveTimestamp(
                     (void) modulationPlayers_[player]
                         ->observeCycleBoundary(item.signal);
                 }
-                for (std::size_t slot = 0;
-                     slot < armedCycleCommands_.size();
-                     ++slot)
+                for (std::size_t group = 0;
+                     group < armedCyclePending_.size();
+                     ++group)
                 {
-                    const auto& armed = armedCycleCommands_[slot];
-                    if (!armed.configured || armed.source != item.signal.patternPlayerId
-                        || !armedCyclePending_[slot].exchange(
-                            false, std::memory_order_acq_rel))
+                    bool sourceMatches = false;
+                    for (std::size_t commandIndex = 0;
+                         commandIndex < armedCycleCommandCount_;
+                         ++commandIndex)
                     {
-                        continue;
+                        const auto& armed =
+                            armedCycleCommands_[commandIndex];
+                        if (armed.configured && armed.group == group
+                            && armed.source == item.signal.patternPlayerId)
+                        {
+                            sourceMatches = true;
+                            break;
+                        }
                     }
-                    if (auto* destination = find(armed.destination))
+                    if (!sourceMatches
+                        || !armedCyclePending_[group].exchange(
+                            false, std::memory_order_acq_rel))
+                        continue;
+
+                    for (std::size_t commandIndex = 0;
+                         commandIndex < armedCycleCommandCount_;
+                         ++commandIndex)
                     {
+                        const auto& armed =
+                            armedCycleCommands_[commandIndex];
+                        if (!armed.configured || armed.group != group)
+                            continue;
+                        auto* destination = find(armed.destination);
+                        if (destination == nullptr)
+                            continue;
                         const auto oldWorkSize = workSize_;
                         PlayerSignalBuffer generated;
                         destination->command(armed.command, ppq, generated);

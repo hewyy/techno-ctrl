@@ -283,13 +283,33 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     {
         if (index == configuredMasterIndex())
             continue;
+        const auto master = lps::PatternPlayerId {
+            static_cast<std::uint32_t>(configuredMasterIndex()) };
+        const auto modulationBase = static_cast<std::uint32_t>(index * 3);
         const bool configured = runtimeGraph_->configureArmedCycleCommand(
             index,
-            lps::PatternPlayerId {
-                static_cast<std::uint32_t>(configuredMasterIndex()) },
+            master,
             lps::PlayerRef::pattern(lps::PatternPlayerId {
                 static_cast<std::uint32_t>(index) }),
-            lps::PlayerCommand::resetAndPlay);
+            lps::PlayerCommand::resetAndPlay)
+            && runtimeGraph_->configureArmedCycleCommand(
+                index,
+                master,
+                lps::PlayerRef::modulation(
+                    lps::ModulationPlayerId {modulationBase}),
+                lps::PlayerCommand::resetAndPlay)
+            && runtimeGraph_->configureArmedCycleCommand(
+                index,
+                master,
+                lps::PlayerRef::modulation(
+                    lps::ModulationPlayerId {modulationBase + 1}),
+                lps::PlayerCommand::resetAndPlay)
+            && runtimeGraph_->configureArmedCycleCommand(
+                index,
+                master,
+                lps::PlayerRef::modulation(
+                    lps::ModulationPlayerId {modulationBase + 2}),
+                lps::PlayerCommand::resetAndPlay);
         jassert(configured);
         (void) configured;
     }

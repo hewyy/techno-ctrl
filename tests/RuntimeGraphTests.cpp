@@ -127,6 +127,53 @@ void testValidationRejectsPhaseOneMultipleSources()
         == lps::GraphValidationError::multipleParameterSources);
 }
 
+void testArmedResetRestartsPatternAndModulationAtMasterRestBoundary()
+{
+    lps::PatternLibrary patterns;
+    lps::ModulationLibrary modulations;
+    lps::PatternPlayer master(patterns);
+    lps::PatternPlayer follower(patterns);
+    master.setRuntimeId(0);
+    follower.setRuntimeId(1);
+    master.toggleStep(0); // The cycle boundary must not depend on a hit.
+    follower.selectPattern(lps::PatternId {2});
+
+    lps::ModulationPlayer modulation(
+        modulations, lps::ModulationPlayerId {3});
+    modulation.selectModulation(lps::ModulationId {2});
+
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(master));
+    CHECK(graph.registerPatternPlayer(follower));
+    CHECK(graph.registerModulationPlayer(modulation));
+
+    lps::RuntimeGraphConfig config;
+    CHECK(config.addPlayerConfig(lps::ModulationPlayerRuntimeConfig {
+        {3}, lps::PatternHitAdvance {{1}},
+        lps::PlayMode::continuous, true}));
+    CHECK(graph.activate(config));
+    CHECK(graph.configureArmedCycleCommand(
+        1, {0}, lps::PlayerRef::pattern({1}),
+        lps::PlayerCommand::resetAndPlay));
+    CHECK(graph.configureArmedCycleCommand(
+        1, {0}, lps::PlayerRef::modulation({3}),
+        lps::PlayerCommand::resetAndPlay));
+    graph.prepare({48'000.0, 36'000});
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.75, 120.0, 48'000.0, 36'000, true, true}, output));
+    CHECK(modulation.status().currentStep == 2);
+    CHECK(graph.armCycleCommand(1));
+    CHECK(graph.cycleCommandPending(1));
+
+    CHECK(graph.process(
+        {0.75, 1.25, 120.0, 48'000.0, 24'000, true, false}, output));
+    CHECK(!graph.cycleCommandPending(1));
+    CHECK(follower.patternPlaybackSnapshot().currentStep == 0);
+    CHECK(modulation.status().currentStep == 0);
+}
+
 void testValidationRejectsControlCycles()
 {
     lps::PatternLibrary patterns;
@@ -180,14 +227,14 @@ void testPublishedGraphIsAdoptedAtBlockBoundary()
 
     lps::RuntimeGraphConfig initial;
     CHECK(initial.add(lps::TriggerBinding {{0}, {1}, {1}}));
-    CHECK(initial.addPlayerConfig({
+    CHECK(initial.addPlayerConfig(lps::PatternPlayerRuntimeConfig {
         {1}, lps::ClockAdvance {0.25}, lps::PlayMode::continuous, {}}));
     CHECK(graph.activate(initial));
     graph.prepare({48'000.0, 256});
     const auto initialGeneration = graph.activeGeneration();
 
     lps::RuntimeGraphConfig replacement;
-    CHECK(replacement.addPlayerConfig({
+    CHECK(replacement.addPlayerConfig(lps::PatternPlayerRuntimeConfig {
         {1}, lps::ClockAdvance {0.25}, lps::PlayMode::oneShot, {}}));
     CHECK(graph.publish(replacement));
     CHECK(graph.publishedGeneration() > initialGeneration);
@@ -204,6 +251,7 @@ void testPublishedGraphIsAdoptedAtBlockBoundary()
 int main()
 {
     testNewModulationValuesAreSampledBeforeHit();
+    testArmedResetRestartsPatternAndModulationAtMasterRestBoundary();
     testValidationRejectsPhaseOneMultipleSources();
     testValidationRejectsControlCycles();
     testActivationKeepsOldGraphOnRejection();
