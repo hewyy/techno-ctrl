@@ -1,4 +1,5 @@
 #include "core/Voice.h"
+#include "core/Logger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,6 +7,13 @@
 
 namespace lps
 {
+namespace
+{
+bool shouldReportCount(std::uint32_t count) noexcept
+{
+    return count != 0 && (count & (count - 1u)) == 0;
+}
+}
 
 bool Voice::addParameter(VoiceParameterDescriptor descriptor) noexcept
 {
@@ -16,6 +24,9 @@ bool Voice::addParameter(VoiceParameterDescriptor descriptor) noexcept
         || !std::isfinite(descriptor.maximum)
         || descriptor.minimum > descriptor.maximum)
     {
+        Logger::logf(LogLevel::warning, "voice", "parameter_rejected",
+            "voice_id=%u parameter_id=%u count=%zu",
+            id_.value, static_cast<unsigned>(descriptor.id.value), parameterCount_);
         return false;
     }
 
@@ -84,6 +95,10 @@ bool Voice::applyParameterValue(
             state->descriptor.interpolation)))
     {
         incrementBounded(eventOverflowCount_);
+        const auto count = eventOverflowCount_.load(std::memory_order_relaxed);
+        if (shouldReportCount(count))
+            Logger::logf(LogLevel::error, "voice", "event_buffer_overflow",
+                "voice_id=%u count=%u semantic_event=control_point", id_.value, count);
         return false;
     }
     return true;
@@ -116,7 +131,13 @@ void Voice::endActive(
     if (!active_)
         return;
     if (!output.push(SequencerEvent::triggerEnd(ppqPosition, activeTriggerId_)))
+    {
         incrementBounded(eventOverflowCount_);
+        const auto count = eventOverflowCount_.load(std::memory_order_relaxed);
+        if (shouldReportCount(count))
+            Logger::logf(LogLevel::error, "voice", "event_buffer_overflow",
+                "voice_id=%u count=%u semantic_event=trigger_end", id_.value, count);
+    }
     active_ = false;
     activeTriggerId_ = {};
 }
@@ -145,6 +166,10 @@ bool Voice::trigger(
         || hit.nominalStepLengthPpq <= 0.0)
     {
         incrementBounded(droppedInvalidTrigger_);
+        const auto count = droppedInvalidTrigger_.load(std::memory_order_relaxed);
+        if (shouldReportCount(count))
+            Logger::logf(LogLevel::warning, "voice", "trigger_dropped",
+                "voice_id=%u reason=invalid_trigger count=%u", id_.value, count);
         return false;
     }
 
@@ -161,6 +186,11 @@ bool Voice::trigger(
         || gate == nullptr || !gate->valid)
     {
         incrementBounded(droppedMissingRequired_);
+        const auto count = droppedMissingRequired_.load(std::memory_order_relaxed);
+        if (shouldReportCount(count))
+            Logger::logf(LogLevel::warning, "voice", "trigger_dropped",
+                "voice_id=%u reason=missing_required_parameter count=%u",
+                id_.value, count);
         return false;
     }
 
@@ -177,6 +207,10 @@ bool Voice::trigger(
             pitch->mapped)))
     {
         incrementBounded(eventOverflowCount_);
+        const auto count = eventOverflowCount_.load(std::memory_order_relaxed);
+        if (shouldReportCount(count))
+            Logger::logf(LogLevel::error, "voice", "event_buffer_overflow",
+                "voice_id=%u count=%u semantic_event=trigger_start", id_.value, count);
         activeTriggerId_ = {};
         return false;
     }

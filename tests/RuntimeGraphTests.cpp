@@ -104,6 +104,42 @@ void testNewModulationValuesAreSampledBeforeHit()
     CHECK(renderer.eventCount == 0);
 }
 
+void testRenderClampsFinalHalfSampleEventToLastFrame()
+{
+    lps::Voice voice(lps::VoiceId {0});
+    CapturingRenderer renderer;
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerVoice(voice));
+    CHECK(graph.registerOutputEndpoint({0}, renderer));
+
+    lps::RuntimeGraphConfig config;
+    CHECK(config.add(lps::OutputBinding {
+        {0}, {0}, {0}, {0}, {}, lps::OutputSignalType::triggers}));
+    CHECK(graph.activate(config));
+
+    constexpr double sampleRate = 44'100.0;
+    constexpr double tempoBpm = 126.0;
+    constexpr std::uint32_t sampleCount = 512;
+    constexpr double ppqStart = 189.209821615;
+    const auto ppqPerSample = tempoBpm / (60.0 * sampleRate);
+    const auto ppqEnd = ppqStart
+        + static_cast<double>(sampleCount) * ppqPerSample;
+    const auto eventPpq = ppqStart
+        + (static_cast<double>(sampleCount) - 0.25) * ppqPerSample;
+    const lps::TimelineBlock block {
+        ppqStart, ppqEnd, tempoBpm, sampleRate, sampleCount, true, false};
+
+    graph.prepare({sampleRate, sampleCount});
+    lps::ResolvedVoiceEventBuffer events;
+    CHECK(events.push({
+        lps::SequencerEvent::triggerStart(eventPpq, {1}, 1.0f, 60.0f),
+        {0}, {}, 0, true}));
+
+    CHECK(graph.render(block, events));
+    CHECK(renderer.eventCount == 1);
+    CHECK(renderer.captured[0].frameOffset == sampleCount - 1);
+}
+
 void testValidationRejectsPhaseOneMultipleSources()
 {
     lps::PatternLibrary patterns;
@@ -172,6 +208,177 @@ void testArmedResetRestartsPatternAndModulationAtMasterRestBoundary()
     CHECK(!graph.cycleCommandPending(1));
     CHECK(follower.patternPlaybackSnapshot().currentStep == 0);
     CHECK(modulation.status().currentStep == 0);
+}
+
+void testBarSchedulerDefersMuteToMasterCycleAndBoundsTheHorizon()
+{
+    lps::PatternLibrary patterns;
+    lps::PatternPlayer master(patterns);
+    master.setRuntimeId(0);
+    lps::Voice voice(lps::VoiceId {0});
+
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(master));
+    CHECK(graph.registerVoice(voice));
+    CHECK(graph.activate({}));
+    CHECK(graph.configureBarClock({0}));
+    graph.prepare({48'000.0, 24'000});
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.5, 120.0, 48'000.0, 24'000, true, true}, output));
+    CHECK(graph.currentBar() == 1);
+    CHECK(!graph.voiceMuted({0}));
+
+    CHECK(!graph.scheduleVoiceMute({0}, true, 0));
+    CHECK(!graph.scheduleVoiceMute(
+        {0}, true, lps::RuntimeGraph::maximumScheduledBars + 1));
+    CHECK(graph.scheduleVoiceMute({0}, true, 1));
+    CHECK(graph.scheduleVoiceMute({0}, false, 1));
+    CHECK(graph.scheduledChangeCountAtBarOffset(1) == 1);
+    CHECK(graph.scheduledVoiceMute({0}) == std::optional<bool> {false});
+    CHECK(graph.voiceMuteScheduledAtBarOffset({0}, false, 1));
+    CHECK(!graph.voiceMuteScheduledAtBarOffset({0}, true, 1));
+    CHECK(graph.scheduleVoiceMute({0}, true, 1));
+    CHECK(graph.scheduleVoiceMute(
+        {0}, false, lps::RuntimeGraph::maximumScheduledBars));
+    CHECK(graph.scheduledVoiceMute({0}) == std::optional<bool> {true});
+    CHECK(graph.scheduledVoiceMuteBarsRemaining({0}) == 1);
+    CHECK(graph.voiceMuteScheduledAtBarOffset({0}, true, 1));
+    CHECK(graph.voiceMuteScheduledAtBarOffset(
+        {0}, false, lps::RuntimeGraph::maximumScheduledBars));
+    CHECK(graph.scheduledChangeCountAtBarOffset(1) == 1);
+    CHECK(graph.scheduledChangeCountAtBarOffset(
+        lps::RuntimeGraph::maximumScheduledBars) == 1);
+
+    CHECK(graph.process(
+        {0.5, 0.9, 120.0, 48'000.0, 19'200, true, false}, output));
+    CHECK(!graph.voiceMuted({0}));
+    CHECK(graph.currentBar() == 1);
+
+    CHECK(graph.process(
+        {0.9, 1.1, 120.0, 48'000.0, 9'600, true, false}, output));
+    CHECK(graph.voiceMuted({0}));
+    CHECK(graph.scheduledVoiceMute({0}) == std::optional<bool> {false});
+    CHECK(graph.scheduledVoiceMuteBarsRemaining({0}) == 7);
+    CHECK(graph.currentBar() == 2);
+
+    CHECK(graph.process(
+        {1.1, 7.1, 120.0, 48'000.0, 288'000, true, false}, output));
+    CHECK(graph.currentBar() == 8);
+    CHECK(graph.voiceMuted({0}));
+    CHECK(graph.scheduledVoiceMuteBarsRemaining({0}) == 1);
+    CHECK(graph.process(
+        {7.1, 8.1, 120.0, 48'000.0, 48'000, true, false}, output));
+    CHECK(graph.currentBar() == 1);
+    CHECK(!graph.voiceMuted({0}));
+    CHECK(!graph.scheduledVoiceMute({0}).has_value());
+}
+
+void testBarSchedulerDoesNotApplyAtStartOfFirstBar()
+{
+    lps::PatternLibrary patterns;
+    lps::PatternPlayer master(patterns);
+    master.setRuntimeId(0);
+    lps::Voice voice(lps::VoiceId {0});
+
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(master));
+    CHECK(graph.registerVoice(voice));
+    CHECK(graph.activate({}));
+    CHECK(graph.configureBarClock({0}));
+    graph.prepare({48'000.0, 24'000});
+
+    CHECK(graph.scheduleVoiceMute({0}, true, 1));
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.5, 120.0, 48'000.0, 24'000, true, true}, output));
+    CHECK(graph.currentBar() == 1);
+    CHECK(!graph.voiceMuted({0}));
+    CHECK(graph.scheduledVoiceMuteBarsRemaining({0}) == 1);
+
+    CHECK(graph.process(
+        {0.5, 1.1, 120.0, 48'000.0, 28'800, true, false}, output));
+    CHECK(graph.currentBar() == 2);
+    CHECK(graph.voiceMuted({0}));
+    CHECK(!graph.scheduledVoiceMute({0}).has_value());
+}
+
+void testBarSchedulerSupportsIndependentFutureChanges()
+{
+    lps::PatternLibrary patterns;
+    lps::PatternPlayer master(patterns);
+    lps::PatternPlayer follower(patterns);
+    master.setRuntimeId(0);
+    follower.setRuntimeId(1);
+    master.setTransitionPolicy({
+        lps::PatternTransitionPolicyType::explicitBoundary, {}});
+    follower.setTransitionPolicy({
+        lps::PatternTransitionPolicyType::explicitBoundary, {}});
+    lps::Voice voice(lps::VoiceId {1});
+
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(master));
+    CHECK(graph.registerPatternPlayer(follower));
+    CHECK(graph.registerVoice(voice));
+    CHECK(graph.activate({}));
+    CHECK(graph.configureBarClock({0}));
+    graph.prepare({48'000.0, 48'000});
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.5, 120.0, 48'000.0, 24'000, true, true}, output));
+    CHECK(graph.schedulePatternSelection({1}, lps::PatternId {2}, 2));
+    CHECK(graph.scheduleVoiceMute({1}, true, 2));
+    CHECK(graph.scheduleVoiceMute({1}, false, 4));
+    CHECK(graph.patternSelectionScheduledAtBarOffset({1}, 2)
+        == std::optional<lps::PatternId> {lps::PatternId {2}});
+    CHECK(!graph.patternSelectionScheduledAtBarOffset({1}, 1).has_value());
+    CHECK(graph.scheduledChangeCountAtBarOffset(2) == 2);
+    CHECK(graph.scheduledChangeCountAtBarOffset(4) == 1);
+
+    CHECK(graph.process(
+        {0.5, 1.1, 120.0, 48'000.0, 28'800, true, false}, output));
+    CHECK(follower.activePatternId() == lps::PatternId {1});
+    CHECK(!graph.voiceMuted({1}));
+    CHECK(graph.scheduledPatternBarsRemaining({1}) == 1);
+
+    CHECK(graph.process(
+        {1.1, 2.1, 120.0, 48'000.0, 48'000, true, false}, output));
+    CHECK(follower.activePatternId() == lps::PatternId {2});
+    CHECK(!graph.patternSelectionScheduledAtBarOffset({1}, 1).has_value());
+    CHECK(graph.voiceMuted({1}));
+    CHECK(graph.scheduledVoiceMuteBarsRemaining({1}) == 2);
+
+    CHECK(graph.process(
+        {2.1, 4.1, 120.0, 48'000.0, 96'000, true, false}, output));
+    CHECK(!graph.voiceMuted({1}));
+    CHECK(graph.currentBar() == 5);
+}
+
+void testScheduledMasterPatternChangeCountsOneBoundary()
+{
+    lps::PatternLibrary patterns;
+    lps::PatternPlayer master(patterns);
+    master.setRuntimeId(0);
+    master.setTransitionPolicy({
+        lps::PatternTransitionPolicyType::explicitBoundary, {}});
+
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(master));
+    CHECK(graph.activate({}));
+    CHECK(graph.configureBarClock({0}));
+    graph.prepare({48'000.0, 48'000});
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.5, 120.0, 48'000.0, 24'000, true, true}, output));
+    CHECK(graph.schedulePatternSelection({0}, lps::PatternId {2}, 1));
+    CHECK(graph.process(
+        {0.5, 1.1, 120.0, 48'000.0, 28'800, true, false}, output));
+    CHECK(master.activePatternId() == lps::PatternId {2});
+    CHECK(graph.currentBar() == 2);
 }
 
 void testValidationRejectsControlCycles()
@@ -251,7 +458,12 @@ void testPublishedGraphIsAdoptedAtBlockBoundary()
 int main()
 {
     testNewModulationValuesAreSampledBeforeHit();
+    testRenderClampsFinalHalfSampleEventToLastFrame();
     testArmedResetRestartsPatternAndModulationAtMasterRestBoundary();
+    testBarSchedulerDefersMuteToMasterCycleAndBoundsTheHorizon();
+    testBarSchedulerDoesNotApplyAtStartOfFirstBar();
+    testBarSchedulerSupportsIndependentFutureChanges();
+    testScheduledMasterPatternChangeCountsOneBoundary();
     testValidationRejectsPhaseOneMultipleSources();
     testValidationRejectsControlCycles();
     testActivationKeepsOldGraphOnRejection();

@@ -10,6 +10,7 @@ constexpr auto uiYellow = 0xffe3c51a;
 constexpr auto uiBlack = 0xff000000;
 constexpr auto uiRed = 0xffc9574f;
 constexpr auto uiBlue = 0xff78a5b4;
+constexpr auto uiGreen = 0xff79a86b;
 constexpr auto warmIvory = 0xffd5d2b8;
 constexpr auto lightGray = 0xffb8b7ac;
 constexpr auto darkGray = 0xff505255;
@@ -24,13 +25,16 @@ constexpr auto inactive = 0xff46484a;
 constexpr auto primaryText = warmIvory;
 constexpr auto secondaryText = lightGray;
 constexpr auto muteRed = uiRed;
-constexpr auto muteRedDark = darkGray;
 constexpr auto patternStepOff = lightGray;
 constexpr auto patternStepOffAlternate = 0xff92928a;
 constexpr auto patternStepOn = 0xff747672;
 constexpr auto patternStepTextOff = darkGray;
 constexpr auto patternStepTextOn = uiYellow;
 constexpr auto patternPlayhead = uiBlue;
+constexpr std::array<std::uint32_t,
+    LivePatternSequencerProcessor::groupCount> groupColourValues {
+    uiRed, uiBlue, uiYellow, uiGreen
+};
 
 constexpr int outerPadding = 2;
 constexpr int headerHeight = 0;
@@ -43,15 +47,23 @@ constexpr int controlsToGridGap = 12;
 constexpr int clickTargetSize = 41;
 constexpr int minimumPatternPanelHeight = 50;
 constexpr int voiceNameHeight = 12;
-constexpr int controlUtilityBarHeight = clickTargetSize;
 constexpr int modulationPanelHeight = clickTargetSize + 2;
 constexpr int playerBottomPadding = 2;
 constexpr int controlPanePadding = 8;
-constexpr int controlPaneTopRowHeight = 48;
+constexpr int controlPaneLabelHeight = 12;
+constexpr int controlPaneControlGap = 4;
+constexpr int controlPaneStackHeight = controlPaneLabelHeight + 2
+    + 3 * clickTargetSize + 2 * controlPaneControlGap;
 constexpr int controlPaneHeight = controlPanePadding * 2
-    + controlPaneTopRowHeight
-    + 3 * modulationPanelHeight
-    + sectionGap;
+    + controlPaneStackHeight;
+constexpr float barSchedulerLabelWidth = 44.0f;
+constexpr float minimumBarTransitionWidth = 40.0f;
+constexpr float maximumBarCellWidth = 72.0f;
+constexpr int barSchedulerHeight = 116;
+constexpr int modulationEditorPadding = 6;
+constexpr int modulationEditorHeight = modulationEditorPadding * 2
+    + 3 * modulationPanelHeight;
+constexpr int preferredModulationValueWidth = 28;
 constexpr int matrixGridLeft = 64;
 constexpr int matrixGridTop = 82;
 constexpr int matrixCellWidth = 32;
@@ -67,6 +79,9 @@ constexpr int patternCellGap = 1;
 constexpr int minimumPatternCellSize = 8;
 constexpr int patternGridLeft = contentHorizontalPadding
     + playerPanelHorizontalPadding + clickTargetSize
+    + perVoiceControlGap + clickTargetSize
+    + perVoiceControlGap + clickTargetSize
+    + perVoiceControlGap + clickTargetSize
     + perVoiceControlGap + clickTargetSize
     + perVoiceControlGap + clickTargetSize
     + perVoiceControlGap + clickTargetSize
@@ -120,6 +135,232 @@ constexpr std::array modulationLanes {
         + (modified ? " *" : "");
 }
 
+[[nodiscard]] constexpr std::size_t targetBarForOffset(
+    std::size_t currentBar,
+    std::size_t barsFromNow) noexcept
+{
+    constexpr auto maximum =
+        LivePatternSequencerProcessor::maximumScheduledBars;
+    if (barsFromNow == 0)
+        return 0;
+    return currentBar == 0
+        ? (barsFromNow > maximum ? maximum : barsFromNow)
+        : ((currentBar + barsFromNow - 2) % maximum) + 1;
+}
+
+[[nodiscard]] constexpr std::size_t offsetForTargetBar(
+    std::size_t currentBar,
+    std::size_t targetBar) noexcept
+{
+    constexpr auto maximum =
+        LivePatternSequencerProcessor::maximumScheduledBars;
+    if (currentBar == 0)
+        return targetBar > maximum ? maximum : targetBar;
+    return ((targetBar + maximum - currentBar) % maximum) + 1;
+}
+
+static_assert(targetBarForOffset(7, 2) == 8);
+static_assert(targetBarForOffset(8, 1) == 8);
+static_assert(targetBarForOffset(8, 2) == 1);
+static_assert(offsetForTargetBar(7, 8) == 2);
+static_assert(offsetForTargetBar(8, 8) == 1);
+static_assert(offsetForTargetBar(8, 1) == 2);
+
+void paintScheduleMarker(
+    juce::Graphics& graphics,
+    std::size_t targetBar,
+    juce::Point<float> centre,
+    float radius,
+    juce::Colour colour,
+    bool filled = true)
+{
+    if (targetBar == 0)
+        return;
+
+    graphics.setColour(colour);
+    juce::Path shape;
+    switch ((targetBar - 1) % 8)
+    {
+        case 0:
+            if (filled)
+                graphics.fillEllipse(
+                    centre.x - radius, centre.y - radius,
+                    radius * 2.0f, radius * 2.0f);
+            else
+                graphics.drawEllipse(
+                    centre.x - radius, centre.y - radius,
+                    radius * 2.0f, radius * 2.0f, 1.0f);
+            return;
+        case 1:
+            shape.addTriangle(
+                centre.x, centre.y - radius,
+                centre.x + radius, centre.y + radius,
+                centre.x - radius, centre.y + radius);
+            break;
+        case 2:
+            shape.addQuadrilateral(
+                centre.x, centre.y - radius,
+                centre.x + radius, centre.y,
+                centre.x, centre.y + radius,
+                centre.x - radius, centre.y);
+            break;
+        case 3:
+            shape.addRectangle(
+                centre.x - radius * 0.82f,
+                centre.y - radius * 0.82f,
+                radius * 1.64f,
+                radius * 1.64f);
+            break;
+        case 4:
+            shape.startNewSubPath(centre.x - radius, centre.y);
+            shape.lineTo(centre.x + radius, centre.y);
+            shape.startNewSubPath(centre.x, centre.y - radius);
+            shape.lineTo(centre.x, centre.y + radius);
+            break;
+        case 5:
+            shape.startNewSubPath(
+                centre.x - radius * 0.75f,
+                centre.y - radius * 0.75f);
+            shape.lineTo(
+                centre.x + radius * 0.75f,
+                centre.y + radius * 0.75f);
+            shape.startNewSubPath(
+                centre.x + radius * 0.75f,
+                centre.y - radius * 0.75f);
+            shape.lineTo(
+                centre.x - radius * 0.75f,
+                centre.y + radius * 0.75f);
+            break;
+        case 6:
+        {
+            constexpr int points = 10;
+            for (int point = 0; point < points; ++point)
+            {
+                const float angle = -juce::MathConstants<float>::halfPi
+                    + static_cast<float>(point)
+                        * juce::MathConstants<float>::twoPi
+                        / static_cast<float>(points);
+                const float pointRadius = point % 2 == 0
+                    ? radius : radius * 0.43f;
+                const juce::Point<float> position {
+                    centre.x + std::cos(angle) * pointRadius,
+                    centre.y + std::sin(angle) * pointRadius
+                };
+                if (point == 0)
+                    shape.startNewSubPath(position);
+                else
+                    shape.lineTo(position);
+            }
+            shape.closeSubPath();
+            break;
+        }
+        case 7:
+        {
+            constexpr int points = 6;
+            for (int point = 0; point < points; ++point)
+            {
+                const float angle = static_cast<float>(point)
+                    * juce::MathConstants<float>::twoPi
+                    / static_cast<float>(points);
+                const juce::Point<float> position {
+                    centre.x + std::cos(angle) * radius,
+                    centre.y + std::sin(angle) * radius
+                };
+                if (point == 0)
+                    shape.startNewSubPath(position);
+                else
+                    shape.lineTo(position);
+            }
+            shape.closeSubPath();
+            break;
+        }
+    }
+
+    if ((targetBar - 1) % 8 == 4 || (targetBar - 1) % 8 == 5)
+        graphics.strokePath(
+            shape,
+            juce::PathStrokeType(std::max(1.8f, radius * 0.24f)));
+    else if (filled)
+        graphics.fillPath(shape);
+    else
+        graphics.strokePath(
+            shape,
+            juce::PathStrokeType(std::max(1.0f, radius * 0.16f)));
+}
+
+enum class ScheduledActionIcon { mute, unmute, pattern };
+
+[[nodiscard]] juce::Colour scheduledActionIconColour(
+    ScheduledActionIcon icon) noexcept
+{
+    switch (icon)
+    {
+        case ScheduledActionIcon::mute: return juce::Colour(uiRed);
+        case ScheduledActionIcon::unmute: return juce::Colour(uiBlue);
+        case ScheduledActionIcon::pattern: return juce::Colour(uiYellow);
+    }
+    return juce::Colour(warmIvory);
+}
+
+void paintScheduledActionIcon(
+    juce::Graphics& graphics,
+    ScheduledActionIcon icon,
+    juce::Rectangle<float> bounds,
+    juce::Colour colour)
+{
+    graphics.setColour(colour);
+    if (icon == ScheduledActionIcon::pattern)
+    {
+        const auto y = bounds.getCentreY();
+        const float strokeWidth = std::max(1.8f, bounds.getHeight() * 0.12f);
+        graphics.drawLine(
+            bounds.getX(), y, bounds.getRight() - 2.0f, y, strokeWidth);
+        juce::Path arrow;
+        arrow.startNewSubPath(bounds.getRight() - 6.0f, y - 4.0f);
+        arrow.lineTo(bounds.getRight() - 1.0f, y);
+        arrow.lineTo(bounds.getRight() - 6.0f, y + 4.0f);
+        graphics.strokePath(arrow, juce::PathStrokeType(strokeWidth));
+        return;
+    }
+
+    const float scale = std::min(bounds.getWidth(), bounds.getHeight()) / 14.0f;
+    const auto point = [scale, &bounds](float x, float y)
+    {
+        return juce::Point<float> {
+            bounds.getCentreX() + (x - 7.0f) * scale,
+            bounds.getCentreY() + (y - 7.0f) * scale};
+    };
+    juce::Path speaker;
+    speaker.startNewSubPath(point(1.0f, 5.0f));
+    speaker.lineTo(point(4.5f, 5.0f));
+    speaker.lineTo(point(8.0f, 2.0f));
+    speaker.lineTo(point(8.0f, 12.0f));
+    speaker.lineTo(point(4.5f, 9.0f));
+    speaker.lineTo(point(1.0f, 9.0f));
+    speaker.closeSubPath();
+    graphics.fillPath(speaker);
+
+    if (icon == ScheduledActionIcon::mute)
+    {
+        const float strokeWidth = std::max(1.8f, 1.7f * scale);
+        graphics.drawLine(
+            juce::Line<float>(point(9.0f, 4.0f), point(13.0f, 10.0f)),
+            strokeWidth);
+        graphics.drawLine(
+            juce::Line<float>(point(13.0f, 4.0f), point(9.0f, 10.0f)),
+            strokeWidth);
+    }
+    else
+    {
+        juce::Path wave;
+        wave.startNewSubPath(point(9.5f, 4.0f));
+        wave.quadraticTo(point(13.0f, 7.0f), point(9.5f, 10.0f));
+        graphics.strokePath(
+            wave,
+            juce::PathStrokeType(std::max(1.8f, 1.7f * scale)));
+    }
+}
+
 class LaneMenuButton final : public juce::TextButton
 {
 public:
@@ -132,12 +373,30 @@ public:
     {
     }
 
+    void setScheduledTarget(std::size_t targetBar)
+    {
+        if (scheduledTargetBar_ == targetBar)
+            return;
+        scheduledTargetBar_ = targetBar;
+        repaint();
+    }
+
+    void setLocked(bool locked)
+    {
+        if (locked_ == locked)
+            return;
+        locked_ = locked;
+        repaint();
+    }
+
     void paintButton(
         juce::Graphics& graphics,
         bool isMouseOverButton,
         bool isButtonDown) override
     {
         auto face = juce::Colour(panel);
+        if (locked_)
+            face = face.darker(0.28f);
         if (isButtonDown)
             face = face.darker(0.12f);
         else if (isMouseOverButton)
@@ -308,11 +567,41 @@ public:
                 getHeight(),
                 juce::Justification::centred);
         }
+
+        if (scheduledTargetBar_ != 0)
+        {
+            paintScheduleMarker(
+                graphics,
+                scheduledTargetBar_,
+                {bounds.getRight() - 5.0f, bounds.getY() + 5.0f},
+                3.8f,
+                juce::Colour(uiYellow));
+        }
+
+        if (locked_)
+        {
+            const float right = bounds.getRight() - 4.0f;
+            const float bottom = bounds.getBottom() - 3.0f;
+            const juce::Rectangle<float> lockBody {
+                right - 7.0f, bottom - 6.0f, 7.0f, 6.0f};
+            graphics.setColour(juce::Colour(secondaryText));
+            graphics.fillRoundedRectangle(lockBody, 1.0f);
+            juce::Path shackle;
+            shackle.addCentredArc(
+                lockBody.getCentreX(), lockBody.getY(),
+                2.4f, 3.0f, 0.0f,
+                juce::MathConstants<float>::pi,
+                juce::MathConstants<float>::twoPi,
+                true);
+            graphics.strokePath(shackle, juce::PathStrokeType(1.3f));
+        }
     }
 
 private:
     Kind kind_;
     ModulationLane modulationLane_;
+    std::size_t scheduledTargetBar_ = 0;
+    bool locked_ = false;
 };
 
 class PatternPreviewMenuItem final : public juce::PopupMenu::CustomComponent
@@ -392,10 +681,14 @@ private:
 class ModulationPreviewMenuItem final : public juce::PopupMenu::CustomComponent
 {
 public:
-    ModulationPreviewMenuItem(lps::Modulation modulation, bool selected)
+    ModulationPreviewMenuItem(
+        lps::Modulation modulation,
+        bool selected,
+        bool locked)
         : juce::PopupMenu::CustomComponent(true),
           modulation_(modulation),
-          selected_(selected)
+          selected_(selected),
+          locked_(locked)
     {
     }
 
@@ -415,6 +708,8 @@ public:
             graphics.setColour(juce::Colour(uiBlue));
             graphics.fillRect(2, 4, 4, getHeight() - 8);
         }
+
+        graphics.setOpacity(locked_ ? 0.35f : 1.0f);
 
         const juce::Rectangle<float> graphBounds {
             12.0f,
@@ -501,40 +796,7 @@ public:
 private:
     lps::Modulation modulation_;
     bool selected_ = false;
-};
-
-class MuteButton final : public juce::TextButton
-{
-public:
-    void paintButton(
-        juce::Graphics& graphics,
-        bool isMouseOverButton,
-        bool isButtonDown) override
-    {
-        const bool engaged = getToggleState() || isButtonDown;
-        auto face = juce::Colour(engaged ? muteRed : inactive);
-        if (isMouseOverButton && !engaged)
-            face = face.brighter(0.08f);
-
-        const auto bounds = getLocalBounds().toFloat().reduced(1.0f);
-        graphics.setColour(face);
-        graphics.fillRoundedRectangle(bounds, 3.0f);
-        graphics.setColour(juce::Colour(
-            engaged ? muteRedDark : muteRed));
-        graphics.drawRoundedRectangle(bounds, 3.0f, 1.5f);
-
-        const float labelSize = juce::jlimit(
-            8.0f,
-            20.0f,
-            static_cast<float>(getHeight()) * 0.55f);
-        graphics.setFont(juce::Font(
-            juce::FontOptions(labelSize, juce::Font::bold)));
-        graphics.drawText(
-            "M",
-            getLocalBounds(),
-            juce::Justification::centred,
-            false);
-    }
+    bool locked_ = false;
 };
 
 class ModulationSliderPopup final : public juce::Component
@@ -637,70 +899,73 @@ void LivePatternSequencerEditor::ControlPaneComponent::resized()
     editor_.resizedControlPane();
 }
 
+LivePatternSequencerEditor::BarSchedulerComponent::BarSchedulerComponent(
+    LivePatternSequencerEditor& editor) noexcept
+    : editor_(editor)
+{
+    setOpaque(false);
+    setInterceptsMouseClicks(false, false);
+}
+
+void LivePatternSequencerEditor::BarSchedulerComponent::paint(
+    juce::Graphics& graphics)
+{
+    editor_.paintBarScheduler(graphics);
+}
+
+LivePatternSequencerEditor::ModulationEditorComponent::
+ModulationEditorComponent(LivePatternSequencerEditor& editor) noexcept
+    : editor_(editor)
+{
+    setOpaque(true);
+    setAlwaysOnTop(true);
+}
+
+void LivePatternSequencerEditor::ModulationEditorComponent::paint(
+    juce::Graphics& graphics)
+{
+    editor_.paintModulationEditor(graphics);
+}
+
+void LivePatternSequencerEditor::ModulationEditorComponent::resized()
+{
+    editor_.resizedModulationEditor();
+}
+
+LivePatternSequencerEditor::ModulationBlockLayer::ModulationBlockLayer(
+    LivePatternSequencerEditor& editor) noexcept
+    : editor_(editor)
+{
+    setAlwaysOnTop(true);
+    setInterceptsMouseClicks(true, false);
+}
+
+void LivePatternSequencerEditor::ModulationBlockLayer::mouseDown(
+    const juce::MouseEvent&)
+{
+    editor_.modulationBlockLayerMouseDown();
+}
+
+LivePatternSequencerEditor::MenuDismissLayer::MenuDismissLayer(
+    LivePatternSequencerEditor& editor) noexcept
+    : editor_(editor)
+{
+    setAlwaysOnTop(true);
+    setInterceptsMouseClicks(true, false);
+}
+
+void LivePatternSequencerEditor::MenuDismissLayer::mouseDown(
+    const juce::MouseEvent& event)
+{
+    editor_.menuDismissLayerMouseDown(event);
+}
+
 void LivePatternSequencerEditor::PagedViewport::mouseWheelMove(
     const juce::MouseEvent&,
     const juce::MouseWheelDetails&)
 {
     // Voice navigation is deliberately page-based. The fixed navigation
     // buttons keep every transition aligned to a completely new set of rows.
-}
-
-void LivePatternSequencerEditor::SpeedSelector::paint(juce::Graphics& graphics)
-{
-    const auto bounds = getLocalBounds().toFloat().reduced(1.0f);
-    graphics.setColour(juce::Colour(panel));
-    graphics.fillRoundedRectangle(bounds, 3.0f);
-    graphics.setColour(juce::Colour(border));
-    graphics.drawRoundedRectangle(bounds, 3.0f, 1.5f);
-
-    const float centreX = bounds.getCentreX();
-    const float centreY = bounds.getY() + bounds.getHeight() * 0.64f;
-    const float radius = std::max(
-        3.0f, std::min(bounds.getWidth(), bounds.getHeight()) * 0.30f);
-    juce::Path gauge;
-    constexpr int segmentCount = 12;
-    for (int segment = 0; segment <= segmentCount; ++segment)
-    {
-        const float proportion = static_cast<float>(segment)
-            / static_cast<float>(segmentCount);
-        const float angle = juce::degreesToRadians(-65.0f + 130.0f * proportion);
-        const juce::Point<float> point {
-            centreX + std::sin(angle) * radius,
-            centreY - std::cos(angle) * radius
-        };
-        if (segment == 0)
-            gauge.startNewSubPath(point);
-        else
-            gauge.lineTo(point);
-    }
-    graphics.setColour(juce::Colour(warmIvory));
-    graphics.strokePath(
-        gauge,
-        juce::PathStrokeType(
-            std::max(1.0f, bounds.getWidth() * 0.055f),
-            juce::PathStrokeType::curved,
-            juce::PathStrokeType::rounded));
-
-    const int selectedSpeed = getSelectedItemIndex();
-    graphics.setColour(juce::Colour(uiYellow));
-    if (selectedSpeed >= 0 && selectedSpeed < 3)
-    {
-        const float needleAngle = juce::degreesToRadians(
-            -55.0f + 55.0f * static_cast<float>(selectedSpeed));
-        graphics.drawLine(
-            centreX,
-            centreY,
-            centreX + std::sin(needleAngle) * radius * 0.82f,
-            centreY - std::cos(needleAngle) * radius * 0.82f,
-            std::max(1.0f, bounds.getWidth() * 0.06f));
-        graphics.fillEllipse(
-            centreX - 1.7f, centreY - 1.7f, 3.4f, 3.4f);
-    }
-    else
-    {
-        graphics.fillEllipse(
-            centreX - 1.7f, centreY - 1.7f, 3.4f, 3.4f);
-    }
 }
 
 LivePatternSequencerEditor::MatrixComponent::MatrixComponent(
@@ -753,6 +1018,7 @@ void LivePatternSequencerEditor::ModulationCell::setActive(bool shouldBeActive)
 void LivePatternSequencerEditor::ModulationCell::paint(
     juce::Graphics& graphics)
 {
+    graphics.setOpacity(isEnabled() ? 1.0f : 0.32f);
     auto square = getLocalBounds().reduced(1);
     graphics.setColour(juce::Colour(inactive));
     graphics.fillRect(square);
@@ -826,6 +1092,104 @@ void LivePatternSequencerEditor::ModulationCell::mouseUp(
 LivePatternSequencerEditor::UtilityButton::UtilityButton(Kind kind) noexcept
     : kind_(kind)
 {
+}
+
+LivePatternSequencerEditor::SpeakerButton::SpeakerButton(Kind kind) noexcept
+    : kind_(kind)
+{
+}
+
+void LivePatternSequencerEditor::SpeakerButton::setKind(Kind kind) noexcept
+{
+    if (kind_ == kind)
+        return;
+    kind_ = kind;
+    repaint();
+}
+
+void LivePatternSequencerEditor::SpeakerButton::setScheduledTarget(
+    std::size_t targetBar)
+{
+    if (scheduledTargetBar_ == targetBar)
+        return;
+    scheduledTargetBar_ = targetBar;
+    repaint();
+}
+
+void LivePatternSequencerEditor::SpeakerButton::paintButton(
+    juce::Graphics& graphics,
+    bool isMouseOverButton,
+    bool isButtonDown)
+{
+    const bool engaged = getToggleState() || isButtonDown;
+    auto face = findColour(engaged
+        ? juce::TextButton::buttonOnColourId
+        : juce::TextButton::buttonColourId);
+    if (isMouseOverButton && isEnabled())
+        face = face.brighter(0.08f);
+
+    const auto bounds = getLocalBounds().toFloat().reduced(1.0f);
+    const float opacity = isEnabled() ? 1.0f : 0.38f;
+    graphics.setColour(face.withMultipliedAlpha(opacity));
+    graphics.fillRoundedRectangle(bounds, 3.0f);
+    graphics.setColour(
+        juce::Colour(border).withMultipliedAlpha(opacity));
+    graphics.drawRoundedRectangle(bounds, 3.0f, 1.5f);
+
+    auto iconColour = findColour(engaged
+        ? juce::TextButton::textColourOnId
+        : juce::TextButton::textColourOffId);
+    graphics.setColour(iconColour.withMultipliedAlpha(opacity));
+
+    const float scale = std::min(bounds.getWidth(), bounds.getHeight()) / 41.0f;
+    const auto point = [scale, &bounds](float x, float y)
+    {
+        return juce::Point<float> {
+            bounds.getCentreX() + (x - 20.5f) * scale,
+            bounds.getCentreY() + (y - 20.5f) * scale};
+    };
+
+    juce::Path speaker;
+    speaker.startNewSubPath(point(8.5f, 17.0f));
+    speaker.lineTo(point(14.0f, 17.0f));
+    speaker.lineTo(point(21.5f, 11.0f));
+    speaker.lineTo(point(21.5f, 30.0f));
+    speaker.lineTo(point(14.0f, 24.0f));
+    speaker.lineTo(point(8.5f, 24.0f));
+    speaker.closeSubPath();
+    graphics.fillPath(speaker);
+
+    const float strokeWidth = std::max(1.6f, 2.0f * scale);
+    if (kind_ == Kind::mute)
+    {
+        graphics.drawLine(
+            juce::Line<float>(point(9.0f, 31.0f), point(32.0f, 8.0f)),
+            strokeWidth + 0.5f);
+    }
+    else
+    {
+        juce::Path waves;
+        waves.startNewSubPath(point(25.0f, 15.5f));
+        waves.quadraticTo(point(30.0f, 20.5f), point(25.0f, 25.5f));
+        waves.startNewSubPath(point(28.5f, 11.5f));
+        waves.quadraticTo(point(37.0f, 20.5f), point(28.5f, 29.5f));
+        graphics.strokePath(
+            waves,
+            juce::PathStrokeType(
+                strokeWidth,
+                juce::PathStrokeType::curved,
+                juce::PathStrokeType::rounded));
+    }
+
+    if (scheduledTargetBar_ != 0)
+    {
+        paintScheduleMarker(
+            graphics,
+            scheduledTargetBar_,
+            {bounds.getRight() - 5.0f, bounds.getY() + 5.0f},
+            3.8f,
+            juce::Colour(uiYellow));
+    }
 }
 
 void LivePatternSequencerEditor::UtilityButton::setKind(Kind kind) noexcept
@@ -914,6 +1278,73 @@ void LivePatternSequencerEditor::UtilityButton::paintButton(
     }
 }
 
+LivePatternSequencerEditor::GroupAssignmentButton::GroupAssignmentButton()
+    : juce::Button("Voice groups")
+{
+    setTooltip(
+        "Assign this voice to groups: red upper-left, blue upper-right, "
+        "yellow lower-left, green lower-right");
+}
+
+void LivePatternSequencerEditor::GroupAssignmentButton::setMembershipMask(
+    std::uint8_t mask)
+{
+    if (membershipMask_ == mask)
+        return;
+    membershipMask_ = mask;
+    repaint();
+}
+
+void LivePatternSequencerEditor::GroupAssignmentButton::paintButton(
+    juce::Graphics& graphics,
+    bool isMouseOverButton,
+    bool isButtonDown)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced(1.0f);
+    graphics.setColour(juce::Colour(panel));
+    graphics.fillRoundedRectangle(bounds, 3.0f);
+    graphics.setColour(juce::Colour(border));
+    graphics.drawRoundedRectangle(bounds, 3.0f, 1.5f);
+
+    const auto leaf = bounds.reduced(bounds.getWidth() * 0.19f);
+    constexpr float gap = 1.5f;
+    const float petalWidth = (leaf.getWidth() - gap) * 0.5f;
+    const float petalHeight = (leaf.getHeight() - gap) * 0.5f;
+    for (std::size_t group = 0; group < groupColourValues.size(); ++group)
+    {
+        const int column = static_cast<int>(group % 2);
+        const int row = static_cast<int>(group / 2);
+        const juce::Rectangle<float> petal {
+            leaf.getX() + static_cast<float>(column) * (petalWidth + gap),
+            leaf.getY() + static_cast<float>(row) * (petalHeight + gap),
+            petalWidth,
+            petalHeight
+        };
+        const bool active = (membershipMask_ & (1u << group)) != 0;
+        auto colour = juce::Colour(active
+            ? groupColourValues[group]
+            : inactive);
+        if (active && (isMouseOverButton || isButtonDown))
+            colour = colour.brighter(isButtonDown ? 0.02f : 0.10f);
+        graphics.setColour(colour);
+        graphics.fillRoundedRectangle(petal, 2.5f);
+        graphics.setColour(juce::Colour(border).withMultipliedAlpha(
+            active ? 0.9f : 0.55f));
+        graphics.drawRoundedRectangle(petal, 2.5f, 1.0f);
+    }
+}
+
+void LivePatternSequencerEditor::GroupAssignmentButton::clicked(
+    const juce::ModifierKeys&)
+{
+    const auto point = getMouseXYRelative();
+    const auto group = static_cast<std::size_t>(
+        (point.x >= getWidth() / 2 ? 1 : 0)
+        + (point.y >= getHeight() / 2 ? 2 : 0));
+    if (onGroupClicked)
+        onGroupClicked(group);
+}
+
 LivePatternSequencerEditor::LivePatternSequencerEditor(
     LivePatternSequencerProcessor& processorToEdit)
     : juce::AudioProcessorEditor(processorToEdit),
@@ -921,6 +1352,10 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
       playerCount_(processorToEdit.playerCountForUi()),
       content_(*this),
       controlPane_(*this),
+      barScheduler_(*this),
+      modulationBlockLayer_(*this),
+      modulationEditor_(*this),
+      menuDismissLayer_(*this),
       suppressionButton_(UtilityButton::Kind::matrix),
       previousPageButton_(UtilityButton::Kind::previousPage),
       nextPageButton_(UtilityButton::Kind::nextPage),
@@ -1005,7 +1440,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     offsetLeftButtons_.reserve(playerCount_);
     offsetRightButtons_.reserve(playerCount_);
     muteButtons_.reserve(playerCount_);
-    voiceSelectButtons_.reserve(playerCount_);
+    groupAssignmentButtons_.reserve(playerCount_);
     for (const auto lane : modulationLanes)
     {
         const auto laneSlot = laneIndex(lane);
@@ -1023,33 +1458,36 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         const bool supportsPattern =
             processor_.playerSupportsPatternEditingForUi(playerIndex);
 
-        voiceSelectButtons_.push_back(std::make_unique<juce::TextButton>());
-        auto& voiceButton = *voiceSelectButtons_.back();
-        auto voiceName = processor_.playerNameForUi(playerIndex);
-        if (voiceName.isEmpty())
-            voiceName = "VOICE " + juce::String(static_cast<int>(playerIndex + 1));
-        voiceButton.setButtonText(
-            juce::String(static_cast<int>(playerIndex + 1)));
-        voiceButton.setClickingTogglesState(true);
-        voiceButton.setToggleState(playerIndex == 0, juce::dontSendNotification);
-        voiceButton.setTooltip(
-            "Select only " + voiceName
-            + "; hold Shift or Command/Ctrl to add or remove voices");
-        voiceButton.onClick = [this, playerIndex]
+        groupAssignmentButtons_.push_back(
+            std::make_unique<GroupAssignmentButton>());
+        auto& groupButton = *groupAssignmentButtons_.back();
+        std::uint8_t membershipMask = 0;
+        for (std::size_t groupIndex = 0;
+             groupIndex < LivePatternSequencerProcessor::groupCount;
+             ++groupIndex)
         {
-            const auto modifiers =
-                juce::ComponentPeer::getCurrentModifiersRealtime();
-            selectVoice(
+            if (processor_.playerInGroupForUi(playerIndex, groupIndex))
+                membershipMask |= static_cast<std::uint8_t>(1u << groupIndex);
+        }
+        groupButton.setMembershipMask(membershipMask);
+        groupButton.onGroupClicked = [this, playerIndex](std::size_t groupIndex)
+        {
+            processor_.setPlayerInGroup(
                 playerIndex,
-                modifiers.isShiftDown() || modifiers.isCommandDown());
+                groupIndex,
+                !processor_.playerInGroupForUi(playerIndex, groupIndex));
+            refreshSelectedControls(true);
+            content_.repaint();
+            barScheduler_.repaint();
         };
-        content_.addAndMakeVisible(voiceButton);
+        content_.addAndMakeVisible(groupButton);
 
         patternMenuButtons_.push_back(std::make_unique<LaneMenuButton>(
             LaneMenuButton::Kind::pattern));
         auto& patternMenuButton = *patternMenuButtons_.back();
         patternMenuButton.setButtonText(patternMenuLabel(playerIndex, false));
-        patternMenuButton.setTooltip("Choose a pattern for this voice");
+        patternMenuButton.setTooltip(
+            "Schedule a pattern for this voice at the next bass-drum bar");
         patternMenuButton.onClick = [this, playerIndex]
         {
             selectVoice(playerIndex, false);
@@ -1076,7 +1514,10 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         {
             const auto selected = patternSelectors_[playerIndex]->getSelectedItemIndex();
             if (selected >= 0)
-                processor_.selectPatternForPlayer(playerIndex, static_cast<std::size_t>(selected));
+                (void) processor_.schedulePatternForPlayer(
+                    playerIndex,
+                    static_cast<std::size_t>(selected),
+                    scheduledBarsFromNow());
         };
 
         savePatternButtons_.push_back(std::make_unique<juce::TextButton>());
@@ -1126,12 +1567,14 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         speedSelector.setSelectedItemIndex(
             static_cast<int>(processor_.playerPlaybackSpeed(playerIndex)),
             juce::dontSendNotification);
+        speedSelector.setTooltip("Set this voice's playback speed");
         speedSelector.onChange = [this, playerIndex]
         {
             const auto selected = speedSelectors_[playerIndex]->getSelectedItemIndex();
             if (selected >= 0)
                 processor_.setPlayerPlaybackSpeed(playerIndex, static_cast<std::size_t>(selected));
         };
+        content_.addAndMakeVisible(speedSelector);
 
         offsetLeftButtons_.push_back(std::make_unique<juce::TextButton>());
         auto& offsetLeftButton = *offsetLeftButtons_.back();
@@ -1153,30 +1596,39 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         };
         content_.addAndMakeVisible(offsetRightButton);
 
-        muteButtons_.push_back(std::make_unique<MuteButton>());
+        muteButtons_.push_back(std::make_unique<SpeakerButton>(
+            SpeakerButton::Kind::mute));
         auto& muteButton = *muteButtons_.back();
-        muteButton.setButtonText("M");
         muteButton.setClickingTogglesState(false);
         muteButton.setToggleState(
             processor_.playerMutedForUi(playerIndex),
             juce::dontSendNotification);
         muteButton.setTooltip(
-            "Toggle mute for " + processor_.playerNameForUi(playerIndex)
-            + " while its sequence keeps running");
+            "Schedule mute or unmute for "
+            + processor_.playerNameForUi(playerIndex)
+            + " at the next bass-drum bar");
+        muteButton.setColour(
+            juce::TextButton::buttonColourId,
+            juce::Colour(uiGreen).darker(0.12f));
         muteButton.setColour(
             juce::TextButton::buttonOnColourId,
             juce::Colour(muteRed));
         muteButton.setColour(
+            juce::TextButton::textColourOffId,
+            juce::Colour(secondaryText).darker(0.12f));
+        muteButton.setColour(
             juce::TextButton::textColourOnId,
-            juce::Colour(muteRedDark));
+            juce::Colour(primaryText).brighter(0.10f));
         muteButton.onClick = [this, playerIndex]
         {
-            const bool shouldMute =
-                !processor_.playerMutedForUi(playerIndex);
-            processor_.setPlayerMuted(playerIndex, shouldMute);
-            muteButtons_[playerIndex]->setToggleState(
-                shouldMute, juce::dontSendNotification);
+            const auto barsFromNow = scheduledBarsFromNow();
+            (void) processor_.schedulePlayerMute(
+                playerIndex,
+                !playerMutedAtBarOffset(playerIndex, barsFromNow),
+                barsFromNow);
+            refreshSelectedControls(true);
             content_.repaint();
+            controlPane_.repaint();
         };
         content_.addAndMakeVisible(muteButton);
 
@@ -1340,6 +1792,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         }
 
         patternMenuButton.setVisible(supportsPattern);
+        speedSelector.setVisible(supportsPattern);
         offsetLeftButton.setVisible(supportsPattern);
         offsetRightButton.setVisible(supportsPattern);
     }
@@ -1352,8 +1805,12 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     {
         patternMenuButtons_[playerIndex]->setVisible(
             processor_.playerSupportsPatternEditingForUi(playerIndex));
-        offsetLeftButtons_[playerIndex]->setVisible(false);
-        offsetRightButtons_[playerIndex]->setVisible(false);
+        speedSelectors_[playerIndex]->setVisible(
+            processor_.playerSupportsPatternEditingForUi(playerIndex));
+        offsetLeftButtons_[playerIndex]->setVisible(
+            processor_.playerSupportsPatternEditingForUi(playerIndex));
+        offsetRightButtons_[playerIndex]->setVisible(
+            processor_.playerSupportsPatternEditingForUi(playerIndex));
         for (const auto lane : modulationLanes)
         {
             const auto laneSlot = laneIndex(lane);
@@ -1384,121 +1841,145 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     viewport_.setWantsKeyboardFocus(false);
     addAndMakeVisible(viewport_);
 
-    controlPatternMenuButton_ = std::make_unique<LaneMenuButton>(
-        LaneMenuButton::Kind::pattern);
-    controlPatternMenuButton_->setButtonText("PATTERN");
-    controlPatternMenuButton_->setTooltip(
-        "Choose a pattern for every selected voice or save the primary voice");
-    controlPatternMenuButton_->onClick = [this]
+    controlVoiceLabels_.reserve(playerCount_);
+    controlVoiceMuteButtons_.reserve(playerCount_);
+    const auto configureSpeakerActionButton = [](
+        SpeakerButton& button,
+        juce::Colour activeColour)
     {
-        const auto patternPlayerIndex = controlPatternPlayerIndex();
-        if (patternPlayerIndex < playerCount_)
-            showPatternMenu(
-                patternPlayerIndex, controlPatternMenuButton_.get());
+        button.setColour(
+            juce::TextButton::buttonColourId,
+            juce::Colour(inactive).darker(0.12f));
+        button.setColour(
+            juce::TextButton::buttonOnColourId,
+            activeColour.darker(0.12f));
+        button.setColour(
+            juce::TextButton::textColourOffId,
+            juce::Colour(secondaryText).darker(0.12f));
+        button.setColour(
+            juce::TextButton::textColourOnId,
+            juce::Colour(primaryText).brighter(0.10f));
     };
-    controlPane_.addAndMakeVisible(*controlPatternMenuButton_);
+    for (std::size_t playerIndex = 0;
+         playerIndex < playerCount_;
+         ++playerIndex)
+    {
+        const auto voiceName = processor_.playerNameForUi(playerIndex);
+        controlVoiceLabels_.push_back(std::make_unique<juce::Label>());
+        auto& label = *controlVoiceLabels_.back();
+        label.setText(voiceName.toUpperCase(), juce::dontSendNotification);
+        label.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        label.setJustificationType(juce::Justification::centred);
+        label.setColour(juce::Label::textColourId, juce::Colour(primaryText));
+        controlPane_.addAndMakeVisible(label);
 
-    controlSpeedSelector_.addItem("0.5x", 1);
-    controlSpeedSelector_.addItem("1x", 2);
-    controlSpeedSelector_.addItem("2x", 3);
-    controlSpeedSelector_.setTooltip(
-        "Set playback speed for every selected pattern voice");
-    controlSpeedSelector_.onChange = [this]
-    {
-        const auto selected = controlSpeedSelector_.getSelectedItemIndex();
-        if (selected < 0)
-            return;
-        applyToSelectedPatternPlayers([this, selected](std::size_t playerIndex)
+        controlVoiceMuteButtons_.push_back(
+            std::make_unique<SpeakerButton>(SpeakerButton::Kind::mute));
+        auto& mute = *controlVoiceMuteButtons_.back();
+        mute.setColour(
+            juce::TextButton::buttonColourId,
+            juce::Colour(uiGreen).darker(0.12f));
+        mute.setColour(
+            juce::TextButton::buttonOnColourId,
+            juce::Colour(muteRed).darker(0.12f));
+        mute.setColour(
+            juce::TextButton::textColourOffId,
+            juce::Colour(primaryText).brighter(0.10f));
+        mute.setColour(
+            juce::TextButton::textColourOnId,
+            juce::Colour(primaryText).brighter(0.10f));
+        mute.setTooltip(
+            "Toggle " + voiceName
+            + " mute at the next bar, or hold 1-8 while clicking to choose "
+              "the bar");
+        mute.onClick = [this, playerIndex]
         {
-            processor_.setPlayerPlaybackSpeed(
-                playerIndex, static_cast<std::size_t>(selected));
-        });
-    };
-    controlPane_.addAndMakeVisible(controlSpeedSelector_);
+            const auto barsFromNow = scheduledBarsFromNow();
+            (void) processor_.schedulePlayerMute(
+                playerIndex,
+                !playerMutedAtBarOffset(playerIndex, barsFromNow),
+                barsFromNow);
+            refreshSelectedControls(true);
+        };
+        controlPane_.addAndMakeVisible(mute);
+    }
 
-    controlResetButton_.setButtonText("R");
-    controlResetButton_.setTooltip(
-        "Queue every eligible selected voice to restart with the master");
-    controlResetButton_.onClick = [this]
+    for (std::size_t groupIndex = 0;
+         groupIndex < LivePatternSequencerProcessor::groupCount;
+         ++groupIndex)
     {
-        applyToSelectedPlayers([this](std::size_t playerIndex)
-        {
-            if (processor_.playerCanResetToMasterForUi(playerIndex)
-                && !processor_.playerIsMasterForUi(playerIndex))
-            {
-                (void) processor_.resetPlayerToMaster(playerIndex);
-            }
-        });
-        updateResetToMasterIndicators(true);
-        refreshSelectedControls(true);
-    };
-    controlPane_.addAndMakeVisible(controlResetButton_);
+        const auto groupColour = juce::Colour(groupColourValues[groupIndex]);
+        auto& label = groupLabels_[groupIndex];
+        label.setText(
+            "G" + juce::String(static_cast<int>(groupIndex + 1)),
+            juce::dontSendNotification);
+        label.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+        label.setJustificationType(juce::Justification::centred);
+        label.setColour(juce::Label::textColourId, groupColour);
+        controlPane_.addAndMakeVisible(label);
 
-    controlShiftLeftButton_.setButtonText("<");
-    controlShiftLeftButton_.setTooltip(
-        "Rotate every selected pattern left by one step");
-    controlShiftLeftButton_.onClick = [this]
-    {
-        applyToSelectedPatternPlayers([this](std::size_t playerIndex)
+        const auto configureGroupButton = [&groupColour](
+            juce::TextButton& button,
+            const juce::String& text)
         {
-            processor_.offsetPlayerPatternLeft(playerIndex);
-        });
-        content_.repaint();
-    };
-    controlPane_.addAndMakeVisible(controlShiftLeftButton_);
+            button.setButtonText(text);
+            button.setColour(
+                juce::TextButton::buttonColourId,
+                groupColour.darker(0.48f));
+            button.setColour(
+                juce::TextButton::buttonOnColourId,
+                groupColour.darker(0.30f));
+            button.setColour(
+                juce::TextButton::textColourOffId,
+                groupColour.brighter(0.18f));
+            button.setColour(
+                juce::TextButton::textColourOnId,
+                groupColour.brighter(0.22f));
+        };
 
-    controlShiftRightButton_.setButtonText(">");
-    controlShiftRightButton_.setTooltip(
-        "Rotate every selected pattern right by one step");
-    controlShiftRightButton_.onClick = [this]
-    {
-        applyToSelectedPatternPlayers([this](std::size_t playerIndex)
+        auto& mute = groupMuteButtons_[groupIndex];
+        mute.setKind(SpeakerButton::Kind::mute);
+        configureSpeakerActionButton(mute, juce::Colour(muteRed));
+        mute.setTooltip(
+            "Schedule group " + juce::String(static_cast<int>(groupIndex + 1))
+            + " to mute at the next bar, or hold 1-8 while clicking "
+              "to choose the bar");
+        mute.onClick = [this, groupIndex]
         {
-            processor_.offsetPlayerPatternRight(playerIndex);
-        });
-        content_.repaint();
-    };
-    controlPane_.addAndMakeVisible(controlShiftRightButton_);
+            (void) processor_.scheduleGroupMute(
+                groupIndex, true, scheduledBarsFromNow());
+            refreshSelectedControls(true);
+        };
+        controlPane_.addAndMakeVisible(mute);
 
-    controlMuteButton_.setButtonText("M");
-    controlMuteButton_.setClickingTogglesState(true);
-    controlMuteButton_.setTooltip(
-        "Mute every selected voice; press again with the same selection to "
-        "unmute them");
-    controlMuteButton_.setColour(
-        juce::TextButton::buttonColourId,
-        juce::Colour(muteRed).darker(0.35f));
-    controlMuteButton_.setColour(
-        juce::TextButton::buttonOnColourId, juce::Colour(muteRed));
-    controlMuteButton_.setColour(
-        juce::TextButton::textColourOffId, juce::Colour(muteRedDark));
-    controlMuteButton_.setColour(
-        juce::TextButton::textColourOnId, juce::Colour(muteRedDark));
-    controlMuteButton_.onClick = [this]
-    {
-        const bool shouldMute = controlMuteButton_.getToggleState();
-        applyToSelectedPlayers([this, shouldMute](std::size_t playerIndex)
+        auto& unmute = groupUnmuteButtons_[groupIndex];
+        unmute.setKind(SpeakerButton::Kind::unmute);
+        configureSpeakerActionButton(unmute, juce::Colour(uiGreen));
+        unmute.setTooltip(
+            "Schedule group " + juce::String(static_cast<int>(groupIndex + 1))
+            + " to unmute at the next bar, or hold 1-8 while clicking "
+              "to choose the bar");
+        unmute.onClick = [this, groupIndex]
         {
-            processor_.setPlayerMuted(playerIndex, shouldMute);
-        });
-        content_.repaint();
-    };
-    controlPane_.addAndMakeVisible(controlMuteButton_);
+            (void) processor_.scheduleGroupMute(
+                groupIndex, false, scheduledBarsFromNow());
+            refreshSelectedControls(true);
+        };
+        controlPane_.addAndMakeVisible(unmute);
 
-    controlUnmuteButton_.setButtonText("U");
-    controlUnmuteButton_.setTooltip("Unmute every selected voice");
-    controlUnmuteButton_.setColour(
-        juce::TextButton::buttonColourId, juce::Colour(uiBlue).darker(0.35f));
-    controlUnmuteButton_.onClick = [this]
-    {
-        applyToSelectedPlayers([this](std::size_t playerIndex)
+        auto& reset = groupResetButtons_[groupIndex];
+        configureGroupButton(reset, "R");
+        reset.setTooltip(
+            "Queue group " + juce::String(static_cast<int>(groupIndex + 1))
+            + " to restart at the master voice's next loop");
+        reset.onClick = [this, groupIndex]
         {
-            processor_.setPlayerMuted(playerIndex, false);
-        });
-        controlMuteButton_.setToggleState(false, juce::dontSendNotification);
-        content_.repaint();
-    };
-    controlPane_.addAndMakeVisible(controlUnmuteButton_);
+            (void) processor_.resetGroupToMaster(groupIndex);
+            updateResetToMasterIndicators(true);
+            refreshSelectedControls(true);
+        };
+        controlPane_.addAndMakeVisible(reset);
+    }
 
     selectionLabel_.setFont(juce::Font(
         juce::FontOptions(13.0f, juce::Font::bold)));
@@ -1527,12 +2008,16 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
             globalPlayButton_.getToggleState());
     };
     addAndMakeVisible(globalPlayButton_);
+    addAndMakeVisible(barScheduler_);
 
     suppressionButton_.setTooltip("Open or close the suppression matrix");
     suppressionButton_.setClickingTogglesState(true);
     suppressionButton_.onClick = [this] { showSuppressionMatrix(); };
     addAndMakeVisible(suppressionButton_);
     addAndMakeVisible(controlPane_);
+    addChildComponent(modulationBlockLayer_);
+    addChildComponent(modulationEditor_);
+    addChildComponent(menuDismissLayer_);
 
     refreshSelectedControls(true);
 
@@ -1569,19 +2054,20 @@ void LivePatternSequencerEditor::paint(juce::Graphics& graphics)
 
 void LivePatternSequencerEditor::resized()
 {
+    modulationBlockLayer_.setBounds(getLocalBounds());
+    menuDismissLayer_.setBounds(getLocalBounds());
     auto bounds = getLocalBounds().reduced(outerPadding);
     bounds.removeFromTop(headerHeight + sectionGap);
 
     auto controls = bounds.removeFromBottom(controlPaneHeight);
     bounds.removeFromBottom(sectionGap);
-    auto utilityBar = bounds.removeFromBottom(controlUtilityBarHeight);
+    auto utilityBar = bounds.removeFromBottom(barSchedulerHeight);
     bounds.removeFromBottom(sectionGap);
     const int candidateContentWidth = std::max(
         requiredContentWidth(), bounds.getWidth());
     const int utilityButtonSize =
         patternCellSizeForContentWidth(candidateContentWidth);
-    const int utilityY = utilityBar.getY()
-        + (utilityBar.getHeight() - utilityButtonSize) / 2;
+    const int utilityY = utilityBar.getY();
     int utilityLeft = utilityBar.getX();
     previousPageButton_.setBounds(
         utilityLeft, utilityY, utilityButtonSize, utilityButtonSize);
@@ -1591,6 +2077,17 @@ void LivePatternSequencerEditor::resized()
     utilityLeft += utilityButtonSize + perVoiceControlGap;
     globalPlayButton_.setBounds(
         utilityLeft, utilityY, utilityButtonSize, utilityButtonSize);
+    utilityLeft += utilityButtonSize + perVoiceControlGap;
+
+    const int availableSchedulerWidth = std::max(
+        0,
+        utilityBar.getRight() - utilityButtonSize - perVoiceControlGap
+            - utilityLeft);
+    barScheduler_.setBounds(
+        utilityLeft,
+        utilityBar.getY(),
+        availableSchedulerWidth,
+        utilityBar.getHeight());
 
     int utilityRight = utilityBar.getRight();
     utilityRight -= utilityButtonSize;
@@ -1611,6 +2108,7 @@ void LivePatternSequencerEditor::resized()
     viewport_.setViewPosition(
         0, static_cast<int>(firstVisiblePlayer_) * playerStride());
     updatePageButtons();
+    positionModulationEditor();
 }
 
 void LivePatternSequencerEditor::resizedContent()
@@ -1620,16 +2118,22 @@ void LivePatternSequencerEditor::resizedContent()
         + perVoiceControlGap;
     constexpr int muteX = resetX + clickTargetSize
         + perVoiceControlGap;
-    constexpr int patternPickerX = muteX + clickTargetSize
+    constexpr int shiftLeftX = muteX + clickTargetSize
         + perVoiceControlGap;
-    for (std::size_t index = 0; index < voiceSelectButtons_.size(); ++index)
+    constexpr int shiftRightX = shiftLeftX + clickTargetSize
+        + perVoiceControlGap;
+    constexpr int speedX = shiftRightX + clickTargetSize
+        + perVoiceControlGap;
+    constexpr int patternPickerX = speedX + clickTargetSize
+        + perVoiceControlGap;
+    for (std::size_t index = 0; index < groupAssignmentButtons_.size(); ++index)
     {
         const int y = static_cast<int>(index) * playerStride();
         const int buttonSize = cellWidth();
         const int controlY = y + voiceNameHeight
             + (patternPanelHeight() - voiceNameHeight - buttonSize) / 2;
         const int slotInset = (clickTargetSize - buttonSize) / 2;
-        voiceSelectButtons_[index]->setBounds(
+        groupAssignmentButtons_[index]->setBounds(
             controlsX + slotInset,
             controlY,
             buttonSize,
@@ -1644,8 +2148,23 @@ void LivePatternSequencerEditor::resizedContent()
             controlY,
             buttonSize,
             buttonSize);
+        speedSelectors_[index]->setBounds(
+            speedX + slotInset,
+            controlY,
+            buttonSize,
+            buttonSize);
         patternMenuButtons_[index]->setBounds(
             patternPickerX + slotInset,
+            controlY,
+            buttonSize,
+            buttonSize);
+        offsetLeftButtons_[index]->setBounds(
+            shiftLeftX + slotInset,
+            controlY,
+            buttonSize,
+            buttonSize);
+        offsetRightButtons_[index]->setBounds(
+            shiftRightX + slotInset,
             controlY,
             buttonSize,
             buttonSize);
@@ -1655,65 +2174,129 @@ void LivePatternSequencerEditor::resizedContent()
 void LivePatternSequencerEditor::resizedControlPane()
 {
     auto bounds = controlPane_.getLocalBounds().reduced(controlPanePadding);
-    auto topRow = bounds.removeFromTop(controlPaneTopRowHeight);
-    bounds.removeFromTop(sectionGap);
+    const int buttonSize = cellWidth();
+    constexpr int minimumSelectionWidth = 100;
+    constexpr int groupSectionGap = 12;
+    const int voiceCount = static_cast<int>(controlVoiceMuteButtons_.size());
+    const int groupCount = static_cast<int>(
+        LivePatternSequencerProcessor::groupCount);
+    const int groupControlsWidth = groupCount * buttonSize
+        + std::max(0, groupCount - 1) * controlPaneControlGap;
+    const int voiceGaps = std::max(0, voiceCount - 1)
+        * controlPaneControlGap;
+    const int availableVoiceWidth = std::max(
+        voiceCount * buttonSize,
+        bounds.getWidth() - groupControlsWidth - groupSectionGap
+            - minimumSelectionWidth);
+    const int voiceColumnWidth = voiceCount == 0
+        ? 0
+        : juce::jlimit(
+            buttonSize,
+            58,
+            (availableVoiceWidth - voiceGaps) / voiceCount);
+
+    if (!controlVoiceMuteButtons_.empty())
+    {
+        for (std::size_t playerIndex = 0;
+             playerIndex < controlVoiceMuteButtons_.size();
+             ++playerIndex)
+        {
+            auto column = bounds.removeFromLeft(voiceColumnWidth);
+            controlVoiceLabels_[playerIndex]->setBounds(
+                column.removeFromTop(controlPaneLabelHeight));
+            column.removeFromTop(2);
+            const int buttonX = column.getX()
+                + (column.getWidth() - buttonSize) / 2;
+            controlVoiceMuteButtons_[playerIndex]->setBounds(
+                buttonX, column.getY(), buttonSize, buttonSize);
+            bounds.removeFromLeft(controlPaneControlGap);
+        }
+    }
+
+    bounds.removeFromLeft(groupSectionGap);
+
+    for (std::size_t groupIndex = 0;
+         groupIndex < LivePatternSequencerProcessor::groupCount;
+         ++groupIndex)
+    {
+        auto column = bounds.removeFromLeft(buttonSize);
+        groupLabels_[groupIndex].setBounds(
+            column.removeFromTop(controlPaneLabelHeight));
+        column.removeFromTop(2);
+        groupMuteButtons_[groupIndex].setBounds(
+            column.removeFromTop(buttonSize));
+        column.removeFromTop(controlPaneControlGap);
+        groupUnmuteButtons_[groupIndex].setBounds(
+            column.removeFromTop(buttonSize));
+        column.removeFromTop(controlPaneControlGap);
+        groupResetButtons_[groupIndex].setBounds(
+            column.removeFromTop(buttonSize));
+        bounds.removeFromLeft(controlPaneControlGap);
+    }
+    selectionLabel_.setBounds(bounds);
+}
+
+void LivePatternSequencerEditor::resizedModulationEditor()
+{
+    if (!openModulationPlayer_
+        || *openModulationPlayer_ >= playerCount_)
+    {
+        return;
+    }
 
     constexpr int gap = 4;
-    const int buttonSize = cellWidth();
-    const auto placeTopControl = [&](juce::Component& component)
+    const int buttonSize = std::min(
+        clickTargetSize,
+        std::max(20, modulationEditor_.getHeight() / 3 - 2));
+    const int controlsWidth = buttonSize * 3 + gap * 3;
+    std::size_t longestVisibleLane = 1;
+    for (const auto lane : modulationLanes)
     {
-        auto slot = topRow.removeFromLeft(buttonSize);
-        component.setBounds(
-            slot.getX(),
-            slot.getY() + (slot.getHeight() - buttonSize) / 2,
-            buttonSize,
-            buttonSize);
-        topRow.removeFromLeft(gap);
-    };
-    placeTopControl(*controlPatternMenuButton_);
-    placeTopControl(controlSpeedSelector_);
-    placeTopControl(controlShiftLeftButton_);
-    placeTopControl(controlShiftRightButton_);
-    placeTopControl(controlMuteButton_);
-    placeTopControl(controlUnmuteButton_);
-    placeTopControl(controlResetButton_);
-    selectionLabel_.setBounds(topRow);
-
-    const int modulationControlsWidth = buttonSize * 3 + gap * 3;
+        longestVisibleLane = std::max(
+            longestVisibleLane,
+            std::min<std::size_t>(
+                lps::Modulation::maxLength,
+                processor_.modulationForUi(
+                    *openModulationPlayer_, lane).length));
+    }
     const int availableGridWidth = std::max(
-        static_cast<int>(lps::Modulation::maxLength),
-        bounds.getWidth() - modulationControlsWidth);
-    const int dynamicCellWidth = std::max(
         1,
-        (availableGridWidth
-            - (static_cast<int>(lps::Modulation::maxLength) - 1)
-                * modulationCellGap)
-            / static_cast<int>(lps::Modulation::maxLength));
+        modulationEditor_.getWidth()
+            - modulationEditorPadding * 2 - controlsWidth);
+    const int desiredCellWidth = std::max(
+        preferredModulationValueWidth,
+        buttonSize / 2);
+    const int dynamicCellWidth = std::max(
+        18,
+        std::min(
+            desiredCellWidth,
+            (availableGridWidth
+                - (static_cast<int>(longestVisibleLane) - 1)
+                    * modulationCellGap)
+                / static_cast<int>(longestVisibleLane)));
 
+    auto bounds = modulationEditor_.getLocalBounds().reduced(
+        modulationEditorPadding);
+    const auto playerIndex = *openModulationPlayer_;
     for (const auto lane : modulationLanes)
     {
         const auto laneSlot = laneIndex(lane);
         auto laneBounds = bounds.removeFromTop(modulationPanelHeight);
-        if (primaryPlayerIndex_ >= playerCount_)
-            continue;
         const int buttonY = laneBounds.getY()
             + (laneBounds.getHeight() - buttonSize) / 2;
-        modulationMenuButtons_[laneSlot][primaryPlayerIndex_]->setBounds(
+        modulationMenuButtons_[laneSlot][playerIndex]->setBounds(
             laneBounds.getX(), buttonY, buttonSize, buttonSize);
-        laneBounds.removeFromLeft(buttonSize);
-        laneBounds.removeFromLeft(gap);
-        decreaseModulationLengthButtons_[laneSlot][primaryPlayerIndex_]->setBounds(
+        laneBounds.removeFromLeft(buttonSize + gap);
+        decreaseModulationLengthButtons_[laneSlot][playerIndex]->setBounds(
             laneBounds.getX(), buttonY, buttonSize, buttonSize);
-        laneBounds.removeFromLeft(buttonSize);
-        laneBounds.removeFromLeft(gap);
-        increaseModulationLengthButtons_[laneSlot][primaryPlayerIndex_]->setBounds(
+        laneBounds.removeFromLeft(buttonSize + gap);
+        increaseModulationLengthButtons_[laneSlot][playerIndex]->setBounds(
             laneBounds.getX(), buttonY, buttonSize, buttonSize);
-        laneBounds.removeFromLeft(buttonSize);
-        laneBounds.removeFromLeft(gap);
+        laneBounds.removeFromLeft(buttonSize + gap);
 
         for (std::size_t step = 0; step < lps::Modulation::maxLength; ++step)
         {
-            const auto sliderIndex = primaryPlayerIndex_
+            const auto sliderIndex = playerIndex
                 * lps::Modulation::maxLength + step;
             modulationSliders_[laneSlot][sliderIndex]->setBounds(
                 laneBounds.getX()
@@ -1724,7 +2307,130 @@ void LivePatternSequencerEditor::resizedControlPane()
                 modulationCellHeight);
         }
     }
+}
 
+void LivePatternSequencerEditor::toggleModulationEditor(
+    std::size_t playerIndex)
+{
+    if (playerIndex >= playerCount_)
+        return;
+
+    if (activePopupKind_ == PopupKind::pattern)
+    {
+        ++popupGeneration_;
+        activePopupKind_ = PopupKind::none;
+        activePopupTarget_ = nullptr;
+        menuDismissLayer_.setVisible(false);
+        juce::PopupMenu::dismissAllActiveMenus();
+    }
+
+    if (openModulationPlayer_ && *openModulationPlayer_ == playerIndex)
+        openModulationPlayer_.reset();
+    else
+        openModulationPlayer_ = playerIndex;
+
+    refreshSelectedControls(true);
+    positionModulationEditor();
+}
+
+void LivePatternSequencerEditor::positionModulationEditor()
+{
+    if (!openModulationPlayer_
+        || *openModulationPlayer_ >= playerCount_)
+    {
+        modulationBlockLayer_.setVisible(false);
+        modulationEditor_.setVisible(false);
+        return;
+    }
+
+    const auto anchor = getLocalArea(
+        &content_, modulationPreviewAreaForPlayer(*openModulationPlayer_));
+    if (anchor.getBottom() <= viewport_.getY()
+        || anchor.getY() >= viewport_.getBottom())
+    {
+        modulationBlockLayer_.setVisible(false);
+        modulationEditor_.setVisible(false);
+        return;
+    }
+    constexpr int gap = 7;
+    const int x = anchor.getRight() + gap;
+    const int availableWidth = std::max(0, getWidth() - x - outerPadding);
+    if (availableWidth < 180)
+    {
+        modulationBlockLayer_.setVisible(false);
+        modulationEditor_.setVisible(false);
+        return;
+    }
+
+    const int width = availableWidth;
+    const int maximumY = std::max(
+        outerPadding,
+        viewport_.getBottom() - modulationEditorHeight);
+    const int y = juce::jlimit(
+        outerPadding,
+        maximumY,
+        anchor.getY());
+    modulationEditor_.setBounds(x, y, width, modulationEditorHeight);
+    modulationBlockLayer_.setVisible(true);
+    modulationBlockLayer_.toFront(false);
+    modulationEditor_.setVisible(true);
+    modulationEditor_.toFront(false);
+}
+
+void LivePatternSequencerEditor::modulationBlockLayerMouseDown()
+{
+    if (openModulationPlayer_)
+        toggleModulationEditor(*openModulationPlayer_);
+}
+
+std::size_t LivePatternSequencerEditor::scheduledBarsFromNow() const noexcept
+{
+    const auto targetBar = heldScheduleBar();
+    if (!targetBar)
+        return 1;
+
+    const auto current = processor_.currentBarForUi();
+    return offsetForTargetBar(current, *targetBar);
+}
+
+bool LivePatternSequencerEditor::playerMutedAtBarOffset(
+    std::size_t playerIndex,
+    std::size_t barsFromNow) const noexcept
+{
+    bool muted = processor_.playerMutedForUi(playerIndex);
+    for (std::size_t offset = 1; offset <= barsFromNow; ++offset)
+    {
+        if (processor_.playerMuteScheduledAtBarOffsetForUi(
+                playerIndex, true, offset))
+        {
+            muted = true;
+        }
+        else if (processor_.playerMuteScheduledAtBarOffsetForUi(
+                     playerIndex, false, offset))
+        {
+            muted = false;
+        }
+    }
+    return muted;
+}
+
+std::optional<std::size_t>
+LivePatternSequencerEditor::heldScheduleBar() const noexcept
+{
+    constexpr auto maximum =
+        LivePatternSequencerProcessor::maximumScheduledBars;
+    for (std::size_t bar = 1; bar <= maximum; ++bar)
+    {
+        const auto numberKey = static_cast<int>('0' + bar);
+        const auto numberPadKey = juce::KeyPress::numberPad0
+            + static_cast<int>(bar);
+        if (juce::KeyPress::isKeyCurrentlyDown(numberKey)
+            || juce::KeyPress::isKeyCurrentlyDown(numberPadKey))
+        {
+            return bar;
+        }
+    }
+    return std::nullopt;
 }
 
 void LivePatternSequencerEditor::matrixMouseDown(
@@ -1748,6 +2454,12 @@ void LivePatternSequencerEditor::matrixMouseDown(
 
 void LivePatternSequencerEditor::timerCallback()
 {
+    const auto heldBar = heldScheduleBar();
+    if (heldBar != selectedScheduleBar_)
+    {
+        selectedScheduleBar_ = heldBar;
+        barScheduler_.repaint();
+    }
     updateContentSize();
     updatePatternModifiedIndicators();
     for (std::size_t playerIndex = 0;
@@ -1777,6 +2489,10 @@ void LivePatternSequencerEditor::timerCallback()
             ? "Pause the internal audition clock"
             : "Start the internal audition clock from REAPER's current cursor"));
     content_.repaint();
+    controlPane_.repaint();
+    barScheduler_.repaint();
+    if (modulationEditor_.isVisible())
+        modulationEditor_.repaint();
 }
 
 void LivePatternSequencerEditor::beginSavePlayerPattern(std::size_t playerIndex)
@@ -1818,86 +2534,6 @@ void LivePatternSequencerEditor::beginSavePlayerModulation(
         processor_.savePlayerModulation(playerIndex, lane));
 }
 
-void LivePatternSequencerEditor::promptForModulationName(
-    std::size_t playerIndex,
-    ModulationLane lane,
-    lps::Modulation candidateModulation)
-{
-    constexpr auto nameEditorId = "modulationName";
-    const auto laneName = modulationLaneName(lane);
-    auto* alert = new juce::AlertWindow(
-        "Save " + laneName + " Modulation",
-        "These " + laneName.toLowerCase()
-            + " values are not in the library yet. Enter a name for the new "
-              "modulation.",
-        juce::MessageBoxIconType::QuestionIcon,
-        this);
-    alert->addTextEditor(nameEditorId, {}, "Name:");
-    alert->addButton(
-        "Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
-    alert->addButton(
-        "Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-
-    const juce::Component::SafePointer<juce::Button> safeSaveButton(
-        alert->getButton("Save"));
-    if (safeSaveButton != nullptr)
-        safeSaveButton->setEnabled(false);
-
-    auto enteredName = std::make_shared<juce::String>();
-    if (auto* textEditor = alert->getTextEditor(nameEditorId))
-    {
-        const juce::Component::SafePointer<juce::TextEditor> safeTextEditor(
-            textEditor);
-        textEditor->onTextChange =
-            [safeTextEditor, safeSaveButton, enteredName]
-            {
-                if (safeTextEditor != nullptr)
-                    *enteredName = safeTextEditor->getText();
-                if (safeSaveButton != nullptr)
-                    safeSaveButton->setEnabled(
-                        !enteredName->trim().isEmpty());
-            };
-    }
-
-    const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(
-        this);
-    alert->enterModalState(
-        true,
-        juce::ModalCallbackFunction::create(
-            [safeThis, enteredName, playerIndex, lane,
-                candidateModulation](int result)
-            {
-                if (result != 1 || safeThis == nullptr)
-                    return;
-
-                const auto name = enteredName->trim();
-                if (name.isEmpty())
-                {
-                    safeThis->showModulationSaveWarning(
-                        lane,
-                        "Enter a name before saving the new modulation.");
-                    return;
-                }
-
-                const auto saveResult =
-                    safeThis->processor_.savePlayerModulation(
-                        playerIndex, lane, candidateModulation, name);
-                if (saveResult.status
-                    == LivePatternSequencerProcessor::
-                        SaveModulationStatus::needsName)
-                {
-                    safeThis->showModulationSaveWarning(
-                        lane,
-                        "Enter a name before saving the new modulation.");
-                    return;
-                }
-
-                safeThis->handleModulationSaveResult(
-                    playerIndex, lane, saveResult);
-            }),
-        true);
-}
-
 void LivePatternSequencerEditor::handleModulationSaveResult(
     std::size_t playerIndex,
     ModulationLane lane,
@@ -1907,11 +2543,6 @@ void LivePatternSequencerEditor::handleModulationSaveResult(
         LivePatternSequencerProcessor::SaveModulationStatus;
     switch (result.status)
     {
-        case Status::needsName:
-            promptForModulationName(
-                playerIndex, lane, result.candidateModulation);
-            return;
-
         case Status::selectedExisting:
         case Status::savedNew:
             refreshModulationSelectors();
@@ -1960,43 +2591,14 @@ void LivePatternSequencerEditor::refreshPatternSelectors()
 
 void LivePatternSequencerEditor::selectVoice(
     std::size_t playerIndex,
-    bool additiveSelection)
+    bool)
 {
-    if (playerIndex >= selectedVoices_.size()
-        || playerIndex >= voiceSelectButtons_.size())
-    {
+    if (playerIndex >= selectedVoices_.size())
         return;
-    }
 
-    const auto previousSelection = selectedVoices_;
-
-    if (!additiveSelection)
-    {
-        std::fill(selectedVoices_.begin(), selectedVoices_.end(), false);
-        selectedVoices_[playerIndex] = true;
-    }
-    else
-    {
-        selectedVoices_[playerIndex] =
-            voiceSelectButtons_[playerIndex]->getToggleState();
-    }
-    if (selectedVoices_[playerIndex])
-    {
-        primaryPlayerIndex_ = playerIndex;
-    }
-    else if (playerIndex == primaryPlayerIndex_)
-    {
-        const auto nextSelected = std::find(
-            selectedVoices_.begin(), selectedVoices_.end(), true);
-        if (nextSelected != selectedVoices_.end())
-        {
-            primaryPlayerIndex_ = static_cast<std::size_t>(
-                std::distance(selectedVoices_.begin(), nextSelected));
-        }
-    }
-
-    if (selectedVoices_ != previousSelection)
-        controlMuteButton_.setToggleState(false, juce::dontSendNotification);
+    std::fill(selectedVoices_.begin(), selectedVoices_.end(), false);
+    selectedVoices_[playerIndex] = true;
+    primaryPlayerIndex_ = playerIndex;
 
     refreshSelectedControls(true);
     content_.repaint();
@@ -2004,21 +2606,39 @@ void LivePatternSequencerEditor::selectVoice(
 
 void LivePatternSequencerEditor::refreshSelectedControls(bool force)
 {
+    const auto currentBar = processor_.currentBarForUi();
+    const auto targetOffset = scheduledBarsFromNow();
     const auto selectionCount = selectedVoiceCount();
     const bool hasSelection = selectionCount > 0;
-    const auto patternPlayerIndex = controlPatternPlayerIndex();
-    const bool hasPatternSelection = patternPlayerIndex < playerCount_;
 
     for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
     {
-        voiceSelectButtons_[playerIndex]->setButtonText(
-            juce::String(static_cast<int>(playerIndex + 1)));
-        voiceSelectButtons_[playerIndex]->setToggleState(
-            playerIndex < selectedVoices_.size() && selectedVoices_[playerIndex],
-            juce::dontSendNotification);
-        muteButtons_[playerIndex]->setToggleState(
-            processor_.playerMutedForUi(playerIndex),
-            juce::dontSendNotification);
+        std::uint8_t membershipMask = 0;
+        for (std::size_t groupIndex = 0;
+             groupIndex < LivePatternSequencerProcessor::groupCount;
+             ++groupIndex)
+        {
+            if (processor_.playerInGroupForUi(playerIndex, groupIndex))
+                membershipMask |= static_cast<std::uint8_t>(1u << groupIndex);
+        }
+        groupAssignmentButtons_[playerIndex]->setMembershipMask(membershipMask);
+        auto& mute = *muteButtons_[playerIndex];
+        const bool targetMuted = playerMutedAtBarOffset(
+            playerIndex, targetOffset);
+        mute.setToggleState(targetMuted, juce::dontSendNotification);
+        mute.setKind(targetMuted
+            ? SpeakerButton::Kind::unmute
+            : SpeakerButton::Kind::mute);
+        mute.setScheduledTarget(targetBarForOffset(
+            currentBar,
+            processor_.playerMuteChangeBarsRemainingForUi(playerIndex)));
+        if (auto* pattern = dynamic_cast<LaneMenuButton*>(
+                patternMenuButtons_[playerIndex].get()))
+        {
+            pattern->setScheduledTarget(targetBarForOffset(
+                currentBar,
+                processor_.playerPatternChangeBarsRemainingForUi(playerIndex)));
+        }
 
         for (const auto lane : modulationLanes)
         {
@@ -2028,18 +2648,31 @@ void LivePatternSequencerEditor::refreshSelectedControls(bool force)
                 *decreaseModulationLengthButtons_[laneSlot][playerIndex];
             auto& increase =
                 *increaseModulationLengthButtons_[laneSlot][playerIndex];
-            const bool show = hasSelection
-                && playerIndex == primaryPlayerIndex_
+            const bool locked = processor_.playerModulationLockedForUi(
+                playerIndex, lane);
+            if (auto* laneMenu = dynamic_cast<LaneMenuButton*>(&menu))
+                laneMenu->setLocked(locked);
+            menu.setTooltip(locked
+                ? modulationLaneName(lane)
+                    + " modulation is locked; open this menu to unlock it"
+                : "Choose, save, or lock the "
+                    + modulationLaneName(lane) + " modulation");
+            modulationSelectors_[laneSlot][playerIndex]->setEnabled(!locked);
+            saveModulationButtons_[laneSlot][playerIndex]->setEnabled(
+                !locked && processor_.playerModulationModifiedForUi(
+                    playerIndex, lane));
+            const bool show = openModulationPlayer_
+                && playerIndex == *openModulationPlayer_
                 && processor_.playerSupportsModulationEditingForUi(
                     playerIndex, lane);
 
             if (show)
             {
-                if (menu.getParentComponent() != &controlPane_)
+                if (menu.getParentComponent() != &modulationEditor_)
                 {
-                    controlPane_.addAndMakeVisible(menu);
-                    controlPane_.addAndMakeVisible(decrease);
-                    controlPane_.addAndMakeVisible(increase);
+                    modulationEditor_.addAndMakeVisible(menu);
+                    modulationEditor_.addAndMakeVisible(decrease);
+                    modulationEditor_.addAndMakeVisible(increase);
                 }
                 menu.setVisible(true);
                 decrease.setVisible(true);
@@ -2066,8 +2699,8 @@ void LivePatternSequencerEditor::refreshSelectedControls(bool force)
                     [playerIndex * lps::Modulation::maxLength + step];
                 if (show)
                 {
-                    if (slider.getParentComponent() != &controlPane_)
-                        controlPane_.addChildComponent(slider);
+                    if (slider.getParentComponent() != &modulationEditor_)
+                        modulationEditor_.addChildComponent(slider);
                 }
                 else
                 {
@@ -2098,66 +2731,115 @@ void LivePatternSequencerEditor::refreshSelectedControls(bool force)
     }
     selectionLabel_.setText(selectionText, juce::dontSendNotification);
 
-    controlPatternMenuButton_->setEnabled(hasPatternSelection);
-    controlSpeedSelector_.setEnabled(hasPatternSelection);
-    controlShiftLeftButton_.setEnabled(hasPatternSelection);
-    controlShiftRightButton_.setEnabled(hasPatternSelection);
-    controlMuteButton_.setEnabled(hasSelection);
-    controlUnmuteButton_.setEnabled(hasSelection);
-
-    std::size_t resettableCount = 0;
-    std::size_t pendingResetCount = 0;
-    for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
+    for (std::size_t playerIndex = 0;
+         playerIndex < controlVoiceMuteButtons_.size();
+         ++playerIndex)
     {
-        if (playerIndex >= selectedVoices_.size() || !selectedVoices_[playerIndex]
-            || processor_.playerIsMasterForUi(playerIndex)
-            || !processor_.playerCanResetToMasterForUi(playerIndex))
-        {
-            continue;
-        }
-        ++resettableCount;
-        if (processor_.playerResetToMasterPendingForUi(playerIndex))
-            ++pendingResetCount;
+        const bool targetMuted = playerMutedAtBarOffset(
+            playerIndex, targetOffset);
+        const auto voiceName =
+            processor_.playerNameForUi(playerIndex).toUpperCase();
+        controlVoiceLabels_[playerIndex]->setText(
+            voiceName, juce::dontSendNotification);
+        controlVoiceLabels_[playerIndex]->setColour(
+            juce::Label::textColourId,
+            juce::Colour(primaryText));
+        controlVoiceMuteButtons_[playerIndex]->setToggleState(
+            targetMuted, juce::dontSendNotification);
+        controlVoiceMuteButtons_[playerIndex]->setKind(targetMuted
+            ? SpeakerButton::Kind::unmute
+            : SpeakerButton::Kind::mute);
+        controlVoiceMuteButtons_[playerIndex]->setScheduledTarget(
+            targetBarForOffset(
+                currentBar,
+                processor_.playerMuteChangeBarsRemainingForUi(playerIndex)));
+        controlVoiceMuteButtons_[playerIndex]->setEnabled(
+            playerIndex < playerCount_);
     }
-    controlResetButton_.setEnabled(resettableCount > pendingResetCount);
-    controlResetButton_.setButtonText(
-        resettableCount > 0 && resettableCount == pendingResetCount
-            ? "Q"
-            : "R");
 
-    if (hasPatternSelection)
+    for (std::size_t groupIndex = 0;
+         groupIndex < LivePatternSequencerProcessor::groupCount;
+         ++groupIndex)
     {
-        bool anyModified = false;
-        std::size_t speed = processor_.playerPlaybackSpeed(patternPlayerIndex);
-        bool speedsMatch = true;
+        const auto memberCount = processor_.groupPlayerCountForUi(groupIndex);
+        std::size_t mutedMemberCount = 0;
+        for (std::size_t playerIndex = 0;
+             playerIndex < playerCount_;
+            ++playerIndex)
+        {
+            if (processor_.playerInGroupForUi(playerIndex, groupIndex)
+                && playerMutedAtBarOffset(playerIndex, targetOffset))
+            {
+                ++mutedMemberCount;
+            }
+        }
+        groupMuteButtons_[groupIndex].setEnabled(memberCount != 0);
+        groupUnmuteButtons_[groupIndex].setEnabled(memberCount != 0);
+        groupMuteButtons_[groupIndex].setToggleState(
+            memberCount != 0 && mutedMemberCount == memberCount,
+            juce::dontSendNotification);
+        groupUnmuteButtons_[groupIndex].setToggleState(
+            memberCount != 0 && mutedMemberCount == 0,
+            juce::dontSendNotification);
+        groupLabels_[groupIndex].setTooltip(
+            "Group " + juce::String(static_cast<int>(groupIndex + 1))
+            + ": " + juce::String(static_cast<int>(memberCount))
+            + (memberCount == 1 ? " voice" : " voices"));
+
+        std::size_t resettableCount = 0;
+        std::size_t pendingResetCount = 0;
         for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
         {
-            if (playerIndex >= selectedVoices_.size()
-                || !selectedVoices_[playerIndex]
-                || !processor_.playerSupportsPatternEditingForUi(playerIndex))
+            if (!processor_.playerInGroupForUi(playerIndex, groupIndex)
+                || processor_.playerIsMasterForUi(playerIndex)
+                || !processor_.playerCanResetToMasterForUi(playerIndex))
             {
                 continue;
             }
-            speedsMatch = speedsMatch
-                && processor_.playerPlaybackSpeed(playerIndex) == speed;
-            anyModified = anyModified
-                || processor_.playerPatternModifiedForUi(playerIndex);
+            ++resettableCount;
+            if (processor_.playerResetToMasterPendingForUi(playerIndex))
+                ++pendingResetCount;
         }
-        controlPatternMenuButton_->setButtonText(
-            juce::String("PATTERN") + (anyModified ? " *" : ""));
-        controlSpeedSelector_.setSelectedItemIndex(
-            speedsMatch ? static_cast<int>(speed) : -1,
-            juce::dontSendNotification);
-    }
-    else
-    {
-        controlPatternMenuButton_->setButtonText("PATTERN");
-        controlSpeedSelector_.setSelectedItemIndex(
-            -1, juce::dontSendNotification);
+        groupResetButtons_[groupIndex].setEnabled(
+            resettableCount > pendingResetCount);
+        groupResetButtons_[groupIndex].setButtonText(
+            resettableCount > 0 && resettableCount == pendingResetCount
+                ? "Q"
+                : "R");
+
+        std::size_t muteOffset = 0;
+        std::size_t unmuteOffset = 0;
+        for (std::size_t offset = 1;
+             offset <= LivePatternSequencerProcessor::maximumScheduledBars;
+             ++offset)
+        {
+            if (muteOffset == 0
+                && processor_.groupMuteScheduledAtBarOffsetForUi(
+                    groupIndex, true, offset))
+            {
+                muteOffset = offset;
+            }
+            if (unmuteOffset == 0
+                && processor_.groupMuteScheduledAtBarOffsetForUi(
+                    groupIndex, false, offset))
+            {
+                unmuteOffset = offset;
+            }
+        }
+        groupMuteButtons_[groupIndex].setScheduledTarget(
+            muteOffset != 0
+                ? targetBarForOffset(currentBar, muteOffset)
+                : 0);
+        groupUnmuteButtons_[groupIndex].setScheduledTarget(
+            unmuteOffset != 0
+                ? targetBarForOffset(currentBar, unmuteOffset)
+                : 0);
     }
 
     controlPane_.resized();
     controlPane_.repaint();
+    modulationEditor_.resized();
+    modulationEditor_.repaint();
 }
 
 void LivePatternSequencerEditor::applyToSelectedPatternPlayers(
@@ -2190,27 +2872,6 @@ std::size_t LivePatternSequencerEditor::selectedVoiceCount() const noexcept
         std::count(selectedVoices_.begin(), selectedVoices_.end(), true));
 }
 
-std::size_t LivePatternSequencerEditor::controlPatternPlayerIndex() const noexcept
-{
-    if (primaryPlayerIndex_ < selectedVoices_.size()
-        && selectedVoices_[primaryPlayerIndex_]
-        && processor_.playerSupportsPatternEditingForUi(primaryPlayerIndex_))
-    {
-        return primaryPlayerIndex_;
-    }
-
-    for (std::size_t playerIndex = 0; playerIndex < playerCount_; ++playerIndex)
-    {
-        if (playerIndex < selectedVoices_.size()
-            && selectedVoices_[playerIndex]
-            && processor_.playerSupportsPatternEditingForUi(playerIndex))
-        {
-            return playerIndex;
-        }
-    }
-    return playerCount_;
-}
-
 std::size_t LivePatternSequencerEditor::pageSize() const noexcept
 {
     const auto stride = std::max(1, playerStride());
@@ -2237,6 +2898,7 @@ void LivePatternSequencerEditor::pageVoices(int direction)
     viewport_.setViewPosition(
         0, static_cast<int>(firstVisiblePlayer_) * playerStride());
     updatePageButtons();
+    positionModulationEditor();
 }
 
 void LivePatternSequencerEditor::updatePageButtons()
@@ -2298,12 +2960,14 @@ void LivePatternSequencerEditor::refreshModulationControls(
     const bool playing = processor_.playingForUi();
     const int currentStep =
         processor_.currentModulationStepForUi(playerIndex, lane);
-    const bool isDisplayedControl = selectedVoiceCount() > 0
-        && playerIndex == primaryPlayerIndex_;
+    const bool isDisplayedControl = openModulationPlayer_
+        && playerIndex == *openModulationPlayer_;
+    const bool locked = processor_.playerModulationLockedForUi(
+        playerIndex, lane);
     decreaseModulationLengthButtons_[laneSlot][playerIndex]->setEnabled(
-        length > 1);
+        !locked && length > 1);
     increaseModulationLengthButtons_[laneSlot][playerIndex]->setEnabled(
-        length < lps::Modulation::maxLength);
+        !locked && length < lps::Modulation::maxLength);
 
     for (std::size_t step = 0;
          step < lps::Modulation::maxLength;
@@ -2316,6 +2980,7 @@ void LivePatternSequencerEditor::refreshModulationControls(
 
         auto& slider = *modulationSliders_[laneSlot][sliderIndex];
         const bool shouldBeVisible = isDisplayedControl && step < length;
+        slider.setEnabled(!locked);
         slider.setActive(
             playing && shouldBeVisible
             && static_cast<int>(step) == currentStep);
@@ -2406,7 +3071,9 @@ void LivePatternSequencerEditor::updateModulationModifiedIndicators(
                 *saveModulationButtons_[laneSlot][playerIndex];
             auto& menuButton =
                 *modulationMenuButtons_[laneSlot][playerIndex];
-            saveButton.setEnabled(modified);
+            saveButton.setEnabled(modified
+                && !processor_.playerModulationLockedForUi(
+                    playerIndex, lane));
             saveButton.setButtonText(modified ? "Save *" : "Save");
             menuButton.setButtonText(modulationMenuLabel(lane, modified));
 
@@ -2665,6 +3332,7 @@ void LivePatternSequencerEditor::contentMouseDown(const juce::MouseEvent& event)
                 event.getPosition()))
         {
             selectVoice(playerIndex, false);
+            toggleModulationEditor(playerIndex);
             return;
         }
 
@@ -2827,7 +3495,7 @@ void LivePatternSequencerEditor::paintContent(juce::Graphics& graphics)
             voiceName.toUpperCase(),
             contentHorizontalPadding + playerPanelHorizontalPadding,
             patternPanel.getY() + 1,
-            clickTargetSize * 3 + perVoiceControlGap * 2,
+            clickTargetSize * 6 + perVoiceControlGap * 5,
             voiceNameHeight,
             juce::Justification::centred,
             1,
@@ -2959,6 +3627,12 @@ void LivePatternSequencerEditor::paintModulationPreview(
     graphics.fillRoundedRectangle(bounds.toFloat(), 2.0f);
     graphics.setColour(juce::Colour(border).brighter(0.12f));
     graphics.drawRoundedRectangle(bounds.toFloat(), 2.0f, 1.0f);
+    if (openModulationPlayer_ && *openModulationPlayer_ == playerIndex)
+    {
+        graphics.setColour(juce::Colour(uiYellow));
+        graphics.drawRoundedRectangle(
+            bounds.toFloat().reduced(0.5f), 2.0f, 2.0f);
+    }
 
     constexpr int labelWidth = 14;
     const std::array<const char*, 3> laneLabels {"V", "P", "G"};
@@ -3014,25 +3688,43 @@ void LivePatternSequencerEditor::paintModulationPreview(
             continue;
 
         auto graphBounds = laneBounds.reduced(2, 1);
-        const float stepWidth = static_cast<float>(graphBounds.getWidth())
-            / static_cast<float>(valueCount);
         const int currentStep = processor_.playingForUi()
             ? processor_.currentModulationStepForUi(playerIndex, lane)
             : -1;
+        constexpr float slotWidth = 5.0f;
+        constexpr float modulationBarWidth = 3.5f;
+        const auto visibleSteps = std::max<std::size_t>(
+            1,
+            static_cast<std::size_t>(std::floor(
+                static_cast<float>(graphBounds.getWidth()) / slotWidth)));
+        std::size_t firstVisibleStep = 0;
+        if (valueCount > visibleSteps && currentStep >= 0)
+        {
+            const auto current = std::min<std::size_t>(
+                static_cast<std::size_t>(currentStep), valueCount - 1);
+            const auto halfWindow = visibleSteps / 2;
+            firstVisibleStep = current > halfWindow
+                ? current - halfWindow : 0;
+            firstVisibleStep = std::min(
+                firstVisibleStep, valueCount - visibleSteps);
+        }
+        const auto lastVisibleStep = std::min(
+            valueCount, firstVisibleStep + visibleSteps);
 
-        for (std::size_t step = 0; step < valueCount; ++step)
+        for (std::size_t step = firstVisibleStep;
+             step < lastVisibleStep;
+             ++step)
         {
             const float value = modulation.values[step].toFloat();
             const float barHeight = std::max(
                 1.0f,
                 static_cast<float>(graphBounds.getHeight()) * value);
             const float barX = static_cast<float>(graphBounds.getX())
-                + static_cast<float>(step) * stepWidth;
-            const float gap = stepWidth >= 3.0f ? 1.0f : 0.0f;
+                + static_cast<float>(step - firstVisibleStep) * slotWidth;
             const juce::Rectangle<float> bar(
                 barX,
                 static_cast<float>(graphBounds.getBottom()) - barHeight,
-                std::max(1.0f, stepWidth - gap),
+                modulationBarWidth,
                 barHeight);
             const bool isCurrent = static_cast<int>(step) == currentStep;
             graphics.setColour(isCurrent
@@ -3052,30 +3744,340 @@ void LivePatternSequencerEditor::paintControlPane(juce::Graphics& graphics)
     graphics.setColour(juce::Colour(uiBlack));
     graphics.drawRoundedRectangle(paneBounds.reduced(0.5f), 6.0f, 1.0f);
 
-    const int modulationTop = controlPanePadding + controlPaneTopRowHeight
-        + sectionGap;
-    graphics.setColour(juce::Colour(border).brighter(0.08f));
-    for (std::size_t lane = 0; lane <= modulationLanes.size(); ++lane)
+}
+
+void LivePatternSequencerEditor::paintBarScheduler(juce::Graphics& graphics)
+{
+    constexpr float trackTopPadding = 5.0f;
+    constexpr float cellHeight = 22.0f;
+    constexpr float eventTop = trackTopPadding + cellHeight + 6.0f;
+    constexpr float eventRowHeight = 19.0f;
+
+    auto bounds = barScheduler_.getLocalBounds().toFloat().reduced(1.0f);
+    graphics.setColour(juce::Colour(panel));
+    graphics.fillRoundedRectangle(bounds, 3.0f);
+    graphics.setColour(juce::Colour(border));
+    graphics.drawRoundedRectangle(bounds, 3.0f, 1.5f);
+
+    auto label = bounds.removeFromLeft(
+        std::min(barSchedulerLabelWidth, bounds.getWidth()));
+    graphics.setColour(juce::Colour(secondaryText));
+    graphics.setFont(juce::Font(juce::FontOptions(8.0f, juce::Font::bold)));
+    graphics.drawFittedText(
+        selectedScheduleBar_
+            ? "BAR " + juce::String(static_cast<int>(*selectedScheduleBar_))
+                + "\nHELD"
+            : juce::String("HOLD\n1-8"),
+        label.withY(label.getY() + trackTopPadding)
+            .withHeight(cellHeight)
+            .toNearestInt(),
+        juce::Justification::centred,
+        2);
+
+    constexpr auto maximum =
+        LivePatternSequencerProcessor::maximumScheduledBars;
+    struct ScheduledAction
     {
-        const int y = modulationTop
+        ScheduledActionIcon icon;
+        juce::String text;
+    };
+    std::array<std::size_t, maximum> pending {};
+    std::array<std::vector<ScheduledAction>, maximum> actions {};
+    const auto currentBar = processor_.currentBarForUi();
+    const auto appendAction = [&actions](
+        std::size_t targetBar,
+        ScheduledActionIcon icon,
+        const juce::String& text)
+    {
+        actions[targetBar - 1].push_back({icon, text});
+    };
+    for (std::size_t offset = 1; offset <= maximum; ++offset)
+    {
+        const auto count =
+            processor_.scheduledChangeCountAtBarOffsetForUi(offset);
+        const auto targetBar = targetBarForOffset(currentBar, offset);
+        pending[targetBar - 1] += count;
+
+        for (std::size_t playerIndex = 0;
+             playerIndex < playerCount_;
+             ++playerIndex)
+        {
+            const auto voiceName =
+                processor_.playerNameForUi(playerIndex).toUpperCase();
+
+            if (processor_.playerMuteScheduledAtBarOffsetForUi(
+                    playerIndex, true, offset))
+            {
+                appendAction(
+                    targetBar, ScheduledActionIcon::mute, voiceName);
+            }
+            else if (processor_.playerMuteScheduledAtBarOffsetForUi(
+                         playerIndex, false, offset))
+            {
+                appendAction(
+                    targetBar, ScheduledActionIcon::unmute, voiceName);
+            }
+
+            const auto pattern =
+                processor_.playerPatternScheduledAtBarOffsetForUi(
+                    playerIndex, offset);
+            if (pattern)
+            {
+                appendAction(targetBar,
+                    ScheduledActionIcon::pattern,
+                    voiceName + "  "
+                        + processor_.patternNameForUi(*pattern).toUpperCase());
+            }
+        }
+    }
+
+    const float slotWidth = bounds.getWidth() / static_cast<float>(maximum);
+    const float cellWidth = std::max(
+        1.0f,
+        std::min(maximumBarCellWidth, slotWidth - minimumBarTransitionWidth));
+    const float transitionWidth = slotWidth - cellWidth;
+    const float progress = juce::jlimit(
+        0.0f, 1.0f, processor_.currentBarProgressForUi());
+    for (std::size_t index = 0; index < maximum; ++index)
+    {
+        const float x = bounds.getX() + static_cast<float>(index) * slotWidth;
+        const juce::Rectangle<float> cell {
+            x,
+            bounds.getY() + trackTopPadding,
+            cellWidth,
+            cellHeight
+        };
+        const bool current = currentBar == index + 1;
+        const bool selected = selectedScheduleBar_
+            && *selectedScheduleBar_ == index + 1;
+
+        const float markerX = x + cellWidth + transitionWidth * 0.5f;
+        if (!actions[index].empty())
+        {
+            auto actionBounds = juce::Rectangle<float> {
+                x + 3.0f,
+                bounds.getY() + eventTop,
+                std::max(1.0f, slotWidth - 6.0f),
+                std::max(
+                    1.0f,
+                    bounds.getBottom() - bounds.getY() - eventTop)
+            };
+            const auto availableRows = static_cast<std::size_t>(
+                std::max(1.0f, std::floor(
+                    actionBounds.getHeight() / eventRowHeight)));
+            const auto visibleCount = std::min(
+                availableRows, actions[index].size());
+            graphics.setFont(juce::Font(
+                juce::FontOptions(14.5f, juce::Font::bold)));
+            for (std::size_t actionIndex = 0;
+                 actionIndex < visibleCount;
+                 ++actionIndex)
+            {
+                auto row = actionBounds.removeFromTop(eventRowHeight);
+                auto iconBounds = row.removeFromLeft(22.0f).reduced(0.5f);
+                paintScheduledActionIcon(
+                    graphics,
+                    actions[index][actionIndex].icon,
+                    iconBounds,
+                    scheduledActionIconColour(
+                        actions[index][actionIndex].icon));
+
+                const bool hasOverflow = actionIndex + 1 == visibleCount
+                    && actions[index].size() > visibleCount;
+                juce::Rectangle<float> overflowBounds;
+                if (hasOverflow)
+                    overflowBounds = row.removeFromRight(22.0f);
+                graphics.setColour(juce::Colour(warmIvory));
+                graphics.drawFittedText(
+                    actions[index][actionIndex].text,
+                    row.toNearestInt(),
+                    juce::Justification::centredLeft,
+                    1,
+                    0.86f);
+                if (hasOverflow)
+                {
+                    graphics.setColour(juce::Colour(secondaryText));
+                    graphics.setFont(juce::Font(
+                        juce::FontOptions(10.0f, juce::Font::bold)));
+                    graphics.drawText(
+                        "+" + juce::String(static_cast<int>(
+                            actions[index].size() - visibleCount)),
+                        overflowBounds,
+                        juce::Justification::centredRight);
+                    graphics.setFont(juce::Font(
+                        juce::FontOptions(14.5f, juce::Font::bold)));
+                }
+            }
+        }
+
+        graphics.setColour(juce::Colour(inactive));
+        graphics.fillRoundedRectangle(cell, 2.0f);
+        if (current)
+        {
+            auto swept = cell;
+            swept.setWidth(cell.getWidth() * progress);
+            graphics.saveState();
+            graphics.reduceClipRegion(cell.toNearestInt());
+            graphics.setColour(juce::Colour(uiBlue));
+            graphics.fillRect(swept);
+            graphics.setColour(juce::Colour(uiBlue).brighter(0.25f));
+            graphics.fillRect(
+                cell.getX() + cell.getWidth() * progress - 1.0f,
+                cell.getY(), 2.0f, cell.getHeight());
+            graphics.restoreState();
+        }
+
+        graphics.setColour(juce::Colour(
+            current ? uiBlue : border));
+        graphics.drawRoundedRectangle(
+            cell, 2.0f, current ? 1.5f : 1.0f);
+        graphics.setColour(juce::Colour(
+            current && progress > 0.52f ? uiBlack : primaryText));
+        graphics.setFont(juce::Font(
+            juce::FontOptions(9.0f, juce::Font::bold)));
+        graphics.drawText(
+            juce::String(static_cast<int>(index + 1)),
+            cell,
+            juce::Justification::centred);
+
+        const float markerY = cell.getCentreY();
+        const float markerRadius = std::min(
+            selected ? 11.0f : 10.0f,
+            std::max(1.0f, transitionWidth * 0.5f - 3.0f));
+        paintScheduleMarker(
+            graphics,
+            index + 1,
+            {markerX, markerY},
+            markerRadius,
+            juce::Colour(selected
+                ? uiYellow
+                : (pending[index] != 0 ? warmIvory : lightGray))
+                .withMultipliedAlpha(
+                    selected || pending[index] != 0 ? 1.0f : 0.45f),
+            selected || pending[index] != 0);
+
+        if (pending[index] > 1
+            && markerX + 11.0f < x + slotWidth)
+        {
+            graphics.setColour(juce::Colour(primaryText));
+            graphics.setFont(juce::Font(
+                juce::FontOptions(8.0f, juce::Font::bold)));
+            graphics.drawText(
+                juce::String(static_cast<int>(pending[index])),
+                juce::Rectangle<float> {
+                    markerX + 10.0f,
+                    cell.getY(),
+                    std::max(1.0f, x + slotWidth - markerX - 11.0f),
+                    cell.getHeight()},
+                juce::Justification::centredLeft);
+        }
+    }
+}
+
+void LivePatternSequencerEditor::paintModulationEditor(
+    juce::Graphics& graphics)
+{
+    graphics.fillAll(juce::Colour(background));
+    const auto bounds = modulationEditor_.getLocalBounds().toFloat();
+    graphics.setColour(juce::Colour(panel));
+    graphics.fillRoundedRectangle(bounds.reduced(0.5f), 5.0f);
+    graphics.setColour(juce::Colour(uiYellow));
+    graphics.drawRoundedRectangle(bounds.reduced(0.5f), 5.0f, 1.5f);
+
+    graphics.setColour(juce::Colour(border).brighter(0.08f));
+    for (std::size_t lane = 1; lane < modulationLanes.size(); ++lane)
+    {
+        const int y = modulationEditorPadding
             + static_cast<int>(lane) * modulationPanelHeight;
         graphics.drawHorizontalLine(
             y,
-            static_cast<float>(controlPanePadding),
-            static_cast<float>(controlPane_.getWidth() - controlPanePadding));
+            static_cast<float>(modulationEditorPadding),
+            static_cast<float>(modulationEditor_.getWidth()
+                - modulationEditorPadding));
     }
+}
 
-    if (selectedVoiceCount() == 0)
+std::uint64_t LivePatternSequencerEditor::beginPopupSession(
+    PopupKind kind,
+    juce::Component* target)
+{
+    if (activePopupKind_ != PopupKind::none)
+        juce::PopupMenu::dismissAllActiveMenus();
+
+    ++popupGeneration_;
+    activePopupKind_ = kind;
+    activePopupTarget_ = target;
+    menuDismissLayer_.setVisible(true);
+    menuDismissLayer_.toFront(false);
+    return popupGeneration_;
+}
+
+void LivePatternSequencerEditor::finishPopupSession(
+    std::uint64_t generation)
+{
+    if (generation != popupGeneration_)
+        return;
+    activePopupKind_ = PopupKind::none;
+    activePopupTarget_ = nullptr;
+    menuDismissLayer_.setVisible(false);
+}
+
+void LivePatternSequencerEditor::menuDismissLayerMouseDown(
+    const juce::MouseEvent& event)
+{
+    const auto screenPosition = event.getScreenPosition();
+    juce::Button* requestedButton = nullptr;
+    const auto consider = [&](juce::Button* button)
     {
-        graphics.setColour(juce::Colour(secondaryText));
-        graphics.setFont(juce::Font(juce::FontOptions(12.0f)));
-        graphics.drawText(
-            "Select one or more voices above to enable batch controls.",
-            controlPanePadding,
-            modulationTop,
-            controlPane_.getWidth() - controlPanePadding * 2,
-            static_cast<int>(modulationLanes.size()) * modulationPanelHeight,
-            juce::Justification::centred);
+        if (requestedButton == nullptr
+            && button != nullptr
+            && button->isShowing()
+            && button->isEnabled()
+            && button->getScreenBounds().contains(screenPosition))
+        {
+            requestedButton = button;
+        }
+    };
+
+    for (auto& button : patternMenuButtons_)
+        consider(button.get());
+    for (auto& laneButtons : modulationMenuButtons_)
+        for (auto& button : laneButtons)
+            consider(button.get());
+    consider(&suppressionButton_);
+    for (auto& button : groupAssignmentButtons_)
+        consider(button.get());
+    for (auto& button : resetToMasterButtons_)
+        consider(button.get());
+    for (auto& button : muteButtons_)
+        consider(button.get());
+    for (auto& button : offsetLeftButtons_)
+        consider(button.get());
+    for (auto& button : offsetRightButtons_)
+        consider(button.get());
+
+    // The popup's async dismissal callback can clear activePopupKind_ before
+    // this mouse-down reaches the overlay.  Base the hand-off on the button
+    // under the pointer instead, so clicking another menu button both closes
+    // the current popup and opens the requested one with the same click.
+    const bool activateDifferentButton = requestedButton != nullptr
+        && requestedButton != activePopupTarget_;
+    const juce::Component::SafePointer<juce::Button> safeButton(
+        requestedButton);
+
+    ++popupGeneration_;
+    activePopupKind_ = PopupKind::none;
+    activePopupTarget_ = nullptr;
+    menuDismissLayer_.setVisible(false);
+    juce::PopupMenu::dismissAllActiveMenus();
+
+    if (activateDifferentButton)
+    {
+        juce::Timer::callAfterDelay(1, [safeButton]
+        {
+            if (safeButton != nullptr)
+                safeButton->triggerClick();
+        });
     }
 }
 
@@ -3086,6 +4088,7 @@ void LivePatternSequencerEditor::showSuppressionMatrix()
         suppressionMenuOpen_ = false;
         suppressionButton_.setToggleState(false, juce::dontSendNotification);
         juce::PopupMenu::dismissAllActiveMenus();
+        finishPopupSession(popupGeneration_);
         return;
     }
 
@@ -3098,6 +4101,8 @@ void LivePatternSequencerEditor::showSuppressionMatrix()
         nullptr,
         "Suppression Matrix");
 
+    const auto popupGeneration = beginPopupSession(
+        PopupKind::matrix, &suppressionButton_);
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
     const auto buttonBounds = suppressionButton_.getScreenBounds();
     menu.showMenuAsync(
@@ -3106,10 +4111,11 @@ void LivePatternSequencerEditor::showSuppressionMatrix()
             .withTargetScreenArea(
                 juce::Rectangle<int> {}.withPosition(
                     buttonBounds.getX(), buttonBounds.getCentreY())),
-        [safeThis](int)
+        [safeThis, popupGeneration](int)
         {
             if (safeThis == nullptr)
                 return;
+            safeThis->finishPopupSession(popupGeneration);
             safeThis->suppressionMenuOpen_ = false;
             safeThis->suppressionButton_.setToggleState(
                 false, juce::dontSendNotification);
@@ -3122,6 +4128,15 @@ void LivePatternSequencerEditor::showPatternMenu(
 {
     if (playerIndex >= playerCount_ || playerIndex >= patternMenuButtons_.size())
         return;
+
+    if (openModulationPlayer_)
+    {
+        openModulationPlayer_.reset();
+        refreshSelectedControls(true);
+        modulationBlockLayer_.setVisible(false);
+        modulationEditor_.setVisible(false);
+        content_.repaint();
+    }
 
     constexpr int saveItemId = 20000;
     juce::PopupMenu menu;
@@ -3147,22 +4162,29 @@ void LivePatternSequencerEditor::showPatternMenu(
         "SAVE PATTERN",
         processor_.playerPatternModifiedForUi(playerIndex));
 
+    const auto popupGeneration = beginPopupSession(
+        PopupKind::pattern, targetComponent);
+    const auto targetBar = heldScheduleBar();
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
     auto menuOptions = juce::PopupMenu::Options {}
         .withTargetComponent(targetComponent);
-    if (targetComponent != nullptr
-        && targetComponent != controlPatternMenuButton_.get())
+    if (targetComponent != nullptr)
     {
         const auto buttonBounds = targetComponent->getScreenBounds();
+        const auto gridAnchor = content_.localPointToGlobal(
+            juce::Point<int> {patternGridLeft, 0});
         menuOptions = menuOptions.withTargetScreenArea(
             juce::Rectangle<int> {}.withPosition(
-                buttonBounds.getRight(), buttonBounds.getCentreY()));
+                gridAnchor.x, buttonBounds.getCentreY()));
     }
     menu.showMenuAsync(
         menuOptions,
-        [safeThis, playerIndex](int result)
+        [safeThis, playerIndex, popupGeneration, targetBar](int result)
         {
-            if (safeThis == nullptr || result == 0)
+            if (safeThis == nullptr)
+                return;
+            safeThis->finishPopupSession(popupGeneration);
+            if (result == 0)
                 return;
 
             if (result == saveItemId)
@@ -3174,13 +4196,20 @@ void LivePatternSequencerEditor::showPatternMenu(
             const auto patternIndex = static_cast<std::size_t>(result - 1);
             if (patternIndex < safeThis->processor_.patternCountForUi())
             {
+                const auto barsFromNow = targetBar
+                    ? offsetForTargetBar(
+                        safeThis->processor_.currentBarForUi(), *targetBar)
+                    : 1;
                 safeThis->applyToSelectedPatternPlayers(
-                    [safeThis, patternIndex](std::size_t selectedPlayerIndex)
+                    [safeThis, patternIndex, barsFromNow](
+                        std::size_t selectedPlayerIndex)
                     {
                         if (safeThis != nullptr)
                         {
-                            safeThis->processor_.selectPatternForPlayer(
-                                selectedPlayerIndex, patternIndex);
+                            (void) safeThis->processor_.schedulePatternForPlayer(
+                                selectedPlayerIndex,
+                                patternIndex,
+                                barsFromNow);
                         }
                     });
                 safeThis->updatePatternModifiedIndicators(true);
@@ -3200,7 +4229,16 @@ void LivePatternSequencerEditor::showModulationMenu(
         return;
 
     constexpr int saveItemId = 20000;
+    constexpr int lockItemId = 20001;
     juce::PopupMenu menu;
+    const bool locked = processor_.playerModulationLockedForUi(
+        playerIndex, lane);
+    menu.addItem(
+        lockItemId,
+        locked ? "UNLOCK MODULATION" : "LOCK MODULATION",
+        true,
+        locked);
+    menu.addSeparator();
     const auto selected =
         processor_.selectedModulationForPlayer(playerIndex, lane);
     for (std::size_t modulationIndex = 0;
@@ -3215,7 +4253,8 @@ void LivePatternSequencerEditor::showModulationMenu(
             static_cast<int>(modulationIndex + 1),
             std::make_unique<ModulationPreviewMenuItem>(
                 modulation,
-                modulationIndex == selected),
+                modulationIndex == selected,
+                locked),
             nullptr,
             processor_.modulationNameForUi(modulationIndex));
     }
@@ -3225,22 +4264,41 @@ void LivePatternSequencerEditor::showModulationMenu(
     menu.addItem(
         saveItemId,
         "SAVE MODULATION",
-        editedModulation.length > 1
+        !locked && editedModulation.length > 1
             && processor_.playerModulationModifiedForUi(playerIndex, lane));
 
+    auto* target = modulationMenuButtons_[laneSlot][playerIndex].get();
+    const auto popupGeneration = beginPopupSession(
+        PopupKind::modulation, target);
     const juce::Component::SafePointer<LivePatternSequencerEditor> safeThis(this);
     menu.showMenuAsync(
         juce::PopupMenu::Options {}
-            .withTargetComponent(
-                modulationMenuButtons_[laneSlot][playerIndex].get()),
-        [safeThis, playerIndex, lane](int result)
+            .withTargetComponent(target),
+        [safeThis, playerIndex, lane, popupGeneration](int result)
         {
-            if (safeThis == nullptr || result == 0)
+            if (safeThis == nullptr)
+                return;
+            safeThis->finishPopupSession(popupGeneration);
+            if (result == 0)
                 return;
 
             if (result == saveItemId)
             {
                 safeThis->beginSavePlayerModulation(playerIndex, lane);
+                return;
+            }
+
+            if (result == lockItemId)
+            {
+                const bool currentlyLocked =
+                    safeThis->processor_.playerModulationLockedForUi(
+                        playerIndex, lane);
+                safeThis->processor_.setPlayerModulationLocked(
+                    playerIndex, lane, !currentlyLocked);
+                safeThis->refreshModulationControls(
+                    playerIndex, lane, true);
+                safeThis->refreshSelectedControls(true);
+                safeThis->content_.repaint();
                 return;
             }
 

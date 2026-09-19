@@ -1,15 +1,21 @@
 #include "plugin/PluginProcessor.h"
 #include "plugin/PluginEditor.h"
+#include "core/Logger.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 
 namespace
 {
-struct DrumVoiceDefinition
+constexpr int drumMidiChannel = 11;
+constexpr int synthOneMidiChannel = 12;
+constexpr int synthTwoMidiChannel = 13;
+
+struct VoiceDefinition
 {
     const char* name;
     std::uint8_t midiNote;
@@ -18,26 +24,27 @@ struct DrumVoiceDefinition
     bool hasCvOutput;
 };
 
-// Default drum-machine map. Mark exactly one voice as the master. Adding or
+// Default voice map. Mark exactly one voice as the master. Adding or
 // removing definitions here does not require routing, matrix, or editor changes.
-constexpr std::array defaultDrumVoices {
-    DrumVoiceDefinition { "BD1", 36, true, 2, true },
-    DrumVoiceDefinition { "BD2", 37, false, 2, true },
-    DrumVoiceDefinition { "Machine", 38, false, 2, true },
-    DrumVoiceDefinition { "Snare", 39, false, 2, true },
-    DrumVoiceDefinition { "Clap", 40, false, 2, true },
-    DrumVoiceDefinition { "Rimshot", 41, false, 2, true },
-    DrumVoiceDefinition { "OH", 42, false, 2, true },
-    DrumVoiceDefinition { "CH", 43, false, 2, true },
-    DrumVoiceDefinition { "Crash", 44, false, 2, true },
-    DrumVoiceDefinition { "Ride", 45, false, 2, true },
-    DrumVoiceDefinition { "Voice 11", 46, false, 1, false }
+constexpr std::array defaultVoices {
+    VoiceDefinition { "BD1", 36, true, drumMidiChannel, true },
+    VoiceDefinition { "BD2", 37, false, drumMidiChannel, true },
+    VoiceDefinition { "Machine", 38, false, drumMidiChannel, true },
+    VoiceDefinition { "Snare", 39, false, drumMidiChannel, true },
+    VoiceDefinition { "Clap", 40, false, drumMidiChannel, true },
+    VoiceDefinition { "Rimshot", 41, false, drumMidiChannel, true },
+    VoiceDefinition { "OH", 42, false, drumMidiChannel, true },
+    VoiceDefinition { "CH", 43, false, drumMidiChannel, true },
+    VoiceDefinition { "Crash", 44, false, drumMidiChannel, true },
+    VoiceDefinition { "Ride", 45, false, drumMidiChannel, true },
+    VoiceDefinition { "Synth 1", 46, false, synthOneMidiChannel, false },
+    VoiceDefinition { "Synth 2", 47, false, synthTwoMidiChannel, false }
 };
 
 constexpr std::size_t configuredMasterCount() noexcept
 {
     std::size_t count = 0;
-    for (const auto& voice : defaultDrumVoices)
+    for (const auto& voice : defaultVoices)
         if (voice.isMaster)
             ++count;
     return count;
@@ -45,10 +52,10 @@ constexpr std::size_t configuredMasterCount() noexcept
 
 constexpr std::size_t configuredMasterIndex() noexcept
 {
-    for (std::size_t index = 0; index < defaultDrumVoices.size(); ++index)
-        if (defaultDrumVoices[index].isMaster)
+    for (std::size_t index = 0; index < defaultVoices.size(); ++index)
+        if (defaultVoices[index].isMaster)
             return index;
-    return defaultDrumVoices.size();
+    return defaultVoices.size();
 }
 
 static_assert(configuredMasterCount() == 1,
@@ -80,23 +87,54 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
       modulationLibraryFileStore_(
           patternCatalogFile.getSiblingFile("modulations.json")),
       drumRenderer_(std::make_unique<lps::MidiBufferRenderer>(
-          existingVoiceMidiChannel)),
-      channelOneRenderer_(std::make_unique<lps::MidiBufferRenderer>(
-          newVoiceMidiChannel)),
+          drumMidiChannel)),
+      synthOneRenderer_(std::make_unique<lps::MidiBufferRenderer>(
+          synthOneMidiChannel)),
+      synthTwoRenderer_(std::make_unique<lps::MidiBufferRenderer>(
+          synthTwoMidiChannel)),
       cvRenderer_(std::make_unique<lps::CvBufferRenderer>()),
       runtimeGraph_(std::make_unique<lps::RuntimeGraph>())
 {
+    const auto logDirectory = patternCatalogFile.getParentDirectory();
+    (void) logDirectory.createDirectory();
+    const auto logFile = logDirectory.getChildFile("sequencer.log");
+    const auto* configuredLevel = std::getenv("LPS_LOG_LEVEL");
+    const auto* configuredStderr = std::getenv("LPS_LOG_STDERR");
+    const lps::LoggerConfig loggerConfig {
+        logFile.getFullPathName().toStdString(),
+        configuredLevel != nullptr
+            ? lps::Logger::parseLevel(configuredLevel)
+            : lps::LogLevel::info,
+        configuredStderr != nullptr
+            && std::string_view {configuredStderr} == "1"
+    };
+    if (lps::Logger::configure(loggerConfig))
+    {
+        lps::Logger::logf(lps::LogLevel::info, "plugin", "instance_starting",
+            "version=%s log_file=\"%s\"",
+            JucePlugin_VersionString,
+            logFile.getFullPathName().toRawUTF8());
+    }
+
     // Catalog replacement is startup-only and must finish before PatternPlayer
     // instances retain references to the library.
-    (void) patternLibraryFileStore_.loadOrCreate(patternLibrary_);
-    (void) modulationLibraryFileStore_.loadOrCreate(
+    const bool patternsLoaded = patternLibraryFileStore_.loadOrCreate(patternLibrary_);
+    const bool modulationsLoaded = modulationLibraryFileStore_.loadOrCreate(
         modulationLibrary_);
+    if (!patternsLoaded)
+        lps::Logger::logf(lps::LogLevel::error, "plugin", "pattern_catalog_load_failed",
+            "reason=\"%s\"", patternLibraryFileStore_.lastError().toRawUTF8());
+    if (!modulationsLoaded)
+        lps::Logger::logf(lps::LogLevel::error, "plugin", "modulation_catalog_load_failed",
+            "reason=\"%s\"", modulationLibraryFileStore_.lastError().toRawUTF8());
 
-    const auto totalPlayerCount = defaultDrumVoices.size();
+    const auto totalPlayerCount = defaultVoices.size();
     players_.reserve(totalPlayerCount);
     currentSteps_.reserve(totalPlayerCount);
     currentModulationSteps_.reserve(
         totalPlayerCount * modulationLaneCount);
+    modulationLocks_.reserve(totalPlayerCount * modulationLaneCount);
+    playerGroupMasks_.reserve(totalPlayerCount);
 
     const auto addDefaultModulation = [this](
         std::string name,
@@ -121,17 +159,19 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     jassert(gateRecord.entry != nullptr);
     lps::RuntimeGraphConfig graphConfig;
     const bool outputsRegistered = runtimeGraph_->registerOutputEndpoint(
-            channelTwoMidiOutputEndpoint, *drumRenderer_)
+            drumMidiOutputEndpoint, *drumRenderer_)
         && runtimeGraph_->registerOutputEndpoint(
             cvOutputEndpoint, *cvRenderer_)
         && runtimeGraph_->registerOutputEndpoint(
-            channelOneMidiOutputEndpoint, *channelOneRenderer_);
+            synthOneMidiOutputEndpoint, *synthOneRenderer_)
+        && runtimeGraph_->registerOutputEndpoint(
+            synthTwoMidiOutputEndpoint, *synthTwoRenderer_);
     jassert(outputsRegistered);
     (void) outputsRegistered;
 
-    for (std::size_t index = 0; index < defaultDrumVoices.size(); ++index)
+    for (std::size_t index = 0; index < defaultVoices.size(); ++index)
     {
-        const auto& voice = defaultDrumVoices[index];
+        const auto& voice = defaultVoices[index];
         auto player = std::make_unique<lps::PatternPlayer>(patternLibrary_);
         player->setRuntimeId(static_cast<std::uint32_t>(index));
         if (patternLibrary_.size() != 0)
@@ -187,7 +227,8 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         (void) nodesRegistered;
 
         const auto transitionPolicy = waitForCycleBeforeSelection
-            ? lps::PatternTransitionPolicy {}
+            ? lps::PatternTransitionPolicy {
+                lps::PatternTransitionPolicyType::explicitBoundary, {}}
             : lps::PatternTransitionPolicy {
                 lps::PatternTransitionPolicyType::immediate, {}};
         const bool playerConfigsAdded = graphConfig.addPlayerConfig(
@@ -205,9 +246,11 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         jassert(playerConfigsAdded);
         (void) playerConfigsAdded;
 
-        const auto midiEndpoint = voice.midiChannel == newVoiceMidiChannel
-            ? channelOneMidiOutputEndpoint
-            : channelTwoMidiOutputEndpoint;
+        const auto midiEndpoint = voice.midiChannel == synthOneMidiChannel
+            ? synthOneMidiOutputEndpoint
+            : voice.midiChannel == synthTwoMidiChannel
+                ? synthTwoMidiOutputEndpoint
+                : drumMidiOutputEndpoint;
         bool bindingsAdded = graphConfig.add(lps::TriggerBinding {
                 lps::TriggerBindingId {static_cast<std::uint32_t>(index)},
                 patternId, voiceId})
@@ -271,14 +314,25 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         bundle.realtime = std::move(player);
         players_.push_back(std::move(bundle));
         currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
+        playerGroupMasks_.push_back(
+            std::make_unique<std::atomic<std::uint8_t>>(0));
         for (std::size_t lane = 0; lane < modulationLaneCount; ++lane)
+        {
             currentModulationSteps_.push_back(
                 std::make_unique<std::atomic<int>>(-1));
+            modulationLocks_.push_back(
+                std::make_unique<std::atomic<bool>>(false));
+        }
     }
 
     const bool graphActivated = runtimeGraph_->activate(graphConfig);
     jassert(graphActivated);
     (void) graphActivated;
+    const bool barClockConfigured = runtimeGraph_->configureBarClock(
+        lps::PatternPlayerId {
+            static_cast<std::uint32_t>(configuredMasterIndex()) });
+    jassert(barClockConfigured);
+    (void) barClockConfigured;
     for (std::size_t index = 0; index < players_.size(); ++index)
     {
         if (index == configuredMasterIndex())
@@ -459,7 +513,8 @@ void LivePatternSequencerProcessor::processBlock(
 
     wasPlaying_ = block.playing;
     drumRenderer_->setMidiBuffer(midi);
-    channelOneRenderer_->setMidiBuffer(midi);
+    synthOneRenderer_->setMidiBuffer(midi);
+    synthTwoRenderer_->setMidiBuffer(midi);
     cvRenderer_->setAudioBuffer(audio);
     lps::ResolvedVoiceEventBuffer resolvedEvents;
     if (!runtimeGraph_->process(block, resolvedEvents)
@@ -470,7 +525,8 @@ void LivePatternSequencerProcessor::processBlock(
     }
     cvRenderer_->clearAudioBuffer();
     drumRenderer_->clearMidiBuffer();
-    channelOneRenderer_->clearMidiBuffer();
+    synthOneRenderer_->clearMidiBuffer();
+    synthTwoRenderer_->clearMidiBuffer();
 
     updateUiSnapshot();
 }
@@ -501,9 +557,11 @@ void LivePatternSequencerProcessor::getStateInformation(
         object->setProperty("playbackStart", pattern.playbackStart);
         object->setProperty("playbackEnd", pattern.playbackEnd);
         object->setProperty("playbackSpeed", pattern.playbackSpeed);
-        const auto serializeModulation = [&object](
+        const auto serializeModulation = [this, &object, index](
             const char* idProperty,
             const char* valuesProperty,
+            const char* lockedProperty,
+            ModulationLane lane,
             const lps::ModulationPlayer& player)
         {
             object->setProperty(idProperty, static_cast<juce::int64>(
@@ -513,17 +571,25 @@ void LivePatternSequencerProcessor::getStateInformation(
             for (std::size_t step = 0; step < modulation.length; ++step)
                 values.add(static_cast<int>(modulation.values[step].raw));
             object->setProperty(valuesProperty, values);
+            object->setProperty(
+                lockedProperty,
+                playerModulationLockedForUi(index, lane));
         };
         serializeModulation(
-            "modulationId", "modulationValues",
+            "modulationId", "modulationValues", "modulationLocked",
+            ModulationLane::velocity,
             *players_[index].velocityPlayer);
         serializeModulation(
             "pitchModulationId", "pitchModulationValues",
+            "pitchModulationLocked", ModulationLane::pitch,
             *players_[index].pitchPlayer);
         serializeModulation(
             "gateModulationId", "gateModulationValues",
+            "gateModulationLocked", ModulationLane::gate,
             *players_[index].gatePlayer);
         object->setProperty("muted", playerMutedForUi(index));
+        object->setProperty("groupMask", static_cast<int>(
+            playerGroupMasks_[index]->load(std::memory_order_relaxed)));
         serializedPlayers.add(juce::var(object.get()));
     }
     root->setProperty("players", serializedPlayers);
@@ -595,7 +661,13 @@ void LivePatternSequencerProcessor::setStateInformation(
                 object->getProperty("modulationId")))};
         if (patternLibrary_.find(pattern.patternId) == nullptr
             || modulationLibrary_.find(velocityModulationId) == nullptr
-            || !object->getProperty("muted").isBool())
+            || !object->getProperty("muted").isBool()
+            || (object->hasProperty("groupMask")
+                && (!(object->getProperty("groupMask").isInt()
+                        || object->getProperty("groupMask").isInt64())
+                    || static_cast<int>(object->getProperty("groupMask")) < 0
+                    || static_cast<int>(object->getProperty("groupMask"))
+                        >= (1 << groupCount))))
             return;
 
         const auto valuesAreValid = [](const juce::Array<juce::var>& values)
@@ -620,11 +692,13 @@ void LivePatternSequencerProcessor::setStateInformation(
             ModulationLane lane;
             lps::ModulationId id;
             const juce::Array<juce::var>* values;
+            const char* lockedProperty;
         };
         std::array<SavedModulation, modulationLaneCount> savedModulations {{
-            {ModulationLane::velocity, velocityModulationId, velocityValues},
-            {ModulationLane::pitch, {}, nullptr},
-            {ModulationLane::gate, {}, nullptr}
+            {ModulationLane::velocity, velocityModulationId, velocityValues,
+                "modulationLocked"},
+            {ModulationLane::pitch, {}, nullptr, "pitchModulationLocked"},
+            {ModulationLane::gate, {}, nullptr, "gateModulationLocked"}
         }};
         const auto readOptionalModulation = [&object, &valuesAreValid](
             const char* idProperty,
@@ -646,9 +720,16 @@ void LivePatternSequencerProcessor::setStateInformation(
                 savedModulations[2]))
             return;
         for (const auto& saved : savedModulations)
+        {
             if (saved.values != nullptr
                 && modulationLibrary_.find(saved.id) == nullptr)
                 return;
+            if (object->hasProperty(saved.lockedProperty)
+                && !object->getProperty(saved.lockedProperty).isBool())
+            {
+                return;
+            }
+        }
 
         const auto playerIndex = static_cast<std::size_t>(index);
         if (!players_[playerIndex].patternController
@@ -669,9 +750,22 @@ void LivePatternSequencerProcessor::setStateInformation(
                 modulation->setValue(static_cast<std::size_t>(step), {
                     static_cast<std::uint16_t>(static_cast<juce::int64>(
                         saved.values->getReference(step))) });
+            setPlayerModulationLocked(
+                playerIndex,
+                saved.lane,
+                object->hasProperty(saved.lockedProperty)
+                    && static_cast<bool>(
+                        object->getProperty(saved.lockedProperty)));
         }
-        setPlayerMuted(playerIndex,
+        runtimeGraph_->setVoiceMuted(
+            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)},
             static_cast<bool>(object->getProperty("muted")));
+        playerGroupMasks_[playerIndex]->store(
+            object->hasProperty("groupMask")
+                ? static_cast<std::uint8_t>(
+                    static_cast<int>(object->getProperty("groupMask")))
+                : 0,
+            std::memory_order_relaxed);
     }
 
     for (std::size_t from = 0; from < players_.size(); ++from)
@@ -821,7 +915,7 @@ int LivePatternSequencerProcessor::playerMidiNoteForUi(std::size_t playerIndex) 
 
 int LivePatternSequencerProcessor::drumMidiChannelForUi() const noexcept
 {
-    return existingVoiceMidiChannel;
+    return drumMidiChannel;
 }
 
 std::size_t LivePatternSequencerProcessor::patternCountForUi() const noexcept
@@ -890,7 +984,11 @@ LivePatternSequencerProcessor::savePlayerPattern(
             if (!index)
                 return {};
 
-            player->selectSavedPattern(existing->id);
+            (void) runtimeGraph_->schedulePatternSelection(
+                lps::PatternPlayerId {
+                    static_cast<std::uint32_t>(playerIndex) },
+                existing->id,
+                1);
             return {
                 SavePatternStatus::selectedExisting,
                 *index,
@@ -912,7 +1010,11 @@ LivePatternSequencerProcessor::savePlayerPattern(
         if (!index)
             return {};
 
-        player->selectSavedPattern(insertion.entry->id);
+        (void) runtimeGraph_->schedulePatternSelection(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex) },
+            insertion.entry->id,
+            1);
         return {
             insertion.inserted
                 ? SavePatternStatus::savedNew
@@ -980,10 +1082,21 @@ void LivePatternSequencerProcessor::selectPatternForPlayer(
     std::size_t playerIndex,
     std::size_t patternIndex) noexcept
 {
-    auto* player = patternPlayerAt(playerIndex);
+    (void) schedulePatternForPlayer(playerIndex, patternIndex, 1);
+}
+
+bool LivePatternSequencerProcessor::schedulePatternForPlayer(
+    std::size_t playerIndex,
+    std::size_t patternIndex,
+    std::size_t barsFromNow) noexcept
+{
     const auto* pattern = patternLibrary_.recordAt(patternIndex);
-    if (player != nullptr && pattern != nullptr)
-        player->selectPattern(pattern->id);
+    return playerIndex < players_.size() && pattern != nullptr
+        && runtimeGraph_->schedulePatternSelection(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex) },
+            pattern->id,
+            barsFromNow);
 }
 
 std::size_t LivePatternSequencerProcessor::selectedPatternForPlayer(
@@ -993,7 +1106,19 @@ std::size_t LivePatternSequencerProcessor::selectedPatternForPlayer(
     if (player == nullptr)
         return 0;
 
-    return patternLibrary_.indexOf(player->selectedPatternId()).value_or(0);
+    const auto pending = runtimeGraph_->scheduledPatternSelection(
+        lps::PatternPlayerId {static_cast<std::uint32_t>(playerIndex)});
+    return patternLibrary_.indexOf(
+        pending.value_or(player->selectedPatternId())).value_or(0);
+}
+
+bool LivePatternSequencerProcessor::playerPatternChangePendingForUi(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        && runtimeGraph_->scheduledPatternBarsRemaining(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex) }) != 0;
 }
 
 void LivePatternSequencerProcessor::offsetPlayerPatternLeft(std::size_t playerIndex) noexcept
@@ -1101,6 +1226,27 @@ bool LivePatternSequencerProcessor::playerModulationModifiedForUi(
         && player->hasUnsavedChanges();
 }
 
+bool LivePatternSequencerProcessor::playerModulationLockedForUi(
+    std::size_t playerIndex,
+    ModulationLane lane) const noexcept
+{
+    const auto index = playerIndex * modulationLaneCount
+        + modulationLaneIndex(lane);
+    return index < modulationLocks_.size()
+        && modulationLocks_[index]->load(std::memory_order_relaxed);
+}
+
+void LivePatternSequencerProcessor::setPlayerModulationLocked(
+    std::size_t playerIndex,
+    ModulationLane lane,
+    bool locked) noexcept
+{
+    const auto index = playerIndex * modulationLaneCount
+        + modulationLaneIndex(lane);
+    if (index < modulationLocks_.size())
+        modulationLocks_[index]->store(locked, std::memory_order_relaxed);
+}
+
 LivePatternSequencerProcessor::SaveModulationResult
 LivePatternSequencerProcessor::savePlayerModulation(
     std::size_t playerIndex,
@@ -1108,7 +1254,8 @@ LivePatternSequencerProcessor::savePlayerModulation(
     const juce::String& name)
 {
     auto* player = modulationPlayerAt(playerIndex, lane);
-    if (player == nullptr)
+    if (player == nullptr
+        || playerModulationLockedForUi(playerIndex, lane))
         return {};
 
     return savePlayerModulation(
@@ -1124,6 +1271,7 @@ LivePatternSequencerProcessor::savePlayerModulation(
 {
     auto* player = modulationPlayerAt(playerIndex, lane);
     if (player == nullptr
+        || playerModulationLockedForUi(playerIndex, lane)
         || candidateModulation.length == 0
         || candidateModulation.length > lps::Modulation::maxLength)
     {
@@ -1147,18 +1295,8 @@ LivePatternSequencerProcessor::savePlayerModulation(
             };
         }
 
-        const auto trimmedName = name.trim();
-        if (trimmedName.isEmpty())
-        {
-            return {
-                SaveModulationStatus::needsName,
-                std::numeric_limits<std::size_t>::max(),
-                candidateModulation
-            };
-        }
-
         const auto insertion = modulationLibrary_.addOrFind(
-            trimmedName.toStdString(),
+            name.trim().toStdString(),
             candidateModulation,
             [this](lps::ModulationLibraryEntry& stagedEntry)
             {
@@ -1194,7 +1332,8 @@ void LivePatternSequencerProcessor::selectModulationForPlayer(
 {
     auto* player = modulationPlayerAt(playerIndex, lane);
     const auto* modulation = modulationLibrary_.recordAt(modulationIndex);
-    if (player != nullptr && modulation != nullptr)
+    if (player != nullptr && modulation != nullptr
+        && !playerModulationLockedForUi(playerIndex, lane))
         player->selectModulation(modulation->id);
 }
 
@@ -1216,8 +1355,11 @@ void LivePatternSequencerProcessor::setPlayerModulationValue(
     std::size_t step,
     std::uint8_t value) noexcept
 {
-    if (auto* player = modulationPlayerAt(playerIndex, lane))
-        player->setUnipolar8Value(step, value);
+    if (!playerModulationLockedForUi(playerIndex, lane))
+    {
+        if (auto* player = modulationPlayerAt(playerIndex, lane))
+            player->setUnipolar8Value(step, value);
+    }
 }
 
 void LivePatternSequencerProcessor::setPlayerModulationLength(
@@ -1225,17 +1367,30 @@ void LivePatternSequencerProcessor::setPlayerModulationLength(
     ModulationLane lane,
     std::size_t length) noexcept
 {
-    if (auto* player = modulationPlayerAt(playerIndex, lane))
-        player->setLength(length);
+    if (!playerModulationLockedForUi(playerIndex, lane))
+    {
+        if (auto* player = modulationPlayerAt(playerIndex, lane))
+            player->setLength(length);
+    }
 }
 
 void LivePatternSequencerProcessor::setPlayerMuted(
     std::size_t playerIndex,
     bool muted) noexcept
 {
-    if (playerIndex < players_.size())
-        runtimeGraph_->setVoiceMuted(
-            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)}, muted);
+    (void) schedulePlayerMute(playerIndex, muted, 1);
+}
+
+bool LivePatternSequencerProcessor::schedulePlayerMute(
+    std::size_t playerIndex,
+    bool muted,
+    std::size_t barsFromNow) noexcept
+{
+    return playerIndex < players_.size()
+        && runtimeGraph_->scheduleVoiceMute(
+            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)},
+            muted,
+            barsFromNow);
 }
 
 bool LivePatternSequencerProcessor::playerMutedForUi(
@@ -1244,6 +1399,191 @@ bool LivePatternSequencerProcessor::playerMutedForUi(
     return playerIndex < players_.size()
         && runtimeGraph_->voiceMuted(
             lps::VoiceId {static_cast<std::uint32_t>(playerIndex)});
+}
+
+bool LivePatternSequencerProcessor::playerTargetMutedForUi(
+    std::size_t playerIndex) const noexcept
+{
+    if (playerIndex >= players_.size())
+        return false;
+    const auto pending = runtimeGraph_->scheduledVoiceMute(
+        lps::VoiceId {static_cast<std::uint32_t>(playerIndex)});
+    return pending.value_or(playerMutedForUi(playerIndex));
+}
+
+bool LivePatternSequencerProcessor::playerMuteChangePendingForUi(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        && runtimeGraph_->scheduledVoiceMuteBarsRemaining(
+            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)}) != 0;
+}
+
+std::size_t LivePatternSequencerProcessor::currentBarForUi() const noexcept
+{
+    return runtimeGraph_->currentBar();
+}
+
+float LivePatternSequencerProcessor::currentBarProgressForUi() const noexcept
+{
+    return currentBarProgress_.load(std::memory_order_relaxed);
+}
+
+std::size_t
+LivePatternSequencerProcessor::playerMuteChangeBarsRemainingForUi(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        ? runtimeGraph_->scheduledVoiceMuteBarsRemaining(
+            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)})
+        : 0;
+}
+
+bool LivePatternSequencerProcessor::playerMuteScheduledAtBarOffsetForUi(
+    std::size_t playerIndex,
+    bool muted,
+    std::size_t barsFromNow) const noexcept
+{
+    return playerIndex < players_.size()
+        && runtimeGraph_->voiceMuteScheduledAtBarOffset(
+            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)},
+            muted,
+            barsFromNow);
+}
+
+std::size_t
+LivePatternSequencerProcessor::playerPatternChangeBarsRemainingForUi(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        ? runtimeGraph_->scheduledPatternBarsRemaining(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex)})
+        : 0;
+}
+
+std::optional<std::size_t>
+LivePatternSequencerProcessor::playerPatternScheduledAtBarOffsetForUi(
+    std::size_t playerIndex,
+    std::size_t barsFromNow) const noexcept
+{
+    if (playerIndex >= players_.size())
+        return std::nullopt;
+    const auto scheduled = runtimeGraph_->patternSelectionScheduledAtBarOffset(
+        lps::PatternPlayerId {static_cast<std::uint32_t>(playerIndex)},
+        barsFromNow);
+    return scheduled ? patternLibrary_.indexOf(*scheduled) : std::nullopt;
+}
+
+std::size_t
+LivePatternSequencerProcessor::scheduledChangeCountAtBarOffsetForUi(
+    std::size_t barsFromNow) const noexcept
+{
+    return runtimeGraph_->scheduledChangeCountAtBarOffset(barsFromNow);
+}
+
+bool LivePatternSequencerProcessor::playerInGroupForUi(
+    std::size_t playerIndex,
+    std::size_t groupIndex) const noexcept
+{
+    if (playerIndex >= playerGroupMasks_.size() || groupIndex >= groupCount)
+        return false;
+    const auto bit = static_cast<std::uint8_t>(1u << groupIndex);
+    return (playerGroupMasks_[playerIndex]->load(std::memory_order_relaxed)
+        & bit) != 0;
+}
+
+void LivePatternSequencerProcessor::setPlayerInGroup(
+    std::size_t playerIndex,
+    std::size_t groupIndex,
+    bool enabled) noexcept
+{
+    if (playerIndex >= playerGroupMasks_.size() || groupIndex >= groupCount)
+        return;
+    const auto bit = static_cast<std::uint8_t>(1u << groupIndex);
+    if (enabled)
+        playerGroupMasks_[playerIndex]->fetch_or(bit, std::memory_order_relaxed);
+    else
+        playerGroupMasks_[playerIndex]->fetch_and(
+            static_cast<std::uint8_t>(~bit), std::memory_order_relaxed);
+}
+
+std::size_t LivePatternSequencerProcessor::groupPlayerCountForUi(
+    std::size_t groupIndex) const noexcept
+{
+    if (groupIndex >= groupCount)
+        return 0;
+    std::size_t count = 0;
+    for (std::size_t playerIndex = 0;
+         playerIndex < playerGroupMasks_.size();
+         ++playerIndex)
+    {
+        if (playerInGroupForUi(playerIndex, groupIndex))
+            ++count;
+    }
+    return count;
+}
+
+bool LivePatternSequencerProcessor::scheduleGroupMute(
+    std::size_t groupIndex,
+    bool muted,
+    std::size_t barsFromNow) noexcept
+{
+    if (groupIndex >= groupCount)
+        return false;
+    bool foundMember = false;
+    bool allScheduled = true;
+    for (std::size_t playerIndex = 0; playerIndex < players_.size(); ++playerIndex)
+    {
+        if (!playerInGroupForUi(playerIndex, groupIndex))
+            continue;
+        foundMember = true;
+        allScheduled = schedulePlayerMute(playerIndex, muted, barsFromNow)
+            && allScheduled;
+    }
+    return foundMember && allScheduled;
+}
+
+bool LivePatternSequencerProcessor::resetGroupToMaster(
+    std::size_t groupIndex) noexcept
+{
+    if (groupIndex >= groupCount)
+        return false;
+    bool foundEligibleMember = false;
+    bool allReset = true;
+    for (std::size_t playerIndex = 0; playerIndex < players_.size(); ++playerIndex)
+    {
+        if (!playerInGroupForUi(playerIndex, groupIndex)
+            || !playerCanResetToMasterForUi(playerIndex)
+            || playerIsMasterForUi(playerIndex))
+        {
+            continue;
+        }
+        foundEligibleMember = true;
+        allReset = resetPlayerToMaster(playerIndex) && allReset;
+    }
+    return foundEligibleMember && allReset;
+}
+
+bool LivePatternSequencerProcessor::groupMuteScheduledAtBarOffsetForUi(
+    std::size_t groupIndex,
+    bool muted,
+    std::size_t barsFromNow) const noexcept
+{
+    if (groupIndex >= groupCount)
+        return false;
+    for (std::size_t playerIndex = 0; playerIndex < players_.size(); ++playerIndex)
+    {
+        if (playerInGroupForUi(playerIndex, groupIndex)
+            && runtimeGraph_->voiceMuteScheduledAtBarOffset(
+                lps::VoiceId {static_cast<std::uint32_t>(playerIndex)},
+                muted,
+                barsFromNow))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void LivePatternSequencerProcessor::setSuppression(
@@ -1281,6 +1621,7 @@ bool LivePatternSequencerProcessor::suppression(
 void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
 {
     bool anyPlaying = false;
+    float masterCycleProgress = 0.0f;
 
     for (std::size_t index = 0; index < currentSteps_.size(); ++index)
     {
@@ -1290,6 +1631,8 @@ void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
             : lps::PatternPlaybackSnapshot {};
         currentSteps_[index]->store(
             patternSnapshot.currentStep, std::memory_order_relaxed);
+        if (index == configuredMasterIndex())
+            masterCycleProgress = patternSnapshot.cycleProgress;
         for (std::size_t laneIndex = 0;
              laneIndex < modulationLaneCount;
              ++laneIndex)
@@ -1306,6 +1649,9 @@ void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
     }
 
     playing_.store(anyPlaying, std::memory_order_relaxed);
+    currentBarProgress_.store(
+        anyPlaying ? masterCycleProgress : 0.0f,
+        std::memory_order_relaxed);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

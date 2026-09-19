@@ -93,10 +93,43 @@ No administrator password is required because the plugin is installed only for t
 6. Create a track and open its FX chain.
 7. Add **Live Pattern Sequencer MVP** first.
 8. Add a drum machine or sampler immediately after it.
-9. Make sure the instrument responds to MIDI channel 1 and the fixed notes listed in `README.md`.
+9. Make sure the drum instrument responds to MIDI channel 11 and the fixed notes listed in `README.md`; Synth 1 and Synth 2 use channels 12 and 13.
 10. Press Play in REAPER.
 
 The sequencer should follow REAPER's tempo and transport, and the following drum instrument should produce sound.
+
+## Live logs and troubleshooting
+
+The plugin writes asynchronous, single-line logs to:
+
+```text
+~/Library/Hew/LivePatternSequencer/sequencer.log
+```
+
+Watch them live from the project directory:
+
+```bash
+./scripts/watch-logs.sh
+```
+
+Pass an extended regular expression to filter the live stream. Every line has
+stable `level=`, `component=`, and `event=` fields, so ordinary grep works well:
+
+```bash
+./scripts/watch-logs.sh 'level=(WARN|ERROR)'
+grep 'component=runtime_graph' ~/Library/Hew/LivePatternSequencer/sequencer.log
+grep 'event=process_overflow' ~/Library/Hew/LivePatternSequencer/sequencer.log
+```
+
+The default level is `info`. Set `LPS_LOG_LEVEL` to `debug`, `info`, `warn`,
+`error`, or `off` before launching REAPER. Set `LPS_LOG_STDERR=1` to mirror the
+same lines to the host process's standard error stream. Core logging uses a
+bounded asynchronous queue: the audio thread never waits for disk I/O, and the
+periodic `event=status` line reports `logger_dropped` if the writer falls behind.
+It reports `logger_write_failures` if the file becomes unwritable; those lines
+also fall back to standard error automatically.
+At startup, a log of 10 MiB or larger is rotated to `sequencer.log.1`.
+See [Core logging](docs/logging.md) for the host API and event reference.
 
 ## If macOS blocks something
 

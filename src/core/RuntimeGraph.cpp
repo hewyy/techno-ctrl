@@ -1,4 +1,5 @@
 #include "core/RuntimeGraph.h"
+#include "core/Logger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,6 +7,26 @@
 
 namespace lps
 {
+namespace
+{
+const char* validationErrorName(GraphValidationError error) noexcept
+{
+    switch (error)
+    {
+        case GraphValidationError::none: return "none";
+        case GraphValidationError::capacityExceeded: return "capacity_exceeded";
+        case GraphValidationError::missingNode: return "missing_node";
+        case GraphValidationError::duplicateBindingId: return "duplicate_binding_id";
+        case GraphValidationError::duplicateBinding: return "duplicate_binding";
+        case GraphValidationError::selfEdge: return "self_edge";
+        case GraphValidationError::controlCycle: return "control_cycle";
+        case GraphValidationError::multipleTriggerSources: return "multiple_trigger_sources";
+        case GraphValidationError::multipleParameterSources: return "multiple_parameter_sources";
+        case GraphValidationError::unsupportedOutputSignal: return "unsupported_output_signal";
+    }
+    return "unknown";
+}
+}
 
 bool RuntimeGraphConfig::add(TriggerBinding binding) noexcept
 {
@@ -75,8 +96,15 @@ bool RuntimeGraph::registerPatternPlayer(PatternPlayer& player) noexcept
         || !PatternPlayerId {ref.value}.isValid()
         || patternPlayerCount_ == patternPlayers_.size()
         || find(PatternPlayerId {ref.value}) != nullptr)
+    {
+        Logger::logf(LogLevel::warning, "runtime_graph", "registration_rejected",
+            "node=pattern_player id=%u prepared=%d count=%zu",
+            ref.value, prepared_ ? 1 : 0, patternPlayerCount_);
         return false;
+    }
     patternPlayers_[patternPlayerCount_++] = &player;
+    Logger::logf(LogLevel::debug, "runtime_graph", "node_registered",
+        "node=pattern_player id=%u", ref.value);
     return true;
 }
 
@@ -87,8 +115,15 @@ bool RuntimeGraph::registerModulationPlayer(ModulationPlayer& player) noexcept
         || !ModulationPlayerId {ref.value}.isValid()
         || modulationPlayerCount_ == modulationPlayers_.size()
         || find(ModulationPlayerId {ref.value}) != nullptr)
+    {
+        Logger::logf(LogLevel::warning, "runtime_graph", "registration_rejected",
+            "node=modulation_player id=%u prepared=%d count=%zu",
+            ref.value, prepared_ ? 1 : 0, modulationPlayerCount_);
         return false;
+    }
     modulationPlayers_[modulationPlayerCount_++] = &player;
+    Logger::logf(LogLevel::debug, "runtime_graph", "node_registered",
+        "node=modulation_player id=%u", ref.value);
     return true;
 }
 
@@ -96,8 +131,15 @@ bool RuntimeGraph::registerVoice(Voice& voice) noexcept
 {
     if (prepared_ || !voice.id().isValid()
         || voiceCount_ == voices_.size() || find(voice.id()) != nullptr)
+    {
+        Logger::logf(LogLevel::warning, "runtime_graph", "registration_rejected",
+            "node=voice id=%u prepared=%d count=%zu",
+            voice.id().value, prepared_ ? 1 : 0, voiceCount_);
         return false;
+    }
     voices_[voiceCount_++] = &voice;
+    Logger::logf(LogLevel::debug, "runtime_graph", "node_registered",
+        "node=voice id=%u", voice.id().value);
     return true;
 }
 
@@ -109,11 +151,16 @@ bool RuntimeGraph::registerOutputEndpoint(
         || outputEndpointCount_ == outputEndpoints_.size()
         || find(id) != nullptr)
     {
+        Logger::logf(LogLevel::warning, "runtime_graph", "registration_rejected",
+            "node=output_endpoint id=%u prepared=%d count=%zu",
+            static_cast<unsigned>(id.value), prepared_ ? 1 : 0, outputEndpointCount_);
         return false;
     }
     auto& endpoint = outputEndpoints_[outputEndpointCount_++];
     endpoint.id = id;
     endpoint.renderer = &renderer;
+    Logger::logf(LogLevel::debug, "runtime_graph", "node_registered",
+        "node=output_endpoint id=%u", static_cast<unsigned>(id.value));
     return true;
 }
 
@@ -173,6 +220,281 @@ bool RuntimeGraph::cycleCommandPending(std::size_t slot) const noexcept
 {
     return slot < armedCyclePending_.size()
         && armedCyclePending_[slot].load(std::memory_order_acquire);
+}
+
+bool RuntimeGraph::configureBarClock(PatternPlayerId source) noexcept
+{
+    if (prepared_ || find(source) == nullptr)
+        return false;
+    barClockSource_ = source;
+    currentBar_.store(0, std::memory_order_relaxed);
+    lastBarBoundaryPpq_ = -std::numeric_limits<double>::infinity();
+    return true;
+}
+
+std::uint64_t RuntimeGraph::encodeScheduledChange(
+    const ScheduledChangeView& change) noexcept
+{
+    constexpr std::uint64_t valueShift = 32;
+    constexpr std::uint64_t targetShift = 41;
+    constexpr std::uint64_t barsShift = 45;
+    constexpr std::uint64_t typeShift = 49;
+    constexpr std::uint64_t activeBit = std::uint64_t {1} << 50;
+    return activeBit
+        | (static_cast<std::uint64_t>(change.type) << typeShift)
+        | (static_cast<std::uint64_t>(change.barsRemaining) << barsShift)
+        | (static_cast<std::uint64_t>(change.targetIndex) << targetShift)
+        | (static_cast<std::uint64_t>(change.value) << valueShift)
+        | change.sequence;
+}
+
+RuntimeGraph::ScheduledChangeView RuntimeGraph::decodeScheduledChange(
+    std::uint64_t encoded) noexcept
+{
+    constexpr std::uint64_t valueShift = 32;
+    constexpr std::uint64_t targetShift = 41;
+    constexpr std::uint64_t barsShift = 45;
+    constexpr std::uint64_t typeShift = 49;
+    return {
+        static_cast<ScheduledChangeType>((encoded >> typeShift) & 0x1u),
+        static_cast<std::size_t>((encoded >> targetShift) & 0xfu),
+        static_cast<std::uint16_t>((encoded >> valueShift) & 0x1ffu),
+        static_cast<std::size_t>((encoded >> barsShift) & 0xfu),
+        static_cast<std::uint32_t>(encoded & 0xffffffffu)
+    };
+}
+
+bool RuntimeGraph::scheduledChangeActive(std::uint64_t encoded) noexcept
+{
+    constexpr std::uint64_t activeBit = std::uint64_t {1} << 50;
+    return (encoded & activeBit) != 0;
+}
+
+bool RuntimeGraph::scheduleChange(
+    ScheduledChangeType type,
+    std::size_t targetIndex,
+    std::uint16_t value,
+    std::size_t barsFromNow) noexcept
+{
+    if (!barClockSource_.isValid()
+        || targetIndex >= maximumPatternPlayers
+        || barsFromNow == 0 || barsFromNow > maximumScheduledBars)
+    {
+        return false;
+    }
+
+    const auto sequence = nextScheduledSequence_.fetch_add(
+        1, std::memory_order_relaxed);
+    const auto replacement = encodeScheduledChange({
+        type, targetIndex, value, barsFromNow, sequence});
+
+    // A second gesture aimed at the same target and boundary replaces the
+    // earlier intent. Different future bars remain independent, allowing a
+    // mute at bar 2 and an unmute at bar 6, for example.
+    for (auto& slot : scheduledChanges_)
+    {
+        auto current = slot.load(std::memory_order_acquire);
+        if (!scheduledChangeActive(current))
+            continue;
+        const auto decoded = decodeScheduledChange(current);
+        if (decoded.type == type && decoded.targetIndex == targetIndex
+            && decoded.barsRemaining == barsFromNow)
+        {
+            if (slot.compare_exchange_strong(
+                    current, replacement,
+                    std::memory_order_release,
+                    std::memory_order_relaxed))
+            {
+                return true;
+            }
+        }
+    }
+
+    for (auto& slot : scheduledChanges_)
+    {
+        std::uint64_t empty = 0;
+        if (slot.compare_exchange_strong(
+                empty, replacement,
+                std::memory_order_release,
+                std::memory_order_relaxed))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RuntimeGraph::scheduleVoiceMute(
+    VoiceId voice,
+    bool muted,
+    std::size_t barsFromNow) noexcept
+{
+    const auto target = voiceIndex(voice);
+    return target < voiceCount_
+        && scheduleChange(
+            ScheduledChangeType::voiceMute,
+            target,
+            static_cast<std::uint16_t>(muted ? 1 : 0),
+            barsFromNow);
+}
+
+bool RuntimeGraph::schedulePatternSelection(
+    PatternPlayerId player,
+    PatternId pattern,
+    std::size_t barsFromNow) noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    return target < patternPlayerCount_ && pattern.isValid()
+        && pattern.value() <= PatternLibrary::maxEntryCount
+        && patternPlayers_[target]->canSelectSavedPattern(pattern)
+        && scheduleChange(
+            ScheduledChangeType::patternSelection,
+            target,
+            static_cast<std::uint16_t>(pattern.value()),
+            barsFromNow);
+}
+
+std::optional<RuntimeGraph::ScheduledChangeView>
+RuntimeGraph::nextScheduledChange(
+    ScheduledChangeType type,
+    std::size_t targetIndex) const noexcept
+{
+    std::optional<ScheduledChangeView> next;
+    for (const auto& slot : scheduledChanges_)
+    {
+        const auto encoded = slot.load(std::memory_order_acquire);
+        if (!scheduledChangeActive(encoded))
+            continue;
+        const auto change = decodeScheduledChange(encoded);
+        if (change.type != type || change.targetIndex != targetIndex)
+            continue;
+        if (!next || change.barsRemaining < next->barsRemaining
+            || (change.barsRemaining == next->barsRemaining
+                && change.sequence > next->sequence))
+        {
+            next = change;
+        }
+    }
+    return next;
+}
+
+std::optional<bool> RuntimeGraph::scheduledVoiceMute(
+    VoiceId voice) const noexcept
+{
+    const auto target = voiceIndex(voice);
+    if (target >= voiceCount_)
+        return std::nullopt;
+    const auto change = nextScheduledChange(
+        ScheduledChangeType::voiceMute, target);
+    return change ? std::optional<bool> {change->value != 0} : std::nullopt;
+}
+
+std::optional<PatternId> RuntimeGraph::scheduledPatternSelection(
+    PatternPlayerId player) const noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    if (target >= patternPlayerCount_)
+        return std::nullopt;
+    const auto change = nextScheduledChange(
+        ScheduledChangeType::patternSelection, target);
+    return change
+        ? std::optional<PatternId> {PatternId {change->value}}
+        : std::nullopt;
+}
+
+std::size_t RuntimeGraph::scheduledVoiceMuteBarsRemaining(
+    VoiceId voice) const noexcept
+{
+    const auto target = voiceIndex(voice);
+    const auto change = target < voiceCount_
+        ? nextScheduledChange(ScheduledChangeType::voiceMute, target)
+        : std::nullopt;
+    return change ? change->barsRemaining : 0;
+}
+
+bool RuntimeGraph::voiceMuteScheduledAtBarOffset(
+    VoiceId voice,
+    bool muted,
+    std::size_t barsFromNow) const noexcept
+{
+    const auto target = voiceIndex(voice);
+    if (target >= voiceCount_ || barsFromNow == 0
+        || barsFromNow > maximumScheduledBars)
+    {
+        return false;
+    }
+
+    for (const auto& slot : scheduledChanges_)
+    {
+        const auto encoded = slot.load(std::memory_order_acquire);
+        if (!scheduledChangeActive(encoded))
+            continue;
+        const auto change = decodeScheduledChange(encoded);
+        if (change.type == ScheduledChangeType::voiceMute
+            && change.targetIndex == target
+            && change.barsRemaining == barsFromNow
+            && (change.value != 0) == muted)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::size_t RuntimeGraph::scheduledPatternBarsRemaining(
+    PatternPlayerId player) const noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    const auto change = target < patternPlayerCount_
+        ? nextScheduledChange(ScheduledChangeType::patternSelection, target)
+        : std::nullopt;
+    return change ? change->barsRemaining : 0;
+}
+
+std::optional<PatternId>
+RuntimeGraph::patternSelectionScheduledAtBarOffset(
+    PatternPlayerId player,
+    std::size_t barsFromNow) const noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    if (target >= patternPlayerCount_ || barsFromNow == 0
+        || barsFromNow > maximumScheduledBars)
+    {
+        return std::nullopt;
+    }
+
+    for (const auto& slot : scheduledChanges_)
+    {
+        const auto encoded = slot.load(std::memory_order_acquire);
+        if (!scheduledChangeActive(encoded))
+            continue;
+        const auto change = decodeScheduledChange(encoded);
+        if (change.type == ScheduledChangeType::patternSelection
+            && change.targetIndex == target
+            && change.barsRemaining == barsFromNow)
+        {
+            return PatternId {change.value};
+        }
+    }
+    return std::nullopt;
+}
+
+std::size_t RuntimeGraph::scheduledChangeCountAtBarOffset(
+    std::size_t barsFromNow) const noexcept
+{
+    if (barsFromNow == 0 || barsFromNow > maximumScheduledBars)
+        return 0;
+    std::size_t count = 0;
+    for (const auto& slot : scheduledChanges_)
+    {
+        const auto encoded = slot.load(std::memory_order_acquire);
+        if (scheduledChangeActive(encoded)
+            && decodeScheduledChange(encoded).barsRemaining == barsFromNow)
+        {
+            ++count;
+        }
+    }
+    return count;
 }
 
 bool RuntimeGraph::patternHitOccurred(
@@ -583,7 +905,11 @@ bool RuntimeGraph::activate(const RuntimeGraphConfig& candidate) noexcept
         return publish(candidate);
     lastValidationError_ = validate(candidate);
     if (lastValidationError_ != GraphValidationError::none)
+    {
+        Logger::logf(LogLevel::error, "runtime_graph", "config_rejected",
+            "operation=activate reason=%s", validationErrorName(lastValidationError_));
         return false;
+    }
     configSnapshots_[0] = candidate;
     snapshotGenerations_[0] = ++nextPublicationGeneration_;
     audioSnapshot_ = 0;
@@ -594,6 +920,12 @@ bool RuntimeGraph::activate(const RuntimeGraphConfig& candidate) noexcept
     activeGeneration_.store(
         snapshotGenerations_[0], std::memory_order_release);
     applyActivePlayerConfigs();
+    Logger::logf(LogLevel::info, "runtime_graph", "config_activated",
+        "generation=%llu pattern_players=%zu modulation_players=%zu voices=%zu outputs=%zu trigger_bindings=%zu parameter_bindings=%zu command_bindings=%zu output_bindings=%zu",
+        static_cast<unsigned long long>(snapshotGenerations_[0]),
+        patternPlayerCount_, modulationPlayerCount_, voiceCount_, outputEndpointCount_,
+        candidate.triggerBindingCount, candidate.parameterBindingCount,
+        candidate.commandBindingCount, candidate.outputBindingCount);
     return true;
 }
 
@@ -601,7 +933,11 @@ bool RuntimeGraph::publish(const RuntimeGraphConfig& candidate) noexcept
 {
     lastValidationError_ = validate(candidate);
     if (lastValidationError_ != GraphValidationError::none)
+    {
+        Logger::logf(LogLevel::error, "runtime_graph", "config_rejected",
+            "operation=publish reason=%s", validationErrorName(lastValidationError_));
         return false;
+    }
 
     const auto published = publishedSnapshot_.load(std::memory_order_acquire);
     const auto active = acknowledgedSnapshot_.load(std::memory_order_acquire);
@@ -613,6 +949,10 @@ bool RuntimeGraph::publish(const RuntimeGraphConfig& candidate) noexcept
     publishedGeneration_.store(
         snapshotGenerations_[destination], std::memory_order_relaxed);
     publishedSnapshot_.store(destination, std::memory_order_release);
+    Logger::logf(LogLevel::info, "runtime_graph", "config_published",
+        "generation=%llu snapshot=%u",
+        static_cast<unsigned long long>(snapshotGenerations_[destination]),
+        static_cast<unsigned>(destination));
     return true;
 }
 
@@ -627,7 +967,13 @@ void RuntimeGraph::adoptPublishedConfig() noexcept
     const bool changed = published != audioSnapshot_;
     audioSnapshot_ = published;
     if (changed)
+    {
         applyActivePlayerConfigs();
+        Logger::logf(LogLevel::info, "runtime_graph", "config_adopted",
+            "generation=%llu snapshot=%u",
+            static_cast<unsigned long long>(snapshotGenerations_[published]),
+            static_cast<unsigned>(published));
+    }
     activeGeneration_.store(
         snapshotGenerations_[published], std::memory_order_release);
     acknowledgedSnapshot_.store(published, std::memory_order_release);
@@ -664,6 +1010,8 @@ void RuntimeGraph::applyActivePlayerConfigs() noexcept
 void RuntimeGraph::prepare(const PrepareSpec& spec) noexcept
 {
     prepareSpec_ = spec;
+    currentBar_.store(0, std::memory_order_release);
+    lastBarBoundaryPpq_ = -std::numeric_limits<double>::infinity();
     for (std::size_t index = 0; index < patternPlayerCount_; ++index)
         patternPlayers_[index]->prepare(spec);
     for (std::size_t index = 0; index < modulationPlayerCount_; ++index)
@@ -674,6 +1022,11 @@ void RuntimeGraph::prepare(const PrepareSpec& spec) noexcept
         outputEndpoints_[index].renderer->prepare(
             {spec.sampleRate, spec.maximumBlockSize});
     prepared_ = true;
+    unpreparedProcessReported_ = false;
+    Logger::logf(LogLevel::info, "runtime_graph", "prepared",
+        "sample_rate=%.1f maximum_block_size=%u pattern_players=%zu modulation_players=%zu voices=%zu outputs=%zu",
+        spec.sampleRate, spec.maximumBlockSize, patternPlayerCount_,
+        modulationPlayerCount_, voiceCount_, outputEndpointCount_);
 }
 
 void RuntimeGraph::reset() noexcept
@@ -684,6 +1037,8 @@ void RuntimeGraph::reset() noexcept
         modulationPlayers_[index]->reset();
     for (std::size_t index = 0; index < voiceCount_; ++index)
         voices_[index]->reset();
+    currentBar_.store(0, std::memory_order_release);
+    lastBarBoundaryPpq_ = -std::numeric_limits<double>::infinity();
 }
 
 void RuntimeGraph::resetOutputs() noexcept
@@ -734,6 +1089,8 @@ bool RuntimeGraph::suppression(
 
 bool RuntimeGraph::appendSignals(const PlayerSignalBuffer& signals) noexcept
 {
+    if (signals.overflowed())
+        workOverflowed_ = true;
     for (const auto& signal : signals)
     {
         if (workSize_ == work_.size())
@@ -743,7 +1100,7 @@ bool RuntimeGraph::appendSignals(const PlayerSignalBuffer& signals) noexcept
         }
         work_[workSize_++] = {signal, nextWorkOrder_++, false, false};
     }
-    return !signals.overflowed();
+    return !workOverflowed_;
 }
 
 void RuntimeGraph::invalidatePlayerSignalsFrom(
@@ -788,6 +1145,157 @@ void RuntimeGraph::appendPlayerRemainder(
     (void) appendSignals(generated);
 }
 
+void RuntimeGraph::applyScheduledBarBoundary(
+    const PlayerSignal& boundary) noexcept
+{
+    constexpr double simultaneousTolerancePpq = 1.0e-9;
+    if (!barClockSource_.isValid()
+        || boundary.type != PlayerSignalType::patternCycleBoundary
+        || boundary.patternPlayerId != barClockSource_
+        || std::abs(boundary.ppqPosition - lastBarBoundaryPpq_)
+            <= simultaneousTolerancePpq)
+    {
+        return;
+    }
+
+    lastBarBoundaryPpq_ = boundary.ppqPosition;
+    const auto previousBar = currentBar_.load(std::memory_order_relaxed);
+    currentBar_.store(
+        static_cast<std::uint8_t>(previousBar >= maximumScheduledBars
+            ? 1 : previousBar + 1),
+        std::memory_order_release);
+
+    // The first boundary starts bar 1; it does not finish a bar. Scheduled
+    // changes target transitions between bars, so their countdown must begin
+    // at the next boundary (the transition from bar 1 to bar 2).
+    if (previousBar == 0)
+        return;
+
+    std::array<ScheduledChangeView, maximumScheduledChanges> due {};
+    std::size_t dueCount = 0;
+    for (auto& slot : scheduledChanges_)
+    {
+        auto encoded = slot.load(std::memory_order_acquire);
+        while (scheduledChangeActive(encoded))
+        {
+            auto change = decodeScheduledChange(encoded);
+            if (change.barsRemaining > 1)
+            {
+                --change.barsRemaining;
+                const auto decremented = encodeScheduledChange(change);
+                if (slot.compare_exchange_weak(
+                        encoded, decremented,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    break;
+                }
+                continue;
+            }
+
+            if (slot.compare_exchange_weak(
+                    encoded, 0,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+            {
+                due[dueCount++] = change;
+                break;
+            }
+        }
+    }
+
+    std::sort(
+        due.begin(),
+        due.begin() + static_cast<std::ptrdiff_t>(dueCount),
+        [](const auto& left, const auto& right)
+        {
+            return left.sequence < right.sequence;
+        });
+
+    for (std::size_t index = 0; index < dueCount; ++index)
+    {
+        const auto& change = due[index];
+        if (change.type == ScheduledChangeType::voiceMute)
+        {
+            if (change.targetIndex < voiceCount_)
+            {
+                voiceMuted_[change.targetIndex].store(
+                    change.value != 0, std::memory_order_relaxed);
+            }
+            continue;
+        }
+
+        if (change.targetIndex >= patternPlayerCount_)
+            continue;
+        auto& player = *patternPlayers_[change.targetIndex];
+        player.selectSavedPattern(PatternId {change.value});
+        const auto oldWorkSize = workSize_;
+        PlayerSignalBuffer generated;
+        if (player.activateSelectedPatternAtBoundary(
+                boundary.ppqPosition, generated))
+        {
+            invalidatePlayerSignalsFrom(
+                player.playerRef(), boundary.ppqPosition, oldWorkSize);
+            (void) appendSignals(generated);
+            appendPlayerRemainder(player, boundary.ppqPosition);
+        }
+        else
+        {
+            // A UI edit can briefly own the player's draft seqlock. Keep the
+            // musical request alive and retry at the next master boundary.
+            (void) scheduleChange(
+                ScheduledChangeType::patternSelection,
+                change.targetIndex,
+                change.value,
+                1);
+        }
+    }
+}
+
+bool RuntimeGraph::triggerEligible(
+    std::size_t sourceVoiceIndex,
+    PatternPlayerId triggerSource,
+    const SequencerEvent& event) noexcept
+{
+    if (event.type == SemanticEventType::triggerStart)
+    {
+        bool eligible = !voiceMuted_[sourceVoiceIndex].load(
+            std::memory_order_relaxed);
+        const auto suppressed = patternPlayerIndex(triggerSource);
+        for (std::size_t suppressor = 0;
+             eligible && suppressed < patternPlayerCount_
+                && suppressor < patternPlayerCount_;
+             ++suppressor)
+        {
+            if (suppression_[suppressor][suppressed].load(
+                    std::memory_order_relaxed)
+                && patternHitOccurred(
+                    PatternPlayerId {
+                        patternPlayers_[suppressor]->playerRef().value },
+                    event.ppqPosition))
+            {
+                eligible = false;
+            }
+        }
+        audibleTriggers_[sourceVoiceIndex] = {
+            event.triggerId, eligible, true};
+        return eligible;
+    }
+
+    if (event.type == SemanticEventType::triggerEnd)
+    {
+        auto& trigger = audibleTriggers_[sourceVoiceIndex];
+        const bool eligible = trigger.active
+            && trigger.id == event.triggerId
+            && trigger.eligible;
+        if (trigger.active && trigger.id == event.triggerId)
+            trigger = {};
+        return eligible;
+    }
+
+    return true;
+}
+
 void RuntimeGraph::appendVoiceEvents(
     Voice& voice,
     PatternPlayerId triggerSource,
@@ -795,8 +1303,13 @@ void RuntimeGraph::appendVoiceEvents(
     ResolvedVoiceEventBuffer& output) noexcept
 {
     for (const auto& event : events)
+    {
+        const auto sourceVoiceIndex = voiceIndex(voice.id());
+        const bool eligible = sourceVoiceIndex < voiceCount_
+            && triggerEligible(sourceVoiceIndex, triggerSource, event);
         (void) output.push({
-            event, voice.id(), triggerSource, nextResolvedOrder_++});
+            event, voice.id(), triggerSource, nextResolvedOrder_++, eligible});
+    }
 }
 
 void RuntimeGraph::resolveTimestamp(
@@ -836,6 +1349,7 @@ void RuntimeGraph::resolveTimestamp(
 
             if (item.signal.type == PlayerSignalType::patternCycleBoundary)
             {
+                applyScheduledBarBoundary(item.signal);
                 for (std::size_t player = 0;
                      player < patternPlayerCount_;
                      ++player)
@@ -992,9 +1506,27 @@ bool RuntimeGraph::process(
     ResolvedVoiceEventBuffer& output) noexcept
 {
     adoptPublishedConfig();
+    if (!transportStateKnown_ || block.playing != lastTransportPlaying_)
+    {
+        Logger::logf(LogLevel::info, "runtime_graph", "transport_state",
+            "playing=%d ppq=%.9f tempo_bpm=%.3f source_discontinuity=%d",
+            block.playing ? 1 : 0, block.ppqStart, block.tempoBpm,
+            block.transportDiscontinuity ? 1 : 0);
+        lastTransportPlaying_ = block.playing;
+        transportStateKnown_ = true;
+    }
+    else if (block.transportDiscontinuity)
+    {
+        Logger::logf(LogLevel::warning, "runtime_graph", "transport_discontinuity",
+            "ppq=%.9f tempo_bpm=%.3f", block.ppqStart, block.tempoBpm);
+    }
     currentBlock_ = block;
     if (block.transportDiscontinuity)
+    {
         resetOutputs();
+        currentBar_.store(0, std::memory_order_release);
+        lastBarBoundaryPpq_ = -std::numeric_limits<double>::infinity();
+    }
     output.clear();
     workSize_ = 0;
     nextWorkOrder_ = 0;
@@ -1004,10 +1536,20 @@ bool RuntimeGraph::process(
         && block.tempoBpm > 0.0
         ? block.tempoBpm / (60.0 * block.sampleRate)
         : 0.0;
-    if (!prepared_ || !block.playing)
+    if (!prepared_)
+    {
+        if (!unpreparedProcessReported_)
+        {
+            Logger::write(LogLevel::error, "runtime_graph", "process_before_prepare");
+            unpreparedProcessReported_ = true;
+        }
+        reset();
+        return false;
+    }
+    if (!block.playing)
     {
         reset();
-        return prepared_;
+        return true;
     }
 
     if (block.transportDiscontinuity)
@@ -1061,7 +1603,39 @@ bool RuntimeGraph::process(
             return left.event.type < right.event.type;
         return left.stableOrder < right.stableOrder;
     });
-    return !workOverflowed_ && !output.overflowed();
+    const bool healthy = !workOverflowed_ && !output.overflowed();
+    if (!healthy && !processIssueActive_)
+    {
+        Logger::logf(LogLevel::error, "runtime_graph", "process_overflow",
+            "work_overflow=%d output_overflow=%d work_signals=%zu resolved_events=%zu",
+            workOverflowed_ ? 1 : 0, output.overflowed() ? 1 : 0,
+            workSize_, output.size());
+        processIssueActive_ = true;
+    }
+    else if (healthy && processIssueActive_)
+    {
+        Logger::write(LogLevel::info, "runtime_graph", "process_recovered");
+        processIssueActive_ = false;
+    }
+
+    statusSampleCount_ += block.sampleCount;
+    ++statusBlockCount_;
+    const auto oneSecond = block.sampleRate > 0.0
+        ? static_cast<std::uint64_t>(block.sampleRate) : 48'000u;
+    if (statusSampleCount_ >= oneSecond)
+    {
+        Logger::logf(LogLevel::info, "runtime_graph", "status",
+            "playing=%d generation=%llu blocks=%llu work_signals=%zu resolved_events=%zu logger_dropped=%llu logger_write_failures=%llu",
+            block.playing ? 1 : 0,
+            static_cast<unsigned long long>(activeGeneration()),
+            static_cast<unsigned long long>(statusBlockCount_),
+            workSize_, output.size(),
+            static_cast<unsigned long long>(Logger::diagnostics().dropped),
+            static_cast<unsigned long long>(Logger::diagnostics().writeFailures));
+        statusSampleCount_ = 0;
+        statusBlockCount_ = 0;
+    }
+    return healthy;
 }
 
 std::optional<std::uint32_t> RuntimeGraph::frameOffsetFor(
@@ -1082,8 +1656,11 @@ std::optional<std::uint32_t> RuntimeGraph::frameOffsetFor(
 
     const auto ppqPerSample = block.tempoBpm / (60.0 * block.sampleRate);
     const auto rawOffset = (event.ppqPosition - block.ppqStart) / ppqPerSample;
+    // Events may occur anywhere in the half-open block, including its final
+    // half-sample. Rounding those positions produces sampleCount, so accept
+    // them here and let the clamp below place them on the last valid frame.
     if (!std::isfinite(rawOffset) || rawOffset < -0.5
-        || rawOffset > static_cast<double>(block.sampleCount) - 0.5)
+        || rawOffset > static_cast<double>(block.sampleCount))
     {
         return std::nullopt;
     }
@@ -1105,49 +1682,22 @@ bool RuntimeGraph::render(
         const auto sourceVoiceIndex = voiceIndex(resolved.sourceVoiceId);
         if (sourceVoiceIndex >= voiceCount_)
         {
+            Logger::logf(LogLevel::error, "runtime_graph", "render_rejected",
+                "reason=missing_voice voice_id=%u", resolved.sourceVoiceId.value);
             resetOutputs();
             return false;
         }
 
-        bool eligible = true;
-        if (resolved.event.type == SemanticEventType::triggerStart)
-        {
-            eligible = !voiceMuted_[sourceVoiceIndex].load(
-                std::memory_order_relaxed);
-            const auto suppressed = patternPlayerIndex(resolved.triggerSource);
-            for (std::size_t suppressor = 0;
-                 eligible && suppressed < patternPlayerCount_
-                    && suppressor < patternPlayerCount_;
-                 ++suppressor)
-            {
-                if (suppression_[suppressor][suppressed].load(
-                        std::memory_order_relaxed)
-                    && patternHitOccurred(
-                        PatternPlayerId {
-                            patternPlayers_[suppressor]->playerRef().value },
-                        resolved.event.ppqPosition))
-                {
-                    eligible = false;
-                }
-            }
-            audibleTriggers_[sourceVoiceIndex] = {
-                resolved.event.triggerId, eligible, true};
-        }
-        else if (resolved.event.type == SemanticEventType::triggerEnd)
-        {
-            auto& trigger = audibleTriggers_[sourceVoiceIndex];
-            eligible = trigger.active
-                && trigger.id == resolved.event.triggerId
-                && trigger.eligible;
-            if (trigger.active && trigger.id == resolved.event.triggerId)
-                trigger = {};
-        }
-
-        if (!eligible && resolved.event.type != SemanticEventType::controlPoint)
+        if (!resolved.eligible
+            && resolved.event.type != SemanticEventType::controlPoint)
             continue;
         const auto frameOffset = frameOffsetFor(resolved.event, block);
         if (!frameOffset.has_value())
         {
+            Logger::logf(LogLevel::error, "runtime_graph", "render_rejected",
+                "reason=invalid_frame_offset voice_id=%u ppq=%.9f block_start=%.9f block_end=%.9f",
+                resolved.sourceVoiceId.value, resolved.event.ppqPosition,
+                block.ppqStart, block.ppqEnd);
             resetOutputs();
             return false;
         }
@@ -1172,6 +1722,10 @@ bool RuntimeGraph::render(
             if (endpoint == nullptr
                 || endpoint->eventCount == endpoint->events.size())
             {
+                Logger::logf(LogLevel::error, "runtime_graph", "render_rejected",
+                    "reason=endpoint_missing_or_full endpoint_id=%u event_count=%zu",
+                    static_cast<unsigned>(binding.endpoint.value),
+                    endpoint == nullptr ? std::size_t {0} : endpoint->eventCount);
                 resetOutputs();
                 return false;
             }
@@ -1192,6 +1746,9 @@ bool RuntimeGraph::render(
         if (!endpoint.renderer->renderBlock(
                 block, {endpoint.events.data(), endpoint.eventCount}))
         {
+            Logger::logf(LogLevel::error, "runtime_graph", "renderer_failed",
+                "endpoint_id=%u event_count=%zu",
+                static_cast<unsigned>(endpoint.id.value), endpoint.eventCount);
             resetOutputs();
             return false;
         }

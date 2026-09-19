@@ -31,6 +31,9 @@ public:
     };
 
     static constexpr std::size_t modulationLaneCount = 3;
+    static constexpr std::size_t groupCount = 4;
+    static constexpr std::size_t maximumScheduledBars =
+        lps::RuntimeGraph::maximumScheduledBars;
 
     enum class SavePatternStatus
     {
@@ -49,7 +52,6 @@ public:
     enum class SaveModulationStatus
     {
         failed,
-        needsName,
         selectedExisting,
         savedNew
     };
@@ -127,7 +129,13 @@ public:
         std::size_t playerIndex,
         const lps::Pattern& candidatePattern);
     void selectPatternForPlayer(std::size_t playerIndex, std::size_t patternIndex) noexcept;
+    [[nodiscard]] bool schedulePatternForPlayer(
+        std::size_t playerIndex,
+        std::size_t patternIndex,
+        std::size_t barsFromNow) noexcept;
     [[nodiscard]] std::size_t selectedPatternForPlayer(std::size_t playerIndex) const noexcept;
+    [[nodiscard]] bool playerPatternChangePendingForUi(
+        std::size_t playerIndex) const noexcept;
     void offsetPlayerPatternLeft(std::size_t playerIndex) noexcept;
     void offsetPlayerPatternRight(std::size_t playerIndex) noexcept;
     [[nodiscard]] int playerPatternOffset(std::size_t playerIndex) const noexcept;
@@ -153,6 +161,13 @@ public:
     [[nodiscard]] bool playerModulationModifiedForUi(
         std::size_t playerIndex,
         ModulationLane lane) const noexcept;
+    [[nodiscard]] bool playerModulationLockedForUi(
+        std::size_t playerIndex,
+        ModulationLane lane) const noexcept;
+    void setPlayerModulationLocked(
+        std::size_t playerIndex,
+        ModulationLane lane,
+        bool locked) noexcept;
     [[nodiscard]] SaveModulationResult savePlayerModulation(
         std::size_t playerIndex,
         ModulationLane lane,
@@ -179,7 +194,49 @@ public:
         ModulationLane lane,
         std::size_t length) noexcept;
     void setPlayerMuted(std::size_t playerIndex, bool muted) noexcept;
+    [[nodiscard]] bool schedulePlayerMute(
+        std::size_t playerIndex,
+        bool muted,
+        std::size_t barsFromNow) noexcept;
     [[nodiscard]] bool playerMutedForUi(std::size_t playerIndex) const noexcept;
+    [[nodiscard]] bool playerTargetMutedForUi(
+        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] bool playerMuteChangePendingForUi(
+        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] std::size_t currentBarForUi() const noexcept;
+    [[nodiscard]] float currentBarProgressForUi() const noexcept;
+    [[nodiscard]] std::size_t playerMuteChangeBarsRemainingForUi(
+        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] bool playerMuteScheduledAtBarOffsetForUi(
+        std::size_t playerIndex,
+        bool muted,
+        std::size_t barsFromNow) const noexcept;
+    [[nodiscard]] std::size_t playerPatternChangeBarsRemainingForUi(
+        std::size_t playerIndex) const noexcept;
+    [[nodiscard]] std::optional<std::size_t>
+        playerPatternScheduledAtBarOffsetForUi(
+            std::size_t playerIndex,
+            std::size_t barsFromNow) const noexcept;
+    [[nodiscard]] std::size_t scheduledChangeCountAtBarOffsetForUi(
+        std::size_t barsFromNow) const noexcept;
+    [[nodiscard]] bool playerInGroupForUi(
+        std::size_t playerIndex,
+        std::size_t groupIndex) const noexcept;
+    void setPlayerInGroup(
+        std::size_t playerIndex,
+        std::size_t groupIndex,
+        bool enabled) noexcept;
+    [[nodiscard]] std::size_t groupPlayerCountForUi(
+        std::size_t groupIndex) const noexcept;
+    [[nodiscard]] bool scheduleGroupMute(
+        std::size_t groupIndex,
+        bool muted,
+        std::size_t barsFromNow) noexcept;
+    [[nodiscard]] bool resetGroupToMaster(std::size_t groupIndex) noexcept;
+    [[nodiscard]] bool groupMuteScheduledAtBarOffsetForUi(
+        std::size_t groupIndex,
+        bool muted,
+        std::size_t barsFromNow) const noexcept;
     void setSuppression(
         std::size_t suppressorIndex,
         std::size_t suppressedIndex,
@@ -189,8 +246,6 @@ public:
         std::size_t suppressedIndex) const noexcept;
 
 private:
-    static constexpr int existingVoiceMidiChannel = 2;
-    static constexpr int newVoiceMidiChannel = 1;
     // This is intentionally a policy switch so a future configuration menu
     // can expose immediate selection without changing the graph topology.
     static constexpr bool waitForCycleBeforeSelection = true;
@@ -198,9 +253,10 @@ private:
     static constexpr int cvChannelsPerPlayer = 3;
     static constexpr int cvOutputChannelCount =
         static_cast<int>(cvPlayerCapacity) * cvChannelsPerPlayer;
-    static constexpr lps::OutputEndpointId channelTwoMidiOutputEndpoint {0};
+    static constexpr lps::OutputEndpointId drumMidiOutputEndpoint {0};
     static constexpr lps::OutputEndpointId cvOutputEndpoint {1};
-    static constexpr lps::OutputEndpointId channelOneMidiOutputEndpoint {2};
+    static constexpr lps::OutputEndpointId synthOneMidiOutputEndpoint {2};
+    static constexpr lps::OutputEndpointId synthTwoMidiOutputEndpoint {3};
 
     struct PlayerDescriptor
     {
@@ -249,7 +305,8 @@ private:
     ModulationLibraryFileStore modulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
-    std::unique_ptr<lps::MidiBufferRenderer> channelOneRenderer_;
+    std::unique_ptr<lps::MidiBufferRenderer> synthOneRenderer_;
+    std::unique_ptr<lps::MidiBufferRenderer> synthTwoRenderer_;
     std::unique_ptr<lps::CvBufferRenderer> cvRenderer_;
     std::unique_ptr<lps::RuntimeGraph> runtimeGraph_;
 
@@ -262,10 +319,15 @@ private:
     std::vector<std::unique_ptr<std::atomic<int>>> currentSteps_;
     std::vector<std::unique_ptr<std::atomic<int>>>
         currentModulationSteps_;
+    std::vector<std::unique_ptr<std::atomic<bool>>>
+        modulationLocks_;
+    std::vector<std::unique_ptr<std::atomic<std::uint8_t>>>
+        playerGroupMasks_;
     std::atomic<bool> playing_ { false };
     std::atomic<bool> internalTransportRequested_ { false };
     std::atomic<bool> internalTransportPlaying_ { false };
     std::atomic<bool> hostTransportPlaying_ { false };
+    std::atomic<float> currentBarProgress_ { 0.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LivePatternSequencerProcessor)
 };

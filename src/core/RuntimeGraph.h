@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 
 namespace lps
@@ -135,6 +136,9 @@ struct ResolvedVoiceEvent
     VoiceId sourceVoiceId;
     PatternPlayerId triggerSource;
     std::uint64_t stableOrder = 0;
+    // Captured while resolving the event so a mute change at a cycle
+    // boundary remains sample-accurate even when one audio block straddles it.
+    bool eligible = true;
 };
 
 class ResolvedVoiceEventBuffer
@@ -165,9 +169,13 @@ public:
     static constexpr std::size_t maximumModulationPlayers = 64;
     static constexpr std::size_t maximumVoices = 16;
     static constexpr std::size_t maximumArmedCycleCommands = 64;
+    static constexpr std::size_t maximumScheduledBars = 8;
+    static constexpr std::size_t maximumScheduledChanges = 128;
     static constexpr std::size_t maximumWorkSignals = 1024;
     static constexpr std::size_t maximumOutputEndpoints = 8;
     static constexpr std::size_t maximumRoutedEventsPerEndpoint = 1024;
+    static_assert(maximumPatternPlayers <= 16 && maximumVoices <= 16);
+    static_assert(PatternLibrary::maxEntryCount <= 0x1ffu);
 
     [[nodiscard]] bool registerPatternPlayer(PatternPlayer& player) noexcept;
     [[nodiscard]] bool registerModulationPlayer(ModulationPlayer& player) noexcept;
@@ -195,6 +203,37 @@ public:
         PlayerCommand command) noexcept;
     [[nodiscard]] bool armCycleCommand(std::size_t slot) noexcept;
     [[nodiscard]] bool cycleCommandPending(std::size_t slot) const noexcept;
+    [[nodiscard]] bool configureBarClock(PatternPlayerId source) noexcept;
+    [[nodiscard]] bool scheduleVoiceMute(
+        VoiceId voice,
+        bool muted,
+        std::size_t barsFromNow = 1) noexcept;
+    [[nodiscard]] bool schedulePatternSelection(
+        PatternPlayerId player,
+        PatternId pattern,
+        std::size_t barsFromNow = 1) noexcept;
+    [[nodiscard]] std::optional<bool> scheduledVoiceMute(
+        VoiceId voice) const noexcept;
+    [[nodiscard]] std::optional<PatternId> scheduledPatternSelection(
+        PatternPlayerId player) const noexcept;
+    [[nodiscard]] std::size_t scheduledVoiceMuteBarsRemaining(
+        VoiceId voice) const noexcept;
+    [[nodiscard]] bool voiceMuteScheduledAtBarOffset(
+        VoiceId voice,
+        bool muted,
+        std::size_t barsFromNow) const noexcept;
+    [[nodiscard]] std::size_t scheduledPatternBarsRemaining(
+        PatternPlayerId player) const noexcept;
+    [[nodiscard]] std::optional<PatternId>
+        patternSelectionScheduledAtBarOffset(
+            PatternPlayerId player,
+            std::size_t barsFromNow) const noexcept;
+    [[nodiscard]] std::size_t scheduledChangeCountAtBarOffset(
+        std::size_t barsFromNow) const noexcept;
+    [[nodiscard]] std::size_t currentBar() const noexcept
+    {
+        return currentBar_.load(std::memory_order_acquire);
+    }
     void prepare(const PrepareSpec& spec) noexcept;
     void reset() noexcept;
     [[nodiscard]] bool process(
@@ -259,6 +298,21 @@ private:
         bool active = false;
     };
 
+    enum class ScheduledChangeType : std::uint8_t
+    {
+        voiceMute,
+        patternSelection
+    };
+
+    struct ScheduledChangeView
+    {
+        ScheduledChangeType type = ScheduledChangeType::voiceMute;
+        std::size_t targetIndex = 0;
+        std::uint16_t value = 0;
+        std::size_t barsRemaining = 0;
+        std::uint32_t sequence = 0;
+    };
+
     [[nodiscard]] PatternPlayer* find(PatternPlayerId id) const noexcept;
     [[nodiscard]] ModulationPlayer* find(ModulationPlayerId id) const noexcept;
     [[nodiscard]] Voice* find(VoiceId id) const noexcept;
@@ -276,6 +330,26 @@ private:
         PatternPlayerId triggerSource,
         const SequencerEventBuffer& events,
         ResolvedVoiceEventBuffer& output) noexcept;
+    [[nodiscard]] bool triggerEligible(
+        std::size_t sourceVoiceIndex,
+        PatternPlayerId triggerSource,
+        const SequencerEvent& event) noexcept;
+    [[nodiscard]] bool scheduleChange(
+        ScheduledChangeType type,
+        std::size_t targetIndex,
+        std::uint16_t value,
+        std::size_t barsFromNow) noexcept;
+    [[nodiscard]] static std::uint64_t encodeScheduledChange(
+        const ScheduledChangeView& change) noexcept;
+    [[nodiscard]] static ScheduledChangeView decodeScheduledChange(
+        std::uint64_t encoded) noexcept;
+    [[nodiscard]] static bool scheduledChangeActive(
+        std::uint64_t encoded) noexcept;
+    [[nodiscard]] std::optional<ScheduledChangeView> nextScheduledChange(
+        ScheduledChangeType type,
+        std::size_t targetIndex) const noexcept;
+    void applyScheduledBarBoundary(
+        const PlayerSignal& boundary) noexcept;
     void resolveTimestamp(double ppq, ResolvedVoiceEventBuffer& output) noexcept;
     [[nodiscard]] bool hasControlCycle(
         const RuntimeGraphConfig& candidate) const noexcept;
@@ -311,6 +385,12 @@ private:
     std::size_t armedCycleCommandCount_ = 0;
     std::array<std::atomic_bool, maximumPatternPlayers> armedCyclePending_ {};
     std::array<std::atomic_bool, maximumVoices> voiceMuted_ {};
+    std::array<std::atomic<std::uint64_t>, maximumScheduledChanges>
+        scheduledChanges_ {};
+    std::atomic<std::uint32_t> nextScheduledSequence_ {1};
+    PatternPlayerId barClockSource_;
+    std::atomic<std::uint8_t> currentBar_ {0};
+    double lastBarBoundaryPpq_ = -std::numeric_limits<double>::infinity();
     std::array<std::array<std::atomic_bool, maximumPatternPlayers>,
         maximumPatternPlayers> suppression_ {};
     std::array<AudibleTriggerState, maximumVoices> audibleTriggers_ {};
@@ -324,6 +404,12 @@ private:
     GraphValidationError lastValidationError_ = GraphValidationError::none;
     bool prepared_ = false;
     bool workOverflowed_ = false;
+    bool transportStateKnown_ = false;
+    bool lastTransportPlaying_ = false;
+    bool processIssueActive_ = false;
+    bool unpreparedProcessReported_ = false;
+    std::uint64_t statusSampleCount_ = 0;
+    std::uint64_t statusBlockCount_ = 0;
 };
 
 } // namespace lps

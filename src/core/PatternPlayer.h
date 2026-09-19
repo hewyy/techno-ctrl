@@ -52,6 +52,7 @@ public:
 
     void selectPattern(PatternId patternId) noexcept;
     void selectSavedPattern(PatternId patternId) noexcept;
+    [[nodiscard]] bool canSelectSavedPattern(PatternId patternId) const noexcept;
     [[nodiscard]] PatternId selectedPatternId() const noexcept;
     [[nodiscard]] PatternId activePatternId() const noexcept;
     void offsetPatternLeft() noexcept;
@@ -86,6 +87,12 @@ public:
         PlayerSignalBuffer& output) noexcept override;
     [[nodiscard]] bool observeCycleBoundary(
         const PlayerSignal& boundary,
+        PlayerSignalBuffer& output) noexcept;
+    // Applies the currently requested saved-pattern selection at an explicit
+    // musical boundary. Runtime schedulers use this to quantize a selection
+    // to a shared master cycle instead of this player's local cycle.
+    [[nodiscard]] bool activateSelectedPatternAtBoundary(
+        double ppqPosition,
         PlayerSignalBuffer& output) noexcept;
     [[nodiscard]] PlayerSyncCapabilities syncCapabilities() const noexcept override;
 

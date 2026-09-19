@@ -26,6 +26,8 @@ add_library(sequencer_core STATIC
     src/core/IPlayer.h
     src/core/IPlayerEditorModels.h
     src/core/IOutputRenderer.h
+    src/core/Logger.cpp
+    src/core/Logger.h
     src/core/NormalizedValue.cpp
     src/core/NormalizedValue.h
     src/core/PatternLibrary.cpp
@@ -70,6 +72,10 @@ add_executable(runtime_graph_tests
     tests/RuntimeGraphTests.cpp
 )
 
+add_executable(logger_tests
+    tests/LoggerTests.cpp
+)
+
 add_executable(midi_buffer_transport_tests
     tests/MidiBufferTransportTests.cpp
     src/plugin/MidiBufferRenderer.cpp
@@ -88,6 +94,7 @@ target_link_libraries(modulation_library_tests PRIVATE sequencer_core)
 target_link_libraries(modulation_player_tests PRIVATE sequencer_core)
 target_link_libraries(voice_tests PRIVATE sequencer_core)
 target_link_libraries(runtime_graph_tests PRIVATE sequencer_core)
+target_link_libraries(logger_tests PRIVATE sequencer_core)
 target_include_directories(midi_buffer_transport_tests PRIVATE src)
 target_link_libraries(midi_buffer_transport_tests
     PRIVATE
@@ -108,6 +115,7 @@ add_test(NAME modulation_library_tests COMMAND modulation_library_tests)
 add_test(NAME modulation_player_tests COMMAND modulation_player_tests)
 add_test(NAME voice_tests COMMAND voice_tests)
 add_test(NAME runtime_graph_tests COMMAND runtime_graph_tests)
+add_test(NAME logger_tests COMMAND logger_tests)
 add_test(NAME midi_buffer_transport_tests COMMAND midi_buffer_transport_tests)
 add_test(NAME cv_buffer_renderer_tests COMMAND cv_buffer_renderer_tests)
 

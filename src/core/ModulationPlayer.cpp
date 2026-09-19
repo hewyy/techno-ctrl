@@ -1,4 +1,5 @@
 #include "core/ModulationPlayer.h"
+#include "core/Logger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,6 +25,9 @@ void ModulationPlayer::setAdvanceSource(AdvanceSource source) noexcept
         clock != nullptr
         && (!std::isfinite(clock->stepLengthPpq) || clock->stepLengthPpq <= 0.0))
     {
+        Logger::logf(LogLevel::warning, "modulation_player", "setting_rejected",
+            "player_id=%u setting=advance_source reason=invalid_step_length value=%.9f",
+            id_.value, clock->stepLengthPpq);
         return;
     }
     advanceSource_ = source;
@@ -38,6 +42,10 @@ void ModulationPlayer::selectModulation(ModulationId id) noexcept
 {
     if (library_.find(id) != nullptr)
         requestedModulationId_.store(id.value(), std::memory_order_release);
+    else
+        Logger::logf(LogLevel::warning, "modulation_player", "selection_rejected",
+            "player_id=%u modulation_id=%llu",
+            id_.value, static_cast<unsigned long long>(id.value()));
 }
 
 ModulationId ModulationPlayer::selectedModulationId() const noexcept
@@ -114,7 +122,11 @@ void ModulationPlayer::setUnipolar8Value(
 void ModulationPlayer::setLength(std::size_t length) noexcept
 {
     if (length == 0 || length > Modulation::maxLength)
+    {
+        Logger::logf(LogLevel::warning, "modulation_player", "setting_rejected",
+            "player_id=%u setting=length value=%zu", id_.value, length);
         return;
+    }
 
     const DraftWriteGuard guard {*this};
     const auto oldLength = static_cast<std::size_t>(

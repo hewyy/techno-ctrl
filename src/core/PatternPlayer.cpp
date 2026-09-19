@@ -1,4 +1,5 @@
 #include "core/PatternPlayer.h"
+#include "core/Logger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,12 @@ void PatternPlayer::setAdvanceSource(AdvanceSource source) noexcept
     if (const auto* clock = std::get_if<ClockAdvance>(&source);
         clock != nullptr
         && (!std::isfinite(clock->stepLengthPpq) || clock->stepLengthPpq <= 0.0))
+    {
+        Logger::logf(LogLevel::warning, "pattern_player", "setting_rejected",
+            "player_id=%u setting=advance_source reason=invalid_step_length value=%.9f",
+            id_.value, clock->stepLengthPpq);
         return;
+    }
     advanceSource_ = source;
 }
 
@@ -36,6 +42,9 @@ void PatternPlayer::setTransitionPolicy(PatternTransitionPolicy policy) noexcept
     if (policy.type == PatternTransitionPolicyType::externalCycle
         && !policy.externalSource.isValid())
     {
+        Logger::logf(LogLevel::warning, "pattern_player", "setting_rejected",
+            "player_id=%u setting=transition_policy reason=invalid_external_source",
+            id_.value);
         return;
     }
     transitionPolicy_ = policy;
@@ -48,13 +57,24 @@ void PatternPlayer::selectPattern(PatternId patternId) noexcept
 
 void PatternPlayer::selectSavedPattern(PatternId patternId) noexcept
 {
-    if (patternLibrary_.find(patternId) != nullptr
-        && (patternId.value() & resetOffsetOnActivationFlag) == 0)
+    if (canSelectSavedPattern(patternId))
     {
         requestedPatternSelection_.store(
             patternId.value() | resetOffsetOnActivationFlag,
             std::memory_order_release);
     }
+    else
+    {
+        Logger::logf(LogLevel::warning, "pattern_player", "selection_rejected",
+            "player_id=%u pattern_id=%llu",
+            id_.value, static_cast<unsigned long long>(patternId.value()));
+    }
+}
+
+bool PatternPlayer::canSelectSavedPattern(PatternId patternId) const noexcept
+{
+    return patternLibrary_.find(patternId) != nullptr
+        && (patternId.value() & resetOffsetOnActivationFlag) == 0;
 }
 
 PatternId PatternPlayer::selectedPatternId() const noexcept
@@ -88,6 +108,10 @@ void PatternPlayer::setPlaybackSpeed(std::size_t speedIndex) noexcept
 {
     if (speedIndex < playbackSpeedCount)
         playbackSpeed_.store(speedIndex, std::memory_order_relaxed);
+    else
+        Logger::logf(LogLevel::warning, "pattern_player", "setting_rejected",
+            "player_id=%u setting=playback_speed value=%zu",
+            id_.value, speedIndex);
 }
 
 std::size_t PatternPlayer::playbackSpeed() const noexcept
@@ -225,12 +249,22 @@ bool PatternPlayer::activatePattern(PatternId patternId, bool resetOffset) noexc
 void PatternPlayer::setPlaybackWindow(std::size_t startStep, std::size_t endStep) noexcept
 {
     if (patternLibrary_.find(activePatternId()) == nullptr)
+    {
+        Logger::logf(LogLevel::warning, "pattern_player", "setting_rejected",
+            "player_id=%u setting=playback_window reason=no_active_pattern",
+            id_.value);
         return;
+    }
 
     startStep = std::min(startStep, longestPatternLength - 1);
     endStep = std::min(endStep, longestPatternLength - 1);
     if (startStep > endStep)
+    {
+        Logger::logf(LogLevel::warning, "pattern_player", "setting_rejected",
+            "player_id=%u setting=playback_window start=%zu end=%zu",
+            id_.value, startStep, endStep);
         return;
+    }
 
     const DraftWriteGuard guard { *this, true };
     requestedPlaybackWindow_.store(
@@ -364,6 +398,12 @@ bool PatternPlayer::restorePersistentState(
         || state.playbackEnd >= longestPatternLength
         || state.playbackSpeed >= playbackSpeedCount)
     {
+        Logger::logf(LogLevel::warning, "pattern_player", "state_restore_rejected",
+            "player_id=%u pattern_id=%llu start=%u end=%u speed=%u",
+            id_.value, static_cast<unsigned long long>(state.patternId.value()),
+            static_cast<unsigned>(state.playbackStart),
+            static_cast<unsigned>(state.playbackEnd),
+            static_cast<unsigned>(state.playbackSpeed));
         return false;
     }
 
@@ -538,6 +578,17 @@ PlayerProcessResult PatternPlayer::process(
         patternPlaybackSnapshot_.currentStep = static_cast<int>(playbackStart
             + static_cast<std::size_t>(snapshotCycleStep));
         patternPlaybackSnapshot_.playing = true;
+        const auto snapshotPosition = std::max(
+            rangeStart,
+            rangeEnd - std::numeric_limits<double>::epsilon());
+        auto cyclePosition = std::fmod(
+            (snapshotPosition - playbackOriginPpq_) / stepLengthPpq
+                - static_cast<double>(playbackWindowOriginStep_),
+            static_cast<double>(playbackLength));
+        if (cyclePosition < 0.0)
+            cyclePosition += static_cast<double>(playbackLength);
+        patternPlaybackSnapshot_.cycleProgress = static_cast<float>(
+            cyclePosition / static_cast<double>(playbackLength));
 
         auto playbackStep = static_cast<std::int64_t>(std::ceil(
             (rangeStart - playbackOriginPpq_) / stepLengthPpq
@@ -666,6 +717,14 @@ bool PatternPlayer::observeCycleBoundary(
         return false;
     }
 
+    return activateSelectedPatternAtBoundary(
+        boundary.ppqPosition, output);
+}
+
+bool PatternPlayer::activateSelectedPatternAtBoundary(
+    double ppqPosition,
+    PlayerSignalBuffer& output) noexcept
+{
     const auto selection = requestedPatternSelection();
     const auto pendingPattern = patternIdFromSelection(selection);
     if ((pendingPattern == activePatternId() && !selectionResetsOffset(selection))
@@ -674,7 +733,7 @@ bool PatternPlayer::observeCycleBoundary(
         return false;
     }
     consumeSaveSelectionRequest(selection);
-    command(PlayerCommand::resetAndPlay, boundary.ppqPosition, output);
+    command(PlayerCommand::resetAndPlay, ppqPosition, output);
     return true;
 }
 

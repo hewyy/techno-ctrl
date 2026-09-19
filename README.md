@@ -11,7 +11,7 @@ This project is a deliberately narrow end-to-end proof:
   automatically takes authority when it begins.
 - Independent C++ pattern players drive a configurable number of drum voices.
 - Ten built-in patterns cover basic drum figures and odd-length 3/5/7/9-step pulses.
-- Every drum voice emits its own fixed MIDI note on MIDI channel 1, with velocity driven by an independently selected modulation.
+- The drum voices emit fixed notes on MIDI channel 11; Synth 1 and Synth 2 emit on channels 12 and 13. Velocity is driven by an independently selected modulation.
 - The UI edits a 32-step working copy for each player, marks changes to its draft, loop range, or offset, and can save the active loop into a persistent per-user library. A library pattern's stored length sets the player's initial playback end without limiting the editable grid.
 - Each player also has an editable 1–10 step velocity modulation shown as rotary knobs. It advances only when the pattern produces a hit, loops independently of the hit pattern, and has its own amber playhead. Modulations can be selected and saved without changing any hit pattern.
 - Each voice has a MUTE control that silences its note hits while its sequence and visible playhead continue advancing.
@@ -20,8 +20,8 @@ This project is a deliberately narrow end-to-end proof:
 
 ## Default drum voices
 
-The bundled configuration creates ten regular `PatternPlayer` instances. They all use MIDI
-channel 1 and are distinguished by these fixed drum-machine note values:
+The bundled configuration creates ten drum `PatternPlayer` instances. They all use MIDI
+channel 11 and are distinguished by these fixed drum-machine note values:
 
 | Voice | Note |
 | --- | ---: |
@@ -36,8 +36,9 @@ channel 1 and are distinguished by these fixed drum-machine note values:
 | Crash | 44 |
 | Ride | 45 |
 
-The current composition also adds one generic `PulsePlayer` on MIDI note 46.
-Every player is routed to MIDI and to an isolated gate/pitch/control CV triplet.
+The current composition also adds Synth 1 on MIDI channel 12 (initial note 46) and
+Synth 2 on MIDI channel 13 (initial note 47). The ten drum voices are also routed to
+isolated gate/pitch/control CV triplets; the synth voices are MIDI-only.
 
 The voice list is centralized in `PluginProcessor.cpp`. The processor, editor, sequencer
 engine, routing, and suppression matrix use runtime-sized collections, so the list can be
@@ -187,7 +188,7 @@ If Windows requires administrator permission, run the copy from an elevated Powe
 6. Open the track's FX chain.
 7. Add **Live Pattern Sequencer MVP** first.
 8. Add a software synth immediately after it.
-9. Configure the drum machine or sampler to receive MIDI channel 1 and map the notes in the table above.
+9. Configure the drum machine or sampler to receive MIDI channel 11 and map the notes in the table above. Configure Synth 1 and Synth 2 to receive channels 12 and 13.
 10. Press Play in REAPER.
 
 The sequencer UI should advance with REAPER and the drum instrument should receive the patterns.
@@ -197,7 +198,7 @@ The sequencer UI should advance with REAPER and the drum instrument should recei
 ### The UI advances but there is no sound
 
 - Confirm the sequencer is before the drum instrument in the FX chain.
-- Confirm the drum instrument accepts MIDI channel 1.
+- Confirm the drum instrument accepts MIDI channel 11 and the synths accept channels 12 and 13.
 - Confirm the drum voice notes in the table above match the receiving instrument's note map.
 
 ### REAPER cannot find the plugin

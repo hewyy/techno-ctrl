@@ -107,8 +107,9 @@ public:
         const std::vector<ModulationLibraryEntry>& entries);
 
     // Single-writer operation intended for the UI thread. Duplicate content
-    // returns the existing entry regardless of name. New content must have a
-    // non-empty name and a length from one through Modulation::maxLength.
+    // returns the existing entry regardless of name. An empty name is replaced
+    // with a stable display name derived from the newly allocated ID. New
+    // content must have a length from one through Modulation::maxLength.
     // beforePublish may persist and adjust the staged entry; returning false
     // leaves the library unchanged.
     [[nodiscard]] ModulationLibraryInsertResult addOrFind(

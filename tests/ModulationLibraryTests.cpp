@@ -210,9 +210,12 @@ void testSameValuesWithDifferentLengthsAreDistinct()
 void testInvalidNewModulationsAreRejected()
 {
     lps::ModulationLibrary library;
-    const auto initialSize = library.size();
-
-    CHECK(library.addOrFind({}, makeModulation({1, 2})).entry == nullptr);
+    const auto generated = library.addOrFind({}, makeModulation({1, 2}));
+    CHECK(generated.inserted);
+    CHECK(generated.entry != nullptr);
+    CHECK(generated.entry->id == lps::ModulationId {3});
+    CHECK(generated.entry->name == "Modulation 3");
+    const auto sizeAfterGeneratedName = library.size();
 
     lps::Modulation empty;
     CHECK(library.addOrFind("Empty", empty).entry == nullptr);
@@ -221,7 +224,7 @@ void testInvalidNewModulationsAreRejected()
     tooLong.length = lps::Modulation::maxLength + 1;
     CHECK(library.addOrFind("Too Long", tooLong).entry == nullptr);
     CHECK(library.findEquivalent(tooLong) == nullptr);
-    CHECK(library.size() == initialSize);
+    CHECK(library.size() == sizeAfterGeneratedName);
 }
 
 void testCapacityAndDuplicateLookupWhenFull()

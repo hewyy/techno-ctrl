@@ -111,7 +111,10 @@ enum class PatternTransitionPolicyType : std::uint8_t
 {
     localCycle,
     immediate,
-    externalCycle
+    externalCycle,
+    // A shared runtime scheduler owns activation. The player keeps a request
+    // pending until activateSelectedPatternAtBoundary() is called.
+    explicitBoundary
 };
 
 struct PatternTransitionPolicy
@@ -490,6 +493,9 @@ struct PatternPlaybackSnapshot
 {
     int currentStep = -1;
     bool playing = false;
+    // Normalized position through the active playback window. This is a UI
+    // snapshot only; scheduling remains driven by exact cycle boundaries.
+    float cycleProgress = 0.0f;
 };
 
 struct ModulationPlaybackSnapshot

@@ -182,8 +182,7 @@ ModulationLibraryInsertResult ModulationLibrary::addOrFind(
     if (const auto* existing = findEquivalent(modulation))
         return {existing, false};
 
-    if (name.empty()
-        || modulation.length == 0
+    if (modulation.length == 0
         || modulation.length > Modulation::maxLength)
     {
         return {};
@@ -198,7 +197,9 @@ ModulationLibraryInsertResult ModulationLibrary::addOrFind(
 
     auto& entry = entries_[insertionIndex];
     entry.id = nextAvailableId();
-    entry.name = std::move(name);
+    entry.name = name.empty()
+        ? "Modulation " + std::to_string(entry.id.value())
+        : std::move(name);
     entry.modulation = normalizedModulation;
 
     try
