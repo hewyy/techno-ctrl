@@ -40,6 +40,10 @@ struct ParameterBinding
     ModulationPlayerId source;
     VoiceId voice;
     VoiceParameterId parameter;
+    // Sampled parameters may be scoped to the PatternPlayer whose trigger
+    // should consume this value. An invalid ID keeps the historical
+    // Voice-wide behavior and is required for continuous parameters.
+    PatternPlayerId triggerScope;
 };
 
 struct CommandBinding
@@ -125,7 +129,6 @@ enum class GraphValidationError : std::uint8_t
     duplicateBinding,
     selfEdge,
     controlCycle,
-    multipleTriggerSources,
     multipleParameterSources,
     unsupportedOutputSignal
 };
@@ -168,7 +171,8 @@ public:
     static constexpr std::size_t maximumPatternPlayers = 16;
     static constexpr std::size_t maximumModulationPlayers = 64;
     static constexpr std::size_t maximumVoices = 16;
-    static constexpr std::size_t maximumArmedCycleCommands = 64;
+    static constexpr std::size_t maximumArmedCommandGroups = 128;
+    static constexpr std::size_t maximumArmedCommands = 192;
     static constexpr std::size_t maximumScheduledBars = 8;
     static constexpr std::size_t maximumScheduledChanges = 128;
     static constexpr std::size_t maximumWorkSignals = 1024;
@@ -201,11 +205,23 @@ public:
         PatternPlayerId source,
         PlayerRef destination,
         PlayerCommand command) noexcept;
+    [[nodiscard]] bool configureArmedCommand(
+        std::size_t slot,
+        ControlSource source,
+        PlayerRef destination,
+        PlayerCommand command) noexcept;
+    [[nodiscard]] bool armCommand(std::size_t slot) noexcept;
+    [[nodiscard]] bool commandPending(std::size_t slot) const noexcept;
+    // Compatibility names for the original cycle-only reset API.
     [[nodiscard]] bool armCycleCommand(std::size_t slot) noexcept;
     [[nodiscard]] bool cycleCommandPending(std::size_t slot) const noexcept;
     [[nodiscard]] bool configureBarClock(PatternPlayerId source) noexcept;
     [[nodiscard]] bool scheduleVoiceMute(
         VoiceId voice,
+        bool muted,
+        std::size_t barsFromNow = 1) noexcept;
+    [[nodiscard]] bool schedulePatternPlayerMute(
+        PatternPlayerId player,
         bool muted,
         std::size_t barsFromNow = 1) noexcept;
     [[nodiscard]] bool schedulePatternSelection(
@@ -214,12 +230,20 @@ public:
         std::size_t barsFromNow = 1) noexcept;
     [[nodiscard]] std::optional<bool> scheduledVoiceMute(
         VoiceId voice) const noexcept;
+    [[nodiscard]] std::optional<bool> scheduledPatternPlayerMute(
+        PatternPlayerId player) const noexcept;
     [[nodiscard]] std::optional<PatternId> scheduledPatternSelection(
         PatternPlayerId player) const noexcept;
     [[nodiscard]] std::size_t scheduledVoiceMuteBarsRemaining(
         VoiceId voice) const noexcept;
+    [[nodiscard]] std::size_t scheduledPatternPlayerMuteBarsRemaining(
+        PatternPlayerId player) const noexcept;
     [[nodiscard]] bool voiceMuteScheduledAtBarOffset(
         VoiceId voice,
+        bool muted,
+        std::size_t barsFromNow) const noexcept;
+    [[nodiscard]] bool patternPlayerMuteScheduledAtBarOffset(
+        PatternPlayerId player,
         bool muted,
         std::size_t barsFromNow) const noexcept;
     [[nodiscard]] std::size_t scheduledPatternBarsRemaining(
@@ -245,6 +269,10 @@ public:
     void resetOutputs() noexcept;
     void setVoiceMuted(VoiceId voice, bool muted) noexcept;
     [[nodiscard]] bool voiceMuted(VoiceId voice) const noexcept;
+    void setPatternPlayerMuted(
+        PatternPlayerId player, bool muted) noexcept;
+    [[nodiscard]] bool patternPlayerMuted(
+        PatternPlayerId player) const noexcept;
     void setSuppression(
         PatternPlayerId suppressor,
         PatternPlayerId suppressed,
@@ -274,10 +302,10 @@ private:
         bool resolved = false;
     };
 
-    struct ArmedCycleCommand
+    struct ArmedCommand
     {
         std::size_t group = 0;
-        PatternPlayerId source;
+        ControlSource source;
         PlayerRef destination;
         PlayerCommand command = PlayerCommand::resetAndPlay;
         bool configured = false;
@@ -301,7 +329,8 @@ private:
     enum class ScheduledChangeType : std::uint8_t
     {
         voiceMute,
-        patternSelection
+        patternSelection,
+        patternPlayerMute
     };
 
     struct ScheduledChangeView
@@ -325,6 +354,7 @@ private:
         double ppqPosition,
         std::size_t limit) noexcept;
     void appendPlayerRemainder(IPlayer& player, double ppqPosition) noexcept;
+    void applyArmedCommands(const PlayerSignal& source) noexcept;
     void appendVoiceEvents(
         Voice& voice,
         PatternPlayerId triggerSource,
@@ -380,11 +410,13 @@ private:
     std::atomic<std::uint64_t> activeGeneration_ {0};
     std::uint64_t nextPublicationGeneration_ = 0;
     std::uint8_t audioSnapshot_ = 0;
-    std::array<ArmedCycleCommand, maximumArmedCycleCommands>
-        armedCycleCommands_ {};
-    std::size_t armedCycleCommandCount_ = 0;
-    std::array<std::atomic_bool, maximumPatternPlayers> armedCyclePending_ {};
+    std::array<ArmedCommand, maximumArmedCommands> armedCommands_ {};
+    std::size_t armedCommandCount_ = 0;
+    std::array<std::atomic_bool, maximumArmedCommandGroups>
+        armedCommandPending_ {};
     std::array<std::atomic_bool, maximumVoices> voiceMuted_ {};
+    std::array<std::atomic_bool, maximumPatternPlayers>
+        patternPlayerMuted_ {};
     std::array<std::atomic<std::uint64_t>, maximumScheduledChanges>
         scheduledChanges_ {};
     std::atomic<std::uint32_t> nextScheduledSequence_ {1};
@@ -393,7 +425,8 @@ private:
     double lastBarBoundaryPpq_ = -std::numeric_limits<double>::infinity();
     std::array<std::array<std::atomic_bool, maximumPatternPlayers>,
         maximumPatternPlayers> suppression_ {};
-    std::array<AudibleTriggerState, maximumVoices> audibleTriggers_ {};
+    std::array<std::array<AudibleTriggerState,
+        Voice::maximumActiveTriggerCount>, maximumVoices> audibleTriggers_ {};
     PrepareSpec prepareSpec_;
     TimelineBlock currentBlock_;
     std::array<WorkSignal, maximumWorkSignals> work_ {};

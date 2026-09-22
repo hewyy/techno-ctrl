@@ -117,6 +117,8 @@ private:
             const juce::MouseWheelDetails&) override;
     };
 
+    class SynthPageComponent;
+
     class UtilityButton final : public juce::TextButton
     {
     public:
@@ -239,6 +241,7 @@ private:
     [[nodiscard]] std::size_t pageSize() const noexcept;
     void pageVoices(int direction);
     void updatePageButtons();
+    void showSynthPage(bool show);
     void refreshModulationControls(
         std::size_t playerIndex,
         ModulationLane lane,
@@ -258,6 +261,8 @@ private:
     juce::LookAndFeel_V4 lookAndFeel_;
     ContentComponent content_;
     PagedViewport viewport_;
+    juce::Viewport synthViewport_;
+    std::unique_ptr<SynthPageComponent> synthPage_;
     ControlPaneComponent controlPane_;
     BarSchedulerComponent barScheduler_;
     ModulationBlockLayer modulationBlockLayer_;
@@ -267,6 +272,8 @@ private:
     UtilityButton previousPageButton_;
     UtilityButton nextPageButton_;
     UtilityButton globalPlayButton_;
+    juce::TextButton voicesPageButton_ {"ALL VOICES"};
+    juce::TextButton synthTwoPageButton_ {"SYNTH 2"};
     juce::Label selectionLabel_;
     std::vector<std::unique_ptr<juce::Label>> controlVoiceLabels_;
     std::vector<std::unique_ptr<SpeakerButton>>
@@ -280,6 +287,10 @@ private:
     std::array<juce::TextButton,
         LivePatternSequencerProcessor::groupCount> groupResetButtons_;
     bool suppressionMenuOpen_ = false;
+    bool synthPageVisible_ = true;
+    enum class SuppressionMatrixScope { patternPlayers, voices };
+    SuppressionMatrixScope suppressionMatrixScope_ =
+        SuppressionMatrixScope::patternPlayers;
     std::vector<std::unique_ptr<juce::TextButton>> patternMenuButtons_;
     std::array<std::vector<std::unique_ptr<juce::TextButton>>,
         LivePatternSequencerProcessor::modulationLaneCount>

@@ -30,7 +30,23 @@ public:
         gate
     };
 
+    enum class ModulationAdvanceMode : std::uint8_t
+    {
+        onHit,
+        onClock
+    };
+
+    struct SynthLaneInfo
+    {
+        juce::String section;
+        juce::String name;
+        int midiCc = -1;
+        bool pitch = false;
+        std::size_t patternSlot = 0;
+    };
+
     static constexpr std::size_t modulationLaneCount = 3;
+    static constexpr std::size_t synthTwoPatternCount = 3;
     static constexpr std::size_t groupCount = 4;
     static constexpr std::size_t maximumScheduledBars =
         lps::RuntimeGraph::maximumScheduledBars;
@@ -108,6 +124,10 @@ public:
     [[nodiscard]] bool hostTransportPlayingForUi() const noexcept;
     [[nodiscard]] lps::PatternView patternForUi(std::size_t playerIndex = 0) const noexcept;
     [[nodiscard]] juce::String playerNameForUi(std::size_t playerIndex) const;
+    [[nodiscard]] std::size_t voiceCountForUi() const noexcept;
+    [[nodiscard]] juce::String voiceNameForUi(std::size_t voiceIndex) const;
+    [[nodiscard]] std::size_t playerVoiceIndexForUi(
+        std::size_t playerIndex) const noexcept;
     [[nodiscard]] bool playerSupportsPatternEditingForUi(
         std::size_t playerIndex) const noexcept;
     [[nodiscard]] bool playerSupportsModulationEditingForUi(
@@ -244,6 +264,57 @@ public:
     [[nodiscard]] bool suppression(
         std::size_t suppressorIndex,
         std::size_t suppressedIndex) const noexcept;
+    void setVoiceSuppression(
+        std::size_t suppressorVoiceIndex,
+        std::size_t suppressedVoiceIndex,
+        bool enabled) noexcept;
+    [[nodiscard]] bool voiceSuppression(
+        std::size_t suppressorVoiceIndex,
+        std::size_t suppressedVoiceIndex) const noexcept;
+
+    [[nodiscard]] std::size_t synthTwoPlayerIndexForUi(
+        std::size_t patternSlot) const noexcept;
+    [[nodiscard]] bool resetSynthPatternToMaster(
+        std::size_t patternSlot) noexcept;
+    [[nodiscard]] bool synthPatternResetPendingForUi(
+        std::size_t patternSlot) const noexcept;
+    [[nodiscard]] std::size_t synthLaneCountForUi() const noexcept;
+    [[nodiscard]] SynthLaneInfo synthLaneInfoForUi(
+        std::size_t laneIndex) const;
+    [[nodiscard]] lps::Modulation synthLaneModulationForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] bool synthLaneModulationModifiedForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] std::size_t selectedSynthLaneModulationForUi(
+        std::size_t laneIndex) const noexcept;
+    void selectModulationForSynthLane(
+        std::size_t laneIndex,
+        std::size_t modulationIndex) noexcept;
+    [[nodiscard]] SaveModulationResult saveSynthLaneModulation(
+        std::size_t laneIndex,
+        const juce::String& name = {});
+    [[nodiscard]] int synthLaneCurrentStepForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] ModulationAdvanceMode synthLaneAdvanceModeForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] std::size_t synthLanePatternSlotForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] bool resetSynthLane(std::size_t laneIndex) noexcept;
+    [[nodiscard]] bool synthLaneResetPendingForUi(
+        std::size_t laneIndex) const noexcept;
+    void setSynthLaneAdvanceMode(
+        std::size_t laneIndex,
+        ModulationAdvanceMode mode) noexcept;
+    void setSynthLanePatternSlot(
+        std::size_t laneIndex,
+        std::size_t patternSlot) noexcept;
+    void setSynthLaneValue(
+        std::size_t laneIndex,
+        std::size_t step,
+        std::uint8_t value) noexcept;
+    void setSynthLaneLength(
+        std::size_t laneIndex,
+        std::size_t length) noexcept;
 
 private:
     // This is intentionally a policy switch so a future configuration menu
@@ -264,6 +335,8 @@ private:
         int midiNote = -1;
         int midiChannel = 1;
         bool hasCvOutput = false;
+        std::size_t voiceIndex = 0;
+        lps::VoiceId voiceId;
     };
 
     struct PlayerBundle
@@ -272,12 +345,20 @@ private:
         std::unique_ptr<lps::ModulationPlayer> pitchPlayer;
         std::unique_ptr<lps::ModulationPlayer> velocityPlayer;
         std::unique_ptr<lps::ModulationPlayer> gatePlayer;
-        std::unique_ptr<lps::Voice> voice;
         PlayerDescriptor descriptor;
         lps::PatternPlayer* patternController = nullptr;
         lps::IPatternEditorModel* patternModel = nullptr;
         lps::RouteId midiRouteId;
         lps::RouteId cvRouteId;
+    };
+
+    struct SynthParameterLane
+    {
+        std::unique_ptr<lps::ModulationPlayer> player;
+        lps::VoiceParameterId parameter;
+        juce::String section;
+        juce::String name;
+        int midiCc = -1;
     };
 
     void updateUiSnapshot() noexcept;
@@ -296,6 +377,23 @@ private:
     {
         return static_cast<std::size_t>(lane);
     }
+    [[nodiscard]] lps::ModulationPlayer* synthLanePlayerAt(
+        std::size_t laneIndex) noexcept;
+    [[nodiscard]] const lps::ModulationPlayer* synthLanePlayerAt(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] SaveModulationResult saveModulationPlayer(
+        lps::ModulationPlayer& player,
+        const lps::Modulation& candidateModulation,
+        const juce::String& name);
+    [[nodiscard]] bool publishSynthLaneAdvanceSource(
+        std::size_t laneIndex,
+        ModulationAdvanceMode mode,
+        std::size_t patternSlot) noexcept;
+    [[nodiscard]] std::size_t synthPatternResetGroup(
+        std::size_t patternSlot) const noexcept;
+    [[nodiscard]] std::size_t synthLaneResetGroup(
+        std::size_t laneIndex,
+        std::size_t sourceIndex) const noexcept;
 
     // The library must outlive every player because players keep a read-only
     // reference to its immutable, append-only entries.
@@ -304,11 +402,14 @@ private:
     PatternLibraryFileStore patternLibraryFileStore_;
     ModulationLibraryFileStore modulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
+    std::vector<std::unique_ptr<lps::Voice>> voices_;
+    std::vector<SynthParameterLane> synthParameterLanes_;
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
     std::unique_ptr<lps::MidiBufferRenderer> synthOneRenderer_;
     std::unique_ptr<lps::MidiBufferRenderer> synthTwoRenderer_;
     std::unique_ptr<lps::CvBufferRenderer> cvRenderer_;
     std::unique_ptr<lps::RuntimeGraph> runtimeGraph_;
+    lps::RuntimeGraphConfig runtimeConfig_;
 
     std::optional<double> expectedNextPpq_;
     bool wasPlaying_ = false;
@@ -321,6 +422,12 @@ private:
         currentModulationSteps_;
     std::vector<std::unique_ptr<std::atomic<bool>>>
         modulationLocks_;
+    std::vector<std::unique_ptr<std::atomic<int>>>
+        synthParameterCurrentSteps_;
+    std::vector<std::unique_ptr<std::atomic<std::uint8_t>>>
+        synthLaneAdvanceModes_;
+    std::vector<std::unique_ptr<std::atomic<std::size_t>>>
+        synthLanePatternSlots_;
     std::vector<std::unique_ptr<std::atomic<std::uint8_t>>>
         playerGroupMasks_;
     std::atomic<bool> playing_ { false };

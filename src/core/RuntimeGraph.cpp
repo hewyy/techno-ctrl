@@ -20,7 +20,6 @@ const char* validationErrorName(GraphValidationError error) noexcept
         case GraphValidationError::duplicateBinding: return "duplicate_binding";
         case GraphValidationError::selfEdge: return "self_edge";
         case GraphValidationError::controlCycle: return "control_cycle";
-        case GraphValidationError::multipleTriggerSources: return "multiple_trigger_sources";
         case GraphValidationError::multipleParameterSources: return "multiple_parameter_sources";
         case GraphValidationError::unsupportedOutputSignal: return "unsupported_output_signal";
     }
@@ -170,56 +169,80 @@ bool RuntimeGraph::configureArmedCycleCommand(
     PlayerRef destination,
     PlayerCommand command) noexcept
 {
-    if (prepared_ || slot >= armedCyclePending_.size()
-        || armedCycleCommandCount_ == armedCycleCommands_.size()
-        || find(source) == nullptr || find(destination) == nullptr
+    return configureArmedCommand(
+        slot,
+        {source, ControlSourcePort::cycleBoundary},
+        destination,
+        command);
+}
+
+bool RuntimeGraph::configureArmedCommand(
+    std::size_t slot,
+    ControlSource source,
+    PlayerRef destination,
+    PlayerCommand command) noexcept
+{
+    if (prepared_ || slot >= armedCommandPending_.size()
+        || armedCommandCount_ == armedCommands_.size()
+        || find(source.player) == nullptr || find(destination) == nullptr
         || (destination.type == PlayerRefType::pattern
-            && destination.value == source.value))
+            && destination.value == source.player.value))
     {
         return false;
     }
 
-    for (std::size_t index = 0; index < armedCycleCommandCount_; ++index)
+    for (std::size_t index = 0; index < armedCommandCount_; ++index)
     {
-        const auto& configured = armedCycleCommands_[index];
+        const auto& configured = armedCommands_[index];
         if (configured.group != slot)
             continue;
-        if (configured.source != source
+        if (configured.source.player != source.player
+            || configured.source.port != source.port
             || (configured.destination.type == destination.type
                 && configured.destination.value == destination.value))
             return false;
     }
 
-    armedCycleCommands_[armedCycleCommandCount_++] = {
+    armedCommands_[armedCommandCount_++] = {
         slot, source, destination, command, true};
-    armedCyclePending_[slot].store(false, std::memory_order_relaxed);
+    armedCommandPending_[slot].store(false, std::memory_order_relaxed);
     return true;
 }
 
-bool RuntimeGraph::armCycleCommand(std::size_t slot) noexcept
+bool RuntimeGraph::armCommand(std::size_t slot) noexcept
 {
-    if (slot >= armedCyclePending_.size())
+    if (slot >= armedCommandPending_.size())
     {
         return false;
     }
     const bool configured = std::any_of(
-        armedCycleCommands_.begin(),
-        armedCycleCommands_.begin()
-            + static_cast<std::ptrdiff_t>(armedCycleCommandCount_),
+        armedCommands_.begin(),
+        armedCommands_.begin()
+            + static_cast<std::ptrdiff_t>(armedCommandCount_),
         [slot](const auto& command)
         {
             return command.configured && command.group == slot;
         });
     if (!configured)
         return false;
-    armedCyclePending_[slot].store(true, std::memory_order_release);
+    armedCommandPending_[slot].store(true, std::memory_order_release);
     return true;
+}
+
+bool RuntimeGraph::commandPending(std::size_t slot) const noexcept
+{
+    return slot < armedCommandPending_.size()
+        && armedCommandPending_[slot].load(std::memory_order_acquire);
+}
+
+bool RuntimeGraph::armCycleCommand(std::size_t slot) noexcept
+{
+    return armCommand(slot);
 }
 
 bool RuntimeGraph::cycleCommandPending(std::size_t slot) const noexcept
 {
-    return slot < armedCyclePending_.size()
-        && armedCyclePending_[slot].load(std::memory_order_acquire);
+    return commandPending(slot);
 }
 
 bool RuntimeGraph::configureBarClock(PatternPlayerId source) noexcept
@@ -239,7 +262,7 @@ std::uint64_t RuntimeGraph::encodeScheduledChange(
     constexpr std::uint64_t targetShift = 41;
     constexpr std::uint64_t barsShift = 45;
     constexpr std::uint64_t typeShift = 49;
-    constexpr std::uint64_t activeBit = std::uint64_t {1} << 50;
+    constexpr std::uint64_t activeBit = std::uint64_t {1} << 51;
     return activeBit
         | (static_cast<std::uint64_t>(change.type) << typeShift)
         | (static_cast<std::uint64_t>(change.barsRemaining) << barsShift)
@@ -256,7 +279,7 @@ RuntimeGraph::ScheduledChangeView RuntimeGraph::decodeScheduledChange(
     constexpr std::uint64_t barsShift = 45;
     constexpr std::uint64_t typeShift = 49;
     return {
-        static_cast<ScheduledChangeType>((encoded >> typeShift) & 0x1u),
+        static_cast<ScheduledChangeType>((encoded >> typeShift) & 0x3u),
         static_cast<std::size_t>((encoded >> targetShift) & 0xfu),
         static_cast<std::uint16_t>((encoded >> valueShift) & 0x1ffu),
         static_cast<std::size_t>((encoded >> barsShift) & 0xfu),
@@ -266,7 +289,7 @@ RuntimeGraph::ScheduledChangeView RuntimeGraph::decodeScheduledChange(
 
 bool RuntimeGraph::scheduledChangeActive(std::uint64_t encoded) noexcept
 {
-    constexpr std::uint64_t activeBit = std::uint64_t {1} << 50;
+    constexpr std::uint64_t activeBit = std::uint64_t {1} << 51;
     return (encoded & activeBit) != 0;
 }
 
@@ -338,6 +361,20 @@ bool RuntimeGraph::scheduleVoiceMute(
             barsFromNow);
 }
 
+bool RuntimeGraph::schedulePatternPlayerMute(
+    PatternPlayerId player,
+    bool muted,
+    std::size_t barsFromNow) noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    return target < patternPlayerCount_
+        && scheduleChange(
+            ScheduledChangeType::patternPlayerMute,
+            target,
+            static_cast<std::uint16_t>(muted ? 1 : 0),
+            barsFromNow);
+}
+
 bool RuntimeGraph::schedulePatternSelection(
     PatternPlayerId player,
     PatternId pattern,
@@ -389,6 +426,17 @@ std::optional<bool> RuntimeGraph::scheduledVoiceMute(
     return change ? std::optional<bool> {change->value != 0} : std::nullopt;
 }
 
+std::optional<bool> RuntimeGraph::scheduledPatternPlayerMute(
+    PatternPlayerId player) const noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    if (target >= patternPlayerCount_)
+        return std::nullopt;
+    const auto change = nextScheduledChange(
+        ScheduledChangeType::patternPlayerMute, target);
+    return change ? std::optional<bool> {change->value != 0} : std::nullopt;
+}
+
 std::optional<PatternId> RuntimeGraph::scheduledPatternSelection(
     PatternPlayerId player) const noexcept
 {
@@ -412,6 +460,16 @@ std::size_t RuntimeGraph::scheduledVoiceMuteBarsRemaining(
     return change ? change->barsRemaining : 0;
 }
 
+std::size_t RuntimeGraph::scheduledPatternPlayerMuteBarsRemaining(
+    PatternPlayerId player) const noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    const auto change = target < patternPlayerCount_
+        ? nextScheduledChange(ScheduledChangeType::patternPlayerMute, target)
+        : std::nullopt;
+    return change ? change->barsRemaining : 0;
+}
+
 bool RuntimeGraph::voiceMuteScheduledAtBarOffset(
     VoiceId voice,
     bool muted,
@@ -431,6 +489,35 @@ bool RuntimeGraph::voiceMuteScheduledAtBarOffset(
             continue;
         const auto change = decodeScheduledChange(encoded);
         if (change.type == ScheduledChangeType::voiceMute
+            && change.targetIndex == target
+            && change.barsRemaining == barsFromNow
+            && (change.value != 0) == muted)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RuntimeGraph::patternPlayerMuteScheduledAtBarOffset(
+    PatternPlayerId player,
+    bool muted,
+    std::size_t barsFromNow) const noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    if (target >= patternPlayerCount_ || barsFromNow == 0
+        || barsFromNow > maximumScheduledBars)
+    {
+        return false;
+    }
+
+    for (const auto& slot : scheduledChanges_)
+    {
+        const auto encoded = slot.load(std::memory_order_acquire);
+        if (!scheduledChangeActive(encoded))
+            continue;
+        const auto change = decodeScheduledChange(encoded);
+        if (change.type == ScheduledChangeType::patternPlayerMute
             && change.targetIndex == target
             && change.barsRemaining == barsFromNow
             && (change.value != 0) == muted)
@@ -651,8 +738,6 @@ GraphValidationError RuntimeGraph::validate(
             if (other.source == binding.source
                 && other.destination == binding.destination)
                 return GraphValidationError::duplicateBinding;
-            if (other.destination == binding.destination)
-                return GraphValidationError::multipleTriggerSources;
         }
     }
 
@@ -660,8 +745,26 @@ GraphValidationError RuntimeGraph::validate(
     {
         const auto& binding = candidate.parameterBindings[index];
         const auto* voice = find(binding.voice);
+        const auto* parameter = voice != nullptr
+            ? voice->parameter(binding.parameter) : nullptr;
+        bool scopeTargetsVoice = !binding.triggerScope.isValid();
+        for (std::size_t triggerIndex = 0;
+             !scopeTargetsVoice
+                && triggerIndex < candidate.triggerBindingCount;
+             ++triggerIndex)
+        {
+            const auto& trigger = candidate.triggerBindings[triggerIndex];
+            scopeTargetsVoice = trigger.source == binding.triggerScope
+                && trigger.destination == binding.voice;
+        }
         if (!binding.id.isValid() || find(binding.source) == nullptr
-            || voice == nullptr || voice->parameter(binding.parameter) == nullptr)
+            || voice == nullptr || parameter == nullptr
+            || (binding.triggerScope.isValid()
+                && find(binding.triggerScope) == nullptr)
+            || !scopeTargetsVoice
+            || (parameter != nullptr
+                && parameter->behavior == VoiceParameterBehavior::continuous
+                && binding.triggerScope.isValid()))
             return GraphValidationError::missingNode;
         for (std::size_t previous = 0; previous < index; ++previous)
         {
@@ -669,10 +772,12 @@ GraphValidationError RuntimeGraph::validate(
             if (other.id == binding.id)
                 return GraphValidationError::duplicateBindingId;
             if (other.source == binding.source && other.voice == binding.voice
-                && other.parameter == binding.parameter)
+                && other.parameter == binding.parameter
+                && other.triggerScope == binding.triggerScope)
                 return GraphValidationError::duplicateBinding;
             if (other.voice == binding.voice
-                && other.parameter == binding.parameter)
+                && other.parameter == binding.parameter
+                && other.triggerScope == binding.triggerScope)
                 return GraphValidationError::multipleParameterSources;
         }
     }
@@ -1044,7 +1149,8 @@ void RuntimeGraph::reset() noexcept
 void RuntimeGraph::resetOutputs() noexcept
 {
     for (std::size_t index = 0; index < voiceCount_; ++index)
-        audibleTriggers_[index] = {};
+        for (auto& trigger : audibleTriggers_[index])
+            trigger = {};
     for (std::size_t index = 0; index < outputEndpointCount_; ++index)
     {
         outputEndpoints_[index].eventCount = 0;
@@ -1064,6 +1170,23 @@ bool RuntimeGraph::voiceMuted(VoiceId voice) const noexcept
     const auto index = voiceIndex(voice);
     return index < voiceCount_
         && voiceMuted_[index].load(std::memory_order_relaxed);
+}
+
+void RuntimeGraph::setPatternPlayerMuted(
+    PatternPlayerId player,
+    bool muted) noexcept
+{
+    const auto index = patternPlayerIndex(player);
+    if (index < patternPlayerCount_)
+        patternPlayerMuted_[index].store(muted, std::memory_order_relaxed);
+}
+
+bool RuntimeGraph::patternPlayerMuted(
+    PatternPlayerId player) const noexcept
+{
+    const auto index = patternPlayerIndex(player);
+    return index < patternPlayerCount_
+        && patternPlayerMuted_[index].load(std::memory_order_relaxed);
 }
 
 void RuntimeGraph::setSuppression(
@@ -1145,6 +1268,64 @@ void RuntimeGraph::appendPlayerRemainder(
     (void) appendSignals(generated);
 }
 
+void RuntimeGraph::applyArmedCommands(const PlayerSignal& source) noexcept
+{
+    const auto sourcePort = source.type == PlayerSignalType::patternHit
+        ? std::optional<ControlSourcePort> {ControlSourcePort::hit}
+        : source.type == PlayerSignalType::patternCycleBoundary
+            ? std::optional<ControlSourcePort> {
+                ControlSourcePort::cycleBoundary}
+            : std::nullopt;
+    if (!sourcePort)
+        return;
+
+    for (std::size_t group = 0;
+         group < armedCommandPending_.size();
+         ++group)
+    {
+        bool sourceMatches = false;
+        for (std::size_t commandIndex = 0;
+             commandIndex < armedCommandCount_;
+             ++commandIndex)
+        {
+            const auto& armed = armedCommands_[commandIndex];
+            if (armed.configured && armed.group == group
+                && armed.source.player == source.patternPlayerId
+                && armed.source.port == *sourcePort)
+            {
+                sourceMatches = true;
+                break;
+            }
+        }
+        if (!sourceMatches
+            || !armedCommandPending_[group].exchange(
+                false, std::memory_order_acq_rel))
+        {
+            continue;
+        }
+
+        for (std::size_t commandIndex = 0;
+             commandIndex < armedCommandCount_;
+             ++commandIndex)
+        {
+            const auto& armed = armedCommands_[commandIndex];
+            if (!armed.configured || armed.group != group)
+                continue;
+            auto* destination = find(armed.destination);
+            if (destination == nullptr)
+                continue;
+            const auto oldWorkSize = workSize_;
+            PlayerSignalBuffer generated;
+            destination->command(
+                armed.command, source.ppqPosition, generated);
+            invalidatePlayerSignalsFrom(
+                armed.destination, source.ppqPosition, oldWorkSize);
+            (void) appendSignals(generated);
+            appendPlayerRemainder(*destination, source.ppqPosition);
+        }
+    }
+}
+
 void RuntimeGraph::applyScheduledBarBoundary(
     const PlayerSignal& boundary) noexcept
 {
@@ -1215,6 +1396,16 @@ void RuntimeGraph::applyScheduledBarBoundary(
     for (std::size_t index = 0; index < dueCount; ++index)
     {
         const auto& change = due[index];
+        if (change.type == ScheduledChangeType::patternPlayerMute)
+        {
+            if (change.targetIndex < patternPlayerCount_)
+            {
+                patternPlayerMuted_[change.targetIndex].store(
+                    change.value != 0, std::memory_order_relaxed);
+            }
+            continue;
+        }
+
         if (change.type == ScheduledChangeType::voiceMute)
         {
             if (change.targetIndex < voiceCount_)
@@ -1259,9 +1450,12 @@ bool RuntimeGraph::triggerEligible(
 {
     if (event.type == SemanticEventType::triggerStart)
     {
-        bool eligible = !voiceMuted_[sourceVoiceIndex].load(
-            std::memory_order_relaxed);
         const auto suppressed = patternPlayerIndex(triggerSource);
+        bool eligible = !voiceMuted_[sourceVoiceIndex].load(
+            std::memory_order_relaxed)
+            && suppressed < patternPlayerCount_
+            && !patternPlayerMuted_[suppressed].load(
+                std::memory_order_relaxed);
         for (std::size_t suppressor = 0;
              eligible && suppressed < patternPlayerCount_
                 && suppressor < patternPlayerCount_;
@@ -1277,20 +1471,29 @@ bool RuntimeGraph::triggerEligible(
                 eligible = false;
             }
         }
-        audibleTriggers_[sourceVoiceIndex] = {
-            event.triggerId, eligible, true};
-        return eligible;
+        for (auto& trigger : audibleTriggers_[sourceVoiceIndex])
+        {
+            if (!trigger.active)
+            {
+                trigger = {event.triggerId, eligible, true};
+                return eligible;
+            }
+        }
+        return false;
     }
 
     if (event.type == SemanticEventType::triggerEnd)
     {
-        auto& trigger = audibleTriggers_[sourceVoiceIndex];
-        const bool eligible = trigger.active
-            && trigger.id == event.triggerId
-            && trigger.eligible;
-        if (trigger.active && trigger.id == event.triggerId)
-            trigger = {};
-        return eligible;
+        for (auto& trigger : audibleTriggers_[sourceVoiceIndex])
+        {
+            if (trigger.active && trigger.id == event.triggerId)
+            {
+                const bool eligible = trigger.eligible;
+                trigger = {};
+                return eligible;
+            }
+        }
+        return false;
     }
 
     return true;
@@ -1331,6 +1534,10 @@ void RuntimeGraph::resolveTimestamp(
 
             if (item.signal.type == PlayerSignalType::patternHit)
             {
+                // A hit-armed reset must publish step zero before the same
+                // hit would normally advance the destination. The player
+                // suppresses that duplicate same-timestamp advance.
+                applyArmedCommands(item.signal);
                 for (std::size_t player = 0; player < patternPlayerCount_; ++player)
                 {
                     PlayerSignalBuffer generated;
@@ -1373,49 +1580,7 @@ void RuntimeGraph::resolveTimestamp(
                     (void) modulationPlayers_[player]
                         ->observeCycleBoundary(item.signal);
                 }
-                for (std::size_t group = 0;
-                     group < armedCyclePending_.size();
-                     ++group)
-                {
-                    bool sourceMatches = false;
-                    for (std::size_t commandIndex = 0;
-                         commandIndex < armedCycleCommandCount_;
-                         ++commandIndex)
-                    {
-                        const auto& armed =
-                            armedCycleCommands_[commandIndex];
-                        if (armed.configured && armed.group == group
-                            && armed.source == item.signal.patternPlayerId)
-                        {
-                            sourceMatches = true;
-                            break;
-                        }
-                    }
-                    if (!sourceMatches
-                        || !armedCyclePending_[group].exchange(
-                            false, std::memory_order_acq_rel))
-                        continue;
-
-                    for (std::size_t commandIndex = 0;
-                         commandIndex < armedCycleCommandCount_;
-                         ++commandIndex)
-                    {
-                        const auto& armed =
-                            armedCycleCommands_[commandIndex];
-                        if (!armed.configured || armed.group != group)
-                            continue;
-                        auto* destination = find(armed.destination);
-                        if (destination == nullptr)
-                            continue;
-                        const auto oldWorkSize = workSize_;
-                        PlayerSignalBuffer generated;
-                        destination->command(armed.command, ppq, generated);
-                        invalidatePlayerSignalsFrom(
-                            armed.destination, ppq, oldWorkSize);
-                        (void) appendSignals(generated);
-                        appendPlayerRemainder(*destination, ppq);
-                    }
-                }
+                applyArmedCommands(item.signal);
             }
 
             for (std::size_t bindingIndex = 0;
@@ -1461,7 +1626,8 @@ void RuntimeGraph::resolveTimestamp(
         for (std::size_t signalIndex = 0; signalIndex < workSize_; ++signalIndex)
         {
             auto& item = work_[signalIndex];
-            if (item.signal.ppqPosition != ppq
+            if (item.resolved
+                || item.signal.ppqPosition != ppq
                 || item.signal.type != PlayerSignalType::modulationValue
                 || item.signal.modulationPlayerId != binding.source)
                 continue;
@@ -1469,7 +1635,8 @@ void RuntimeGraph::resolveTimestamp(
             if (auto* voice = find(binding.voice))
             {
                 (void) voice->applyParameterValue(
-                    binding.parameter, item.signal, events);
+                    binding.parameter, item.signal, events,
+                    binding.triggerScope);
                 appendVoiceEvents(*voice, {}, events, output);
             }
         }
@@ -1483,7 +1650,8 @@ void RuntimeGraph::resolveTimestamp(
         for (std::size_t signalIndex = 0; signalIndex < workSize_; ++signalIndex)
         {
             auto& item = work_[signalIndex];
-            if (item.signal.ppqPosition != ppq
+            if (item.resolved
+                || item.signal.ppqPosition != ppq
                 || item.signal.type != PlayerSignalType::patternHit
                 || item.signal.patternPlayerId != binding.source)
                 continue;

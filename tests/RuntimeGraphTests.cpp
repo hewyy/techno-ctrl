@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 
 namespace
 {
@@ -140,7 +141,7 @@ void testRenderClampsFinalHalfSampleEventToLastFrame()
     CHECK(renderer.captured[0].frameOffset == sampleCount - 1);
 }
 
-void testValidationRejectsPhaseOneMultipleSources()
+void testValidationRejectsCollidingUnscopedParameterSources()
 {
     lps::PatternLibrary patterns;
     lps::ModulationLibrary modulations;
@@ -161,6 +162,160 @@ void testValidationRejectsPhaseOneMultipleSources()
     CHECK(config.add({{1}, {2}, {1}, pitchId}));
     CHECK(graph.validate(config)
         == lps::GraphValidationError::multipleParameterSources);
+}
+
+void testMultiplePatternPlayersShareVoiceWithScopedPitchAndSuppression()
+{
+    lps::PatternLibrary patterns;
+    lps::ModulationLibrary modulations;
+    lps::PatternPlayer firstPattern(patterns);
+    lps::PatternPlayer secondPattern(patterns);
+    firstPattern.setRuntimeId(1);
+    secondPattern.setRuntimeId(2);
+
+    std::array<std::unique_ptr<lps::ModulationPlayer>, 6> modPlayers;
+    for (std::size_t index = 0; index < modPlayers.size(); ++index)
+    {
+        modPlayers[index] = std::make_unique<lps::ModulationPlayer>(
+            modulations,
+            lps::ModulationPlayerId {static_cast<std::uint32_t>(index + 1)});
+        const auto source = index < 3
+            ? lps::PatternPlayerId {1} : lps::PatternPlayerId {2};
+        modPlayers[index]->setAdvanceSource(lps::PatternHitAdvance {source});
+    }
+    modPlayers[0]->setValue(
+        0, lps::NormalizedValue::fromFloat(36.0f / 127.0f));
+    modPlayers[3]->setValue(
+        0, lps::NormalizedValue::fromFloat(72.0f / 127.0f));
+    for (const auto index : {1u, 4u})
+        modPlayers[index]->setValue(0, lps::NormalizedValue::fromFloat(1.0f));
+    for (const auto index : {2u, 5u})
+        modPlayers[index]->setValue(0, lps::NormalizedValue::fromFloat(0.5f));
+
+    lps::Voice voice(lps::VoiceId {1});
+    CHECK(voice.addParameter(lps::VoiceParameterDescriptor::pitch(pitchId)));
+    CHECK(voice.addParameter(
+        lps::VoiceParameterDescriptor::intensity(intensityId)));
+    CHECK(voice.addParameter(lps::VoiceParameterDescriptor::gate(gateId)));
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(firstPattern));
+    CHECK(graph.registerPatternPlayer(secondPattern));
+    for (auto& player : modPlayers)
+        CHECK(graph.registerModulationPlayer(*player));
+    CHECK(graph.registerVoice(voice));
+
+    lps::RuntimeGraphConfig config;
+    CHECK(config.add(lps::TriggerBinding {{0}, {1}, {1}}));
+    CHECK(config.add(lps::TriggerBinding {{1}, {2}, {1}}));
+    constexpr std::array parameters {
+        pitchId, intensityId, gateId, pitchId, intensityId, gateId
+    };
+    for (std::size_t index = 0; index < modPlayers.size(); ++index)
+    {
+        const auto scope = index < 3
+            ? lps::PatternPlayerId {1} : lps::PatternPlayerId {2};
+        CHECK(config.add(lps::ParameterBinding {
+            lps::ParameterBindingId {static_cast<std::uint32_t>(index)},
+            lps::ModulationPlayerId {static_cast<std::uint32_t>(index + 1)},
+            {1},
+            parameters[index],
+            scope}));
+    }
+    CHECK(graph.validate(config) == lps::GraphValidationError::none);
+    CHECK(graph.activate(config));
+    graph.setSuppression({1}, {2}, true);
+    graph.prepare({48'000.0, 12'000});
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.25, 120.0, 48'000.0, 12'000, true, true}, output));
+    bool foundFirst = false;
+    bool foundSecond = false;
+    for (const auto& resolved : output)
+    {
+        if (resolved.event.type != lps::SemanticEventType::triggerStart)
+            continue;
+        if (resolved.triggerSource == lps::PatternPlayerId {1})
+        {
+            foundFirst = true;
+            CHECK(resolved.eligible);
+            CHECK(std::abs(
+                resolved.event.musicalPitchSemitones - 36.0f) < 0.01f);
+        }
+        if (resolved.triggerSource == lps::PatternPlayerId {2})
+        {
+            foundSecond = true;
+            CHECK(!resolved.eligible);
+            CHECK(std::abs(
+                resolved.event.musicalPitchSemitones - 72.0f) < 0.01f);
+        }
+    }
+    CHECK(foundFirst);
+    CHECK(foundSecond);
+
+    graph.setSuppression({1}, {2}, false);
+    graph.setPatternPlayerMuted({1}, true);
+    CHECK(graph.patternPlayerMuted({1}));
+    CHECK(!graph.patternPlayerMuted({2}));
+    CHECK(!graph.voiceMuted({1}));
+    CHECK(graph.process(
+        {1.0, 1.25, 120.0, 48'000.0, 12'000, true, true}, output));
+    foundFirst = false;
+    foundSecond = false;
+    for (const auto& resolved : output)
+    {
+        if (resolved.event.type != lps::SemanticEventType::triggerStart)
+            continue;
+        if (resolved.triggerSource == lps::PatternPlayerId {1})
+        {
+            foundFirst = true;
+            CHECK(!resolved.eligible);
+        }
+        if (resolved.triggerSource == lps::PatternPlayerId {2})
+        {
+            foundSecond = true;
+            CHECK(resolved.eligible);
+        }
+    }
+    CHECK(foundFirst);
+    CHECK(foundSecond);
+}
+
+void testPatternPlayerMuteSchedulerKeepsSharedVoiceIndependent()
+{
+    lps::PatternLibrary patterns;
+    lps::PatternPlayer first(patterns);
+    lps::PatternPlayer second(patterns);
+    first.setRuntimeId(0);
+    second.setRuntimeId(1);
+    lps::Voice sharedVoice(lps::VoiceId {0});
+
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(first));
+    CHECK(graph.registerPatternPlayer(second));
+    CHECK(graph.registerVoice(sharedVoice));
+    CHECK(graph.activate({}));
+    CHECK(graph.configureBarClock({0}));
+    graph.prepare({48'000.0, 24'000});
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.5, 120.0, 48'000.0, 24'000, true, true}, output));
+    CHECK(!graph.schedulePatternPlayerMute({0}, true, 0));
+    CHECK(graph.schedulePatternPlayerMute({0}, true, 1));
+    CHECK(graph.scheduledPatternPlayerMute({0})
+        == std::optional<bool> {true});
+    CHECK(!graph.scheduledPatternPlayerMute({1}).has_value());
+    CHECK(graph.scheduledPatternPlayerMuteBarsRemaining({0}) == 1);
+    CHECK(graph.patternPlayerMuteScheduledAtBarOffset({0}, true, 1));
+    CHECK(!graph.patternPlayerMuteScheduledAtBarOffset({1}, true, 1));
+
+    CHECK(graph.process(
+        {0.5, 1.1, 120.0, 48'000.0, 28'800, true, false}, output));
+    CHECK(graph.patternPlayerMuted({0}));
+    CHECK(!graph.patternPlayerMuted({1}));
+    CHECK(!graph.voiceMuted({0}));
+    CHECK(!graph.scheduledPatternPlayerMute({0}).has_value());
 }
 
 void testArmedResetRestartsPatternAndModulationAtMasterRestBoundary()
@@ -208,6 +363,101 @@ void testArmedResetRestartsPatternAndModulationAtMasterRestBoundary()
     CHECK(!graph.cycleCommandPending(1));
     CHECK(follower.patternPlaybackSnapshot().currentStep == 0);
     CHECK(modulation.status().currentStep == 0);
+}
+
+void testArmedHitResetUsesFirstValueOnTheTriggeringHit()
+{
+    lps::PatternLibrary patterns;
+    lps::ModulationLibrary modulations;
+    lps::PatternPlayer source(patterns);
+    source.setRuntimeId(1);
+    source.selectPattern(lps::PatternId {2});
+
+    lps::ModulationPlayer modulation(
+        modulations, lps::ModulationPlayerId {3});
+    modulation.selectModulation(lps::ModulationId {2});
+
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(source));
+    CHECK(graph.registerModulationPlayer(modulation));
+
+    lps::RuntimeGraphConfig config;
+    CHECK(config.addPlayerConfig(lps::ModulationPlayerRuntimeConfig {
+        {3}, lps::PatternHitAdvance {{1}},
+        lps::PlayMode::continuous, true}));
+    CHECK(graph.activate(config));
+    CHECK(graph.configureArmedCommand(
+        20,
+        {{1}, lps::ControlSourcePort::hit},
+        lps::PlayerRef::modulation({3}),
+        lps::PlayerCommand::resetAndPlay));
+    graph.prepare({48'000.0, 36'000});
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.75, 120.0, 48'000.0, 36'000, true, true}, output));
+    CHECK(modulation.status().currentStep == 2);
+    CHECK(graph.armCommand(20));
+    CHECK(graph.commandPending(20));
+
+    CHECK(graph.process(
+        {0.75, 1.0, 120.0, 48'000.0, 12'000, true, false}, output));
+    CHECK(!graph.commandPending(20));
+    CHECK(modulation.status().currentStep == 0);
+}
+
+void testArmedClockResetUsesMasterCycleBoundaryWithoutAHit()
+{
+    lps::PatternLibrary patterns;
+    lps::ModulationLibrary modulations;
+    lps::PatternPlayer master(patterns);
+    master.setRuntimeId(0);
+    master.toggleStep(0); // The master loop now contains no hits.
+    master.setPlaybackWindow(0, 2);
+
+    lps::ModulationPlayer modulation(
+        modulations, lps::ModulationPlayerId {3});
+    modulation.selectModulation(lps::ModulationId {2});
+    constexpr lps::VoiceParameterId controlId {9};
+    lps::Voice voice(lps::VoiceId {4});
+    lps::VoiceParameterDescriptor control;
+    control.id = controlId;
+    control.role = lps::VoiceParameterRole::continuousControl;
+    control.behavior = lps::VoiceParameterBehavior::continuous;
+    CHECK(voice.addParameter(control));
+
+    lps::RuntimeGraph graph;
+    CHECK(graph.registerPatternPlayer(master));
+    CHECK(graph.registerModulationPlayer(modulation));
+    CHECK(graph.registerVoice(voice));
+
+    lps::RuntimeGraphConfig config;
+    CHECK(config.addPlayerConfig(lps::ModulationPlayerRuntimeConfig {
+        {3}, lps::ClockAdvance {0.25},
+        lps::PlayMode::continuous, false}));
+    CHECK(config.add(lps::ParameterBinding {
+        {9}, {3}, {4}, controlId, {}}));
+    CHECK(graph.activate(config));
+    CHECK(graph.configureArmedCommand(
+        21,
+        {{0}, lps::ControlSourcePort::cycleBoundary},
+        lps::PlayerRef::modulation({3}),
+        lps::PlayerCommand::resetAndPlay));
+    graph.prepare({48'000.0, 36'000});
+
+    lps::ResolvedVoiceEventBuffer output;
+    CHECK(graph.process(
+        {0.0, 0.75, 120.0, 48'000.0, 36'000, true, true}, output));
+    CHECK(modulation.status().currentStep == 2);
+    CHECK(graph.armCommand(21));
+
+    CHECK(graph.process(
+        {0.75, 1.0, 120.0, 48'000.0, 12'000, true, false}, output));
+    CHECK(!graph.commandPending(21));
+    CHECK(modulation.status().currentStep == 0);
+    CHECK(output.size() == 1);
+    CHECK(std::abs(output[0].event.ppqPosition - 0.75) < 1.0e-12);
+    CHECK(std::abs(output[0].event.normalizedValue - 1.0f) < 0.001f);
 }
 
 void testBarSchedulerDefersMuteToMasterCycleAndBoundsTheHorizon()
@@ -460,11 +710,15 @@ int main()
     testNewModulationValuesAreSampledBeforeHit();
     testRenderClampsFinalHalfSampleEventToLastFrame();
     testArmedResetRestartsPatternAndModulationAtMasterRestBoundary();
+    testArmedHitResetUsesFirstValueOnTheTriggeringHit();
+    testArmedClockResetUsesMasterCycleBoundaryWithoutAHit();
     testBarSchedulerDefersMuteToMasterCycleAndBoundsTheHorizon();
     testBarSchedulerDoesNotApplyAtStartOfFirstBar();
     testBarSchedulerSupportsIndependentFutureChanges();
     testScheduledMasterPatternChangeCountsOneBoundary();
-    testValidationRejectsPhaseOneMultipleSources();
+    testPatternPlayerMuteSchedulerKeepsSharedVoiceIndependent();
+    testValidationRejectsCollidingUnscopedParameterSources();
+    testMultiplePatternPlayersShareVoiceWithScopedPitchAndSuppression();
     testValidationRejectsControlCycles();
     testActivationKeepsOldGraphOnRejection();
     testPublishedGraphIsAdoptedAtBlockBoundary();

@@ -74,7 +74,9 @@ struct VoiceDiagnostics
 class Voice
 {
 public:
-    static constexpr std::size_t maximumParameterCount = 16;
+    static constexpr std::size_t maximumParameterCount = 32;
+    static constexpr std::size_t maximumScopedSourceCount = 16;
+    static constexpr std::size_t maximumActiveTriggerCount = 16;
 
     explicit Voice(VoiceId id = {}) noexcept : id_(id) {}
 
@@ -93,7 +95,8 @@ public:
     [[nodiscard]] bool applyParameterValue(
         VoiceParameterId destination,
         const PlayerSignal& value,
-        SequencerEventBuffer& output) noexcept;
+        SequencerEventBuffer& output,
+        PatternPlayerId triggerScope = {}) noexcept;
     [[nodiscard]] bool trigger(
         const PlayerSignal& hit,
         double minimumPositiveGatePpq,
@@ -104,32 +107,53 @@ public:
         SequencerEventBuffer& output) noexcept;
     void reset() noexcept;
 
-    [[nodiscard]] bool active() const noexcept { return active_; }
+    [[nodiscard]] bool active() const noexcept;
     [[nodiscard]] VoiceDiagnostics diagnostics() const noexcept;
 
 private:
-    struct ParameterState
+    struct ParameterValue
     {
-        VoiceParameterDescriptor descriptor;
+        PatternPlayerId triggerSource;
         NormalizedValue normalized;
         float mapped = 0.0f;
         bool valid = false;
     };
 
+    struct ParameterState
+    {
+        VoiceParameterDescriptor descriptor;
+        ParameterValue voiceWide;
+        std::array<ParameterValue, maximumScopedSourceCount> scoped {};
+    };
+
+    struct ActiveTrigger
+    {
+        PatternPlayerId source;
+        TriggerId id;
+        double endPpq = 0.0;
+        bool active = false;
+    };
+
     [[nodiscard]] ParameterState* findParameter(VoiceParameterId id) noexcept;
     [[nodiscard]] const ParameterState* findRole(
         VoiceParameterRole role) const noexcept;
-    [[nodiscard]] bool requiredParametersAreValid() const noexcept;
-    void endActive(double ppqPosition, SequencerEventBuffer& output) noexcept;
+    [[nodiscard]] static ParameterValue* valueFor(
+        ParameterState& state, PatternPlayerId triggerSource) noexcept;
+    [[nodiscard]] static const ParameterValue* valueFor(
+        const ParameterState& state, PatternPlayerId triggerSource) noexcept;
+    [[nodiscard]] bool requiredParametersAreValid(
+        PatternPlayerId triggerSource) const noexcept;
+    void endActive(
+        ActiveTrigger& trigger,
+        double ppqPosition,
+        SequencerEventBuffer& output) noexcept;
     static void incrementBounded(std::atomic<std::uint32_t>& value) noexcept;
 
     VoiceId id_;
     std::array<ParameterState, maximumParameterCount> parameters_ {};
     std::size_t parameterCount_ = 0;
     std::uint32_t nextTriggerSequence_ = 1;
-    TriggerId activeTriggerId_;
-    double activeEndPpq_ = 0.0;
-    bool active_ = false;
+    std::array<ActiveTrigger, maximumActiveTriggerCount> activeTriggers_ {};
     std::atomic<std::uint32_t> droppedMissingRequired_ {0};
     std::atomic<std::uint32_t> droppedInvalidTrigger_ {0};
     std::atomic<std::uint32_t> eventOverflowCount_ {0};

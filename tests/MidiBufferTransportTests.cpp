@@ -167,6 +167,28 @@ void testRenderReportsMissingDestination()
     lps::MidiBufferRenderer transport;
     CHECK(!transport.renderBlock({}, {}));
 }
+
+void testContinuousControlRoutesRenderMidiCc()
+{
+    lps::MidiBufferRenderer renderer {13};
+    CHECK(renderer.configureControlRoute({42}, 44));
+    juce::MidiBuffer midi;
+    renderer.setMidiBuffer(midi);
+
+    lps::RoutedEvent routed;
+    routed.routeId = {42};
+    routed.frameOffset = 17;
+    routed.event = lps::SequencerEvent::voiceControlPoint(
+        0.0, lps::VoiceParameterId {3}, 91.2f);
+    CHECK(renderer.renderBlock({}, {&routed, 1}));
+    CHECK(midi.getNumEvents() == 1);
+    const auto metadata = *midi.begin();
+    CHECK(metadata.samplePosition == 17);
+    CHECK(metadata.getMessage().isController());
+    CHECK(metadata.getMessage().getChannel() == 13);
+    CHECK(metadata.getMessage().getControllerNumber() == 44);
+    CHECK(metadata.getMessage().getControllerValue() == 91);
+}
 }
 
 int main()
@@ -176,6 +198,7 @@ int main()
     testResetOutputsSendsMidiPanicAtBlockStart();
     testTriggerEndUsesThePitchRememberedForItsStart();
     testRenderReportsMissingDestination();
+    testContinuousControlRoutesRenderMidiCc();
     std::cout << "All MIDI buffer transport tests passed.\n";
     return 0;
 }

@@ -54,8 +54,11 @@ is deliberately unknown to it.
 `Voice` owns fixed parameter descriptors and current parameter values. A
 descriptor supplies the role, sampled or continuous behavior, normalized
 mapping, interpolation policy, and required-for-trigger flag. The built-in
-composition uses Pitch, Intensity, and Gate descriptors. A voice samples all
-three on a hit, creates a voice-scoped trigger ID, and owns the matching end.
+composition uses Pitch, Intensity, and Gate descriptors plus device-specific
+continuous controls. Sampled values may be scoped to a PatternPlayer, allowing
+several rhythm/pitch pairs to share one Voice without overwriting one another.
+A voice samples the triggering player's scoped values on a hit, creates a
+voice-scoped trigger ID, and owns the matching end.
 
 ## Signals and events
 
@@ -84,18 +87,20 @@ order. There is no player-level fixed-pitch fallback.
 
 - PatternPlayer and ModulationPlayer runtime configurations;
 - `CommandBinding` from a Pattern hit or cycle port to a player command;
-- `ParameterBinding` from a ModulationPlayer to a Voice parameter;
+- `ParameterBinding` from a ModulationPlayer to a Voice parameter, optionally
+  scoped to the PatternPlayer whose trigger consumes the sampled value;
 - `TriggerBinding` from a PatternPlayer to a Voice;
 - `OutputBinding` from a Voice trigger or continuous parameter to a registered
   output endpoint and Route ID.
 
-Phase one permits one trigger source per Voice and one modulation source per
-Voice parameter. Fan-out is allowed, including one Voice routed to MIDI and CV
-at the same time.
+Several PatternPlayers may trigger one Voice. A sampled Voice parameter may
+have one modulation source per distinct PatternPlayer scope; continuous
+parameters remain Voice-wide. Fan-out is allowed, including one Voice routed to
+MIDI and CV at the same time.
 
 Validation rejects missing or wrongly typed nodes, invalid endpoints or routes,
 duplicate IDs and equivalent bindings, self edges, directed control cycles,
-unsupported continuous outputs, phase-one multiple sources, and capacity
+unsupported continuous outputs, colliding parameter sources, and capacity
 overflow. Rejection leaves the published graph unchanged.
 
 ## Same-timestamp scheduling
@@ -103,7 +108,7 @@ overflow. Rejection leaves the published graph unchanged.
 `RuntimeGraph::process()` uses fixed work storage and iterative propagation.
 For one timestamp it:
 
-1. propagates player advances, external-cycle transitions, armed cycle
+1. propagates player advances, external-cycle transitions, armed source
    commands, and permanent command bindings;
 2. evaluates immediate player output and bounded cascades;
 3. invalidates and regenerates precomputed future player signals when a command
@@ -118,9 +123,8 @@ have explicit capacities. Overflow is reported as failure so the wrapper can
 reset logical and physical state.
 
 `ResetAndPlay` evaluates step zero at its command timestamp. An ordinary
-same-timestamp advance is consumed. The plugin's reset-to-master action is an
-armed one-shot command fired by the next master cycle boundary, not a permanent
-master special case.
+same-timestamp advance is consumed. Armed one-shot commands may fire from a
+pattern hit or cycle boundary; they are not permanent source special cases.
 
 ## Voice trigger lifetime
 
@@ -131,10 +135,11 @@ zero produces no audible resolved trigger. A positive gate ends at:
 hit PPQ + gate ratio * triggering PatternPlayer nominal step duration
 ```
 
-The minimum positive gate is one sample in PPQ. Voices are monophonic in phase
-one: an old end is emitted before a replacement start at the same timestamp.
-Renderers remember the concrete output state using Voice, Route, and Trigger
-identity, so a note-off releases the note selected by its matching start.
+The minimum positive gate is one sample in PPQ. A Voice keeps one active trigger
+lifetime per PatternPlayer: a new hit retriggers that player's prior note while
+different players can overlap. Renderers remember the concrete output state
+using Voice, Route, and Trigger identity, so a note-off releases the note
+selected by its matching start.
 
 ## Output policy and rendering
 
@@ -143,10 +148,14 @@ still advance modulation, fire commands, reach Voices, and preserve phase.
 Only audible trigger bindings are withheld; continuous controls remain
 routable. Eligibility is remembered for the trigger lifetime, so a withheld
 start never produces an unmatched MIDI note-off or CV gate release.
+Suppression edges are stored between PatternPlayer IDs. Voice-level editing is
+a UI convenience that expands a relationship to every source/target player pair
+owned by those Voices.
 
 `MidiBufferRenderer` combines resolved pitch and intensity. Pitch is rounded and
 clamped to MIDI note 0 through 127. A concrete note-on velocity is clamped to 1
-through 127 so semantic intensity zero cannot become MIDI note-off.
+through 127 so semantic intensity zero cannot become MIDI note-off. Configured
+continuous routes render Voice control points as 7-bit MIDI CC messages.
 
 `CvBufferRenderer` owns validated gate, pitch, and control channels for each
 Route ID. Gate and pitch follow resolved Voice triggers; continuous controls can
@@ -168,13 +177,27 @@ Registry changes still require stopping and reconstructing the processor.
 
 ## Default plug-in composition
 
-The plug-in constructs ten fixed drum rows and no Pulse row. Every row owns:
+The plug-in constructs ten drum players, one Synth 1 player, and three Synth 2
+players. Each pattern player owns:
 
 - one clock-driven PatternPlayer;
-- one Voice;
 - hit-driven Pitch, Velocity-destination, and Gate ModulationPlayers;
 - three parameter bindings and one trigger binding;
-- MIDI and CV trigger output bindings.
+
+The three Synth 2 players share one Voice and MIDI destination. Their sampled
+bindings are scoped by PatternPlayer. Sixteen additional generic modulation
+players target the Volca Keys CC parameters and can advance from an associated
+pattern hit or independently from the 1/16-note clock.
+
+The focused Synth 2 page uses the same persistent Pattern and Modulation
+libraries as the All Voices page. Its selection menus render previews, expose
+save actions for edited drafts, and its rhythm grids expose draggable playback
+start/end brackets. Each modulation lane has one Advance On selector containing
+Clock and the three individual Pattern hit sources. Every rhythm and modulation
+row has an independent queued reset. Rhythm rows restart at the next BD1 cycle
+boundary. A hit-driven modulation restarts with its first value on the next hit from
+its selected Pattern, while a clock-driven modulation restarts at the next BD1
+cycle boundary even when that master step is a rest.
 
 Pitch uses a reusable one-step modulation mapped to notes 36 through 45. Gate
 uses a shared reusable one-step half-gate modulation. Velocity editing targets
@@ -182,14 +205,17 @@ the generic ModulationPlayer bound to the Voice's Intensity parameter. The UI
 may call that destination “Velocity”; the underlying catalog and player remain
 generic.
 
-BD1 is the fixed cycle source for external-cycle selection and armed reset
-operations. Host start and discontinuity reset the runtime at the block start.
-Host stop resets physical outputs.
+BD1 is the fixed cycle source for external-cycle selection, rhythm resets, and
+clock-modulation resets. Hit-driven modulation resets use their selected Pattern
+as the source. Host start and discontinuity reset the runtime at the block
+start. Host stop resets physical outputs.
 
-Host state uses only `live-pattern-sequencer-graph-state` schema version 1. It
+Host state writes `live-pattern-sequencer-graph-state` schema version 2 and
+continues to read version 1. It
 persists Pattern and Modulation references and drafts plus mute and suppression
-configuration. Transient cursors, queued work, and active triggers are not
-serialized. Unsupported formats or versions are rejected.
+configuration, Synth 2 parameter lanes, advance modes, and hit-source choices.
+Transient cursors, queued work, and active triggers are not serialized.
+Unsupported formats or versions are rejected.
 
 ## Source map
 

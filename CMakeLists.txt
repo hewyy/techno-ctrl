@@ -167,3 +167,15 @@ target_compile_definitions(LivePatternSequencer
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
 )
+
+add_executable(plugin_processor_tests
+    tests/PluginProcessorTests.cpp
+)
+
+target_include_directories(plugin_processor_tests PRIVATE src)
+target_link_libraries(plugin_processor_tests
+    PRIVATE
+        LivePatternSequencer
+        juce::juce_audio_utils
+)
+add_test(NAME plugin_processor_tests COMMAND plugin_processor_tests)

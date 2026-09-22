@@ -37,7 +37,6 @@ constexpr std::array<std::uint32_t,
 };
 
 constexpr int outerPadding = 2;
-constexpr int headerHeight = 0;
 constexpr int sectionGap = 2;
 constexpr int contentHorizontalPadding = 2;
 constexpr int playerPanelHorizontalPadding = 4;
@@ -64,7 +63,7 @@ constexpr int modulationEditorPadding = 6;
 constexpr int modulationEditorHeight = modulationEditorPadding * 2
     + 3 * modulationPanelHeight;
 constexpr int preferredModulationValueWidth = 28;
-constexpr int matrixGridLeft = 64;
+constexpr int matrixGridLeft = 128;
 constexpr int matrixGridTop = 82;
 constexpr int matrixCellWidth = 32;
 constexpr int matrixCellHeight = 32;
@@ -89,6 +88,7 @@ constexpr int patternGridLeft = contentHorizontalPadding
     + controlsToGridGap;
 constexpr int modulationCellHeight = clickTargetSize;
 constexpr int modulationCellGap = 2;
+constexpr int pageTabsHeight = 36;
 
 [[nodiscard]] int patternCellSizeForContentWidth(int contentWidth) noexcept
 {
@@ -848,6 +848,1249 @@ private:
     juce::Slider slider_;
 };
 }
+
+class LivePatternSequencerEditor::SynthPageComponent final
+    : public juce::Component
+{
+public:
+    explicit SynthPageComponent(LivePatternSequencerProcessor& processor)
+        : processor_(processor)
+    {
+        setOpaque(true);
+        for (std::size_t slot = 0;
+             slot < LivePatternSequencerProcessor::synthTwoPatternCount;
+             ++slot)
+        {
+            auto row = std::make_unique<PatternRow>(
+                processor_, processor_.synthTwoPlayerIndexForUi(slot), slot);
+            addAndMakeVisible(*row);
+            patternRows_.push_back(std::move(row));
+        }
+        constexpr std::array<const char*, 6> sectionOrder {
+            "General", "VCO", "VCF", "LFO", "EG", "Delay"
+        };
+        for (const auto* sectionName : sectionOrder)
+        {
+            ModulationSection section;
+            section.name = sectionName;
+            for (std::size_t lane =
+                     LivePatternSequencerProcessor::synthTwoPatternCount;
+                 lane < processor_.synthLaneCountForUi();
+                 ++lane)
+            {
+                if (processor_.synthLaneInfoForUi(lane).section
+                    != section.name)
+                {
+                    continue;
+                }
+                auto row = std::make_unique<ModulationRow>(processor_, lane);
+                section.rows.push_back(row.get());
+                addAndMakeVisible(*row);
+                modulationRows_.push_back(std::move(row));
+            }
+            if (!section.rows.empty())
+                modulationSections_.push_back(std::move(section));
+        }
+    }
+
+    [[nodiscard]] int preferredHeight() const noexcept
+    {
+        const int fixedHeight = topPadding + titleHeight + sectionHeaderHeight
+            + static_cast<int>(patternRows_.size()) * patternRowHeight
+            + sectionGapHeight + sectionHeaderHeight;
+        std::array<int, modulationColumnCount> columnHeights {};
+        const auto sectionsPerColumn = std::max<std::size_t>(
+            1, (modulationSections_.size() + 1) / modulationColumnCount);
+        for (std::size_t index = 0;
+             index < modulationSections_.size();
+             ++index)
+        {
+            const auto column = std::min<std::size_t>(
+                index / sectionsPerColumn, modulationColumnCount - 1);
+            columnHeights[column] += modulationSectionTitleHeight
+                + static_cast<int>(modulationSections_[index].rows.size())
+                    * modulationRowHeight
+                + modulationSectionGap;
+        }
+        return fixedHeight
+            + *std::max_element(columnHeights.begin(), columnHeights.end())
+            + bottomPadding;
+    }
+
+    void refresh()
+    {
+        for (auto& row : patternRows_)
+            row->refresh();
+        for (auto& row : modulationRows_)
+            row->refresh();
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        graphics.fillAll(juce::Colour(background));
+        graphics.setColour(juce::Colour(primaryText));
+        graphics.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
+        graphics.drawText(
+            "SYNTH 2 — KORG VOLCA KEYS",
+            12,
+            topPadding,
+            getWidth() - 24,
+            titleHeight,
+            juce::Justification::centredLeft);
+
+        graphics.setColour(juce::Colour(secondaryText));
+        graphics.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        const int patternsY = topPadding + titleHeight;
+        graphics.drawText(
+            "RHYTHM PLAYERS — ALL ROUTED TO MIDI CHANNEL 13",
+            12, patternsY, getWidth() - 24, sectionHeaderHeight,
+            juce::Justification::centredLeft);
+        const int modulationY = patternsY + sectionHeaderHeight
+            + static_cast<int>(patternRows_.size()) * patternRowHeight
+            + sectionGapHeight;
+        graphics.drawText(
+            "SYNTH MODULATION — GROUPED IN TWO COLUMNS · CLOCK OR PATTERN-HIT ADVANCE",
+            12, modulationY, getWidth() - 24, sectionHeaderHeight,
+            juce::Justification::centredLeft);
+
+        constexpr int horizontalGap = 6;
+        const int availableWidth = getWidth() - 16;
+        const int columnWidth = (availableWidth - horizontalGap) / 2;
+        std::array<int, modulationColumnCount> columnY {
+            modulationY + sectionHeaderHeight,
+            modulationY + sectionHeaderHeight
+        };
+        const auto sectionsPerColumn = std::max<std::size_t>(
+            1, (modulationSections_.size() + 1) / modulationColumnCount);
+        for (std::size_t index = 0;
+             index < modulationSections_.size();
+             ++index)
+        {
+            const auto& section = modulationSections_[index];
+            const auto column = std::min<std::size_t>(
+                index / sectionsPerColumn, modulationColumnCount - 1);
+            const int sectionX = 8 + static_cast<int>(column)
+                * (columnWidth + horizontalGap);
+            graphics.setColour(juce::Colour(uiYellow));
+            graphics.setFont(juce::Font(
+                juce::FontOptions(10.5f, juce::Font::bold)));
+            graphics.drawText(
+                section.name.toUpperCase(),
+                sectionX + 4, columnY[column], columnWidth - 8,
+                modulationSectionTitleHeight,
+                juce::Justification::centredLeft);
+            columnY[column] += modulationSectionTitleHeight
+                + static_cast<int>(section.rows.size()) * modulationRowHeight
+                + modulationSectionGap;
+        }
+    }
+
+    void resized() override
+    {
+        int y = topPadding + titleHeight + sectionHeaderHeight;
+        for (auto& row : patternRows_)
+        {
+            row->setBounds(8, y, getWidth() - 16, patternRowHeight - 2);
+            y += patternRowHeight;
+        }
+        y += sectionGapHeight + sectionHeaderHeight;
+        constexpr int horizontalGap = 6;
+        const int availableWidth = getWidth() - 16;
+        const int columnWidth = (availableWidth - horizontalGap) / 2;
+        std::array<int, modulationColumnCount> columnY {y, y};
+        const auto sectionsPerColumn = std::max<std::size_t>(
+            1, (modulationSections_.size() + 1) / modulationColumnCount);
+        for (std::size_t index = 0;
+             index < modulationSections_.size();
+             ++index)
+        {
+            auto& section = modulationSections_[index];
+            const auto column = std::min<std::size_t>(
+                index / sectionsPerColumn, modulationColumnCount - 1);
+            const int sectionX = 8 + static_cast<int>(column)
+                * (columnWidth + horizontalGap);
+            columnY[column] += modulationSectionTitleHeight;
+            for (auto* row : section.rows)
+            {
+                row->setBounds(
+                    sectionX,
+                    columnY[column],
+                    columnWidth,
+                    modulationRowHeight - 2);
+                columnY[column] += modulationRowHeight;
+            }
+            columnY[column] += modulationSectionGap;
+        }
+    }
+
+private:
+    class PatternModulationLaneRow final : public juce::Component
+    {
+    public:
+        PatternModulationLaneRow(
+            LivePatternSequencerProcessor& processor,
+            std::size_t playerIndex,
+            ModulationLane lane)
+            : processor_(processor), playerIndex_(playerIndex), lane_(lane)
+        {
+            menu_.setTooltip(
+                "Choose, save, or lock this " + modulationLaneName(lane_)
+                + " modulation");
+            menu_.onClick = [this] { showMenu(); };
+            addAndMakeVisible(menu_);
+
+            shorter_.setButtonText("-");
+            longer_.setButtonText("+");
+            shorter_.setTooltip("Remove the final modulation step");
+            longer_.setTooltip("Append a modulation step");
+            shorter_.onClick = [this]
+            {
+                const auto modulation = processor_.modulationForUi(
+                    playerIndex_, lane_);
+                if (modulation.length > 1)
+                    processor_.setPlayerModulationLength(
+                        playerIndex_, lane_, modulation.length - 1);
+                refresh();
+            };
+            longer_.onClick = [this]
+            {
+                const auto modulation = processor_.modulationForUi(
+                    playerIndex_, lane_);
+                if (modulation.length < lps::Modulation::maxLength)
+                    processor_.setPlayerModulationLength(
+                        playerIndex_, lane_, modulation.length + 1);
+                refresh();
+            };
+            addAndMakeVisible(shorter_);
+            addAndMakeVisible(longer_);
+
+            for (std::size_t step = 0; step < values_.size(); ++step)
+            {
+                auto& value = values_[step];
+                value.setTooltip(
+                    modulationLaneName(lane_) + " step "
+                    + juce::String(static_cast<int>(step + 1)));
+                auto* valuePointer = &value;
+                value.onValueChange = [this, step, valuePointer]
+                {
+                    processor_.setPlayerModulationValue(
+                        playerIndex_, lane_, step,
+                        static_cast<std::uint8_t>(juce::jlimit(
+                            0, 255,
+                            juce::roundToInt(valuePointer->getValue()))));
+                };
+                addAndMakeVisible(value);
+            }
+            refresh();
+        }
+
+        void paint(juce::Graphics& graphics) override
+        {
+            graphics.setColour(juce::Colour(panel));
+            graphics.fillRoundedRectangle(getLocalBounds().toFloat(), 4.0f);
+            graphics.setColour(juce::Colour(border));
+            graphics.drawRoundedRectangle(
+                getLocalBounds().toFloat().reduced(0.5f), 4.0f, 1.0f);
+            graphics.setColour(juce::Colour(primaryText));
+            graphics.setFont(juce::Font(
+                juce::FontOptions(11.0f, juce::Font::bold)));
+            graphics.drawText(
+                modulationLaneName(lane_).toUpperCase(),
+                8, 0, labelWidth - 12, getHeight(),
+                juce::Justification::centredLeft);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(5);
+            area.removeFromLeft(labelWidth);
+            menu_.setBounds(area.removeFromLeft(42).reduced(2));
+            shorter_.setBounds(area.removeFromLeft(34).reduced(2));
+            longer_.setBounds(area.removeFromLeft(34).reduced(2));
+            area.removeFromLeft(5);
+            constexpr int gap = 1;
+            const int width = std::max(
+                12,
+                (area.getWidth()
+                    - static_cast<int>(values_.size() - 1) * gap)
+                    / static_cast<int>(values_.size()));
+            for (auto& value : values_)
+            {
+                value.setBounds(area.removeFromLeft(width));
+                area.removeFromLeft(gap);
+            }
+        }
+
+        void refresh()
+        {
+            const bool locked = processor_.playerModulationLockedForUi(
+                playerIndex_, lane_);
+            const bool modified = processor_.playerModulationModifiedForUi(
+                playerIndex_, lane_);
+            menu_.setButtonText(modified ? "M*" : "M");
+            menu_.setColour(
+                juce::TextButton::buttonColourId,
+                juce::Colour(modified ? amber : inactive));
+            menu_.setTooltip(
+                processor_.modulationNameForUi(
+                    processor_.selectedModulationForPlayer(
+                        playerIndex_, lane_))
+                + (locked ? " (locked)" : ""));
+
+            const auto modulation = processor_.modulationForUi(
+                playerIndex_, lane_);
+            const auto length = std::min<std::size_t>(
+                modulation.length, values_.size());
+            const int current = processor_.playingForUi()
+                ? processor_.currentModulationStepForUi(playerIndex_, lane_)
+                : -1;
+            for (std::size_t step = 0; step < values_.size(); ++step)
+            {
+                auto& value = values_[step];
+                const bool active = step < length;
+                value.setVisible(active);
+                value.setEnabled(active && !locked);
+                value.setActive(active && static_cast<int>(step) == current);
+                if (active && !value.isMouseButtonDown())
+                {
+                    value.setValue(
+                        modulation.values[step].raw,
+                        juce::dontSendNotification);
+                }
+            }
+            shorter_.setEnabled(!locked && length > 1);
+            longer_.setEnabled(
+                !locked && length < lps::Modulation::maxLength);
+        }
+
+    private:
+        void showMenu()
+        {
+            constexpr int saveItemId = 20000;
+            constexpr int lockItemId = 20001;
+            const bool locked = processor_.playerModulationLockedForUi(
+                playerIndex_, lane_);
+            juce::PopupMenu menu;
+            menu.addItem(
+                lockItemId,
+                locked ? "UNLOCK MODULATION" : "LOCK MODULATION",
+                true,
+                locked);
+            menu.addSeparator();
+            const auto selected = processor_.selectedModulationForPlayer(
+                playerIndex_, lane_);
+            for (std::size_t index = 0;
+                 index < processor_.modulationCountForUi();
+                 ++index)
+            {
+                const auto modulation = processor_.modulationAtForUi(index);
+                if (modulation.length <= 1)
+                    continue;
+                menu.addCustomItem(
+                    static_cast<int>(index + 1),
+                    std::make_unique<ModulationPreviewMenuItem>(
+                        modulation, index == selected, locked),
+                    nullptr,
+                    processor_.modulationNameForUi(index));
+            }
+            menu.addSeparator();
+            menu.addItem(
+                saveItemId,
+                "SAVE MODULATION",
+                !locked
+                    && processor_.playerModulationModifiedForUi(
+                        playerIndex_, lane_));
+
+            const juce::Component::SafePointer<PatternModulationLaneRow>
+                safeThis(this);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options {}.withTargetComponent(&menu_),
+                [safeThis](int result)
+                {
+                    if (safeThis == nullptr || result == 0)
+                        return;
+                    if (result == saveItemId)
+                    {
+                        const auto saved = safeThis->processor_
+                            .savePlayerModulation(
+                                safeThis->playerIndex_, safeThis->lane_);
+                        if (saved.status
+                            == LivePatternSequencerProcessor::SaveModulationStatus::failed)
+                        {
+                            juce::AlertWindow::showMessageBoxAsync(
+                                juce::MessageBoxIconType::WarningIcon,
+                                "Modulation Library",
+                                "The modulation could not be saved.\n\n"
+                                    + safeThis->processor_
+                                        .modulationCatalogErrorForUi());
+                        }
+                    }
+                    else if (result == lockItemId)
+                    {
+                        const bool isLocked = safeThis->processor_
+                            .playerModulationLockedForUi(
+                                safeThis->playerIndex_, safeThis->lane_);
+                        safeThis->processor_.setPlayerModulationLocked(
+                            safeThis->playerIndex_, safeThis->lane_,
+                            !isLocked);
+                    }
+                    else
+                    {
+                        const auto index = static_cast<std::size_t>(result - 1);
+                        if (index
+                            < safeThis->processor_.modulationCountForUi())
+                        {
+                            safeThis->processor_.selectModulationForPlayer(
+                                safeThis->playerIndex_, safeThis->lane_, index);
+                        }
+                    }
+                    safeThis->refresh();
+                });
+        }
+
+        static constexpr int labelWidth = 72;
+        LivePatternSequencerProcessor& processor_;
+        std::size_t playerIndex_ = 0;
+        ModulationLane lane_ = ModulationLane::velocity;
+        juce::TextButton menu_;
+        juce::TextButton shorter_;
+        juce::TextButton longer_;
+        std::array<ModulationCell, lps::Modulation::maxLength> values_;
+    };
+
+    class PatternModulationPanel final
+        : public juce::Component,
+          private juce::Timer
+    {
+    public:
+        PatternModulationPanel(
+            LivePatternSequencerProcessor& processor,
+            std::size_t playerIndex)
+        {
+            for (const auto lane : modulationLanes)
+            {
+                auto row = std::make_unique<PatternModulationLaneRow>(
+                    processor, playerIndex, lane);
+                addAndMakeVisible(*row);
+                rows_.push_back(std::move(row));
+            }
+            setSize(850, panelPadding * 2
+                + static_cast<int>(rows_.size()) * rowHeight);
+            startTimerHz(30);
+        }
+
+        void paint(juce::Graphics& graphics) override
+        {
+            graphics.fillAll(juce::Colour(background));
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(panelPadding);
+            for (auto& row : rows_)
+                row->setBounds(area.removeFromTop(rowHeight).reduced(0, 1));
+        }
+
+    private:
+        void timerCallback() override
+        {
+            for (auto& row : rows_)
+                row->refresh();
+        }
+
+        static constexpr int panelPadding = 5;
+        static constexpr int rowHeight = 58;
+        std::vector<std::unique_ptr<PatternModulationLaneRow>> rows_;
+    };
+
+    class PatternRow final : public juce::Component
+    {
+    public:
+        class PatternGrid final : public juce::Component
+        {
+        public:
+            PatternGrid(
+                LivePatternSequencerProcessor& processor,
+                std::size_t playerIndex)
+                : processor_(processor), playerIndex_(playerIndex)
+            {
+                setMouseCursor(juce::MouseCursor::NormalCursor);
+            }
+
+            void paint(juce::Graphics& graphics) override
+            {
+                const auto pattern = processor_.patternForUi(playerIndex_);
+                const auto playing = processor_.playingForUi();
+                const auto current = processor_.currentStepForUi(playerIndex_);
+                const auto cells = cellArea();
+                graphics.setFont(juce::Font(
+                    juce::FontOptions(8.0f, juce::Font::bold)));
+                for (std::size_t step = 0;
+                     step < lps::Pattern::maxLength;
+                     ++step)
+                {
+                    const auto cell = cellBounds(step);
+                    const bool hit = pattern.isHit(
+                        static_cast<std::uint16_t>(step));
+                    const bool inside = pattern.isInsidePlaybackWindow(
+                        static_cast<std::uint16_t>(step));
+                    const bool playhead = playing
+                        && static_cast<int>(step) == current;
+                    auto colour = juce::Colour(hit
+                        ? patternStepOn
+                        : ((step / 4) % 2 == 0
+                            ? patternStepOff : patternStepOffAlternate));
+                    if (!inside)
+                        colour = colour.withMultipliedAlpha(0.28f);
+                    graphics.setColour(colour);
+                    graphics.fillRoundedRectangle(cell.toFloat(), 2.0f);
+                    graphics.setColour(juce::Colour(playhead
+                        ? patternPlayhead
+                        : (hit ? uiYellow : darkGray)));
+                    graphics.drawRoundedRectangle(
+                        cell.toFloat(), 2.0f,
+                        playhead || hit ? 2.0f : 1.0f);
+                    auto textColour = juce::Colour(playhead
+                        ? patternPlayhead
+                        : (hit ? patternStepTextOn : patternStepTextOff));
+                    if (!inside)
+                        textColour = textColour.withMultipliedAlpha(0.38f);
+                    graphics.setColour(textColour);
+                    graphics.drawText(
+                        juce::String(static_cast<int>(step + 1)),
+                        cell,
+                        juce::Justification::centred);
+                }
+
+                if (pattern.stepCount == 0)
+                    return;
+                const int startX = cellBounds(pattern.playbackStart).getX();
+                const int endX = cellBounds(pattern.playbackEnd).getRight();
+                const int top = cells.getY();
+                const int bottom = cells.getBottom();
+                constexpr int cap = 12;
+                juce::Path brackets;
+                brackets.startNewSubPath(
+                    static_cast<float>(startX + cap), static_cast<float>(top));
+                brackets.lineTo(
+                    static_cast<float>(startX), static_cast<float>(top));
+                brackets.lineTo(
+                    static_cast<float>(startX), static_cast<float>(bottom));
+                brackets.lineTo(
+                    static_cast<float>(startX + cap), static_cast<float>(bottom));
+                brackets.startNewSubPath(
+                    static_cast<float>(endX - cap), static_cast<float>(top));
+                brackets.lineTo(
+                    static_cast<float>(endX), static_cast<float>(top));
+                brackets.lineTo(
+                    static_cast<float>(endX), static_cast<float>(bottom));
+                brackets.lineTo(
+                    static_cast<float>(endX - cap), static_cast<float>(bottom));
+                graphics.setColour(juce::Colour(amber));
+                graphics.strokePath(brackets, juce::PathStrokeType(3.0f));
+                graphics.fillRoundedRectangle(
+                    static_cast<float>(startX - 4),
+                    static_cast<float>(cells.getCentreY() - 11),
+                    8.0f, 22.0f, 2.0f);
+                graphics.fillRoundedRectangle(
+                    static_cast<float>(endX - 4),
+                    static_cast<float>(cells.getCentreY() - 11),
+                    8.0f, 22.0f, 2.0f);
+            }
+
+            void mouseDown(const juce::MouseEvent& event) override
+            {
+                const auto pattern = processor_.patternForUi(playerIndex_);
+                if (pattern.stepCount == 0)
+                    return;
+                const int startX = cellBounds(pattern.playbackStart).getX();
+                const int endX = cellBounds(pattern.playbackEnd).getRight();
+                constexpr int grabRadius = 9;
+                const bool startHit = std::abs(event.x - startX) <= grabRadius;
+                const bool endHit = std::abs(event.x - endX) <= grabRadius;
+                if (startHit || endHit)
+                {
+                    const auto startDistance = std::abs(event.x - startX);
+                    const auto endDistance = std::abs(event.x - endX);
+                    draggingStart_ = startHit
+                        && (!endHit || startDistance <= endDistance);
+                    draggingEnd_ = !draggingStart_;
+                    dragOffsetX_ = event.x - (draggingStart_ ? startX : endX);
+                    dragStart_ = event.getPosition();
+                    rangeWasDragged_ = false;
+                    setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+                    return;
+                }
+                processor_.togglePlayerStep(playerIndex_, stepAtX(event.x));
+                repaint();
+            }
+
+            void mouseDrag(const juce::MouseEvent& event) override
+            {
+                if (!draggingStart_ && !draggingEnd_)
+                    return;
+                if (!rangeWasDragged_)
+                {
+                    const auto distance = event.getPosition() - dragStart_;
+                    if (std::max(std::abs(distance.x), std::abs(distance.y)) < 5)
+                        return;
+                    rangeWasDragged_ = true;
+                }
+                const auto pattern = processor_.patternForUi(playerIndex_);
+                const int anchor = event.x - dragOffsetX_
+                    - (draggingEnd_ ? cellWidth() : 0);
+                const auto step = nearestStepAtX(anchor, pattern.stepCount);
+                auto start = processor_.playerPlaybackStart(playerIndex_);
+                auto end = processor_.playerPlaybackEnd(playerIndex_);
+                if (draggingStart_)
+                    start = std::min(step, end);
+                else
+                    end = std::max(step, start);
+                processor_.setPlayerPlaybackWindow(playerIndex_, start, end);
+                repaint();
+            }
+
+            void mouseUp(const juce::MouseEvent& event) override
+            {
+                if ((draggingStart_ || draggingEnd_) && !rangeWasDragged_
+                    && cellArea().contains(event.getPosition()))
+                {
+                    processor_.togglePlayerStep(
+                        playerIndex_, stepAtX(event.x));
+                    repaint();
+                }
+                draggingStart_ = false;
+                draggingEnd_ = false;
+                dragOffsetX_ = 0;
+                rangeWasDragged_ = false;
+                setMouseCursor(juce::MouseCursor::NormalCursor);
+            }
+
+        private:
+            static constexpr int gap = 1;
+
+            [[nodiscard]] juce::Rectangle<int> cellArea() const noexcept
+            {
+                return getLocalBounds().reduced(1, 7);
+            }
+
+            [[nodiscard]] int cellWidth() const noexcept
+            {
+                return std::max(
+                    7,
+                    (cellArea().getWidth()
+                        - static_cast<int>(lps::Pattern::maxLength - 1) * gap)
+                        / static_cast<int>(lps::Pattern::maxLength));
+            }
+
+            [[nodiscard]] juce::Rectangle<int> cellBounds(
+                std::size_t step) const noexcept
+            {
+                const auto area = cellArea();
+                const auto width = cellWidth();
+                return {
+                    area.getX() + static_cast<int>(step) * (width + gap),
+                    area.getY(), width, area.getHeight()
+                };
+            }
+
+            [[nodiscard]] std::size_t stepAtX(int x) const noexcept
+            {
+                const auto pitch = cellWidth() + gap;
+                const auto relative = x - cellArea().getX();
+                return static_cast<std::size_t>(juce::jlimit(
+                    0,
+                    static_cast<int>(lps::Pattern::maxLength) - 1,
+                    relative / pitch));
+            }
+
+            [[nodiscard]] std::size_t nearestStepAtX(
+                int x,
+                std::size_t stepCount) const noexcept
+            {
+                const auto width = cellWidth();
+                const auto relative = x - cellArea().getX() + width / 2;
+                const auto maximum = static_cast<int>(
+                    std::max<std::size_t>(1, stepCount) - 1);
+                return static_cast<std::size_t>(juce::jlimit(
+                    0, maximum, relative / (width + gap)));
+            }
+
+            LivePatternSequencerProcessor& processor_;
+            std::size_t playerIndex_ = 0;
+            bool draggingStart_ = false;
+            bool draggingEnd_ = false;
+            int dragOffsetX_ = 0;
+            juce::Point<int> dragStart_;
+            bool rangeWasDragged_ = false;
+        };
+
+        PatternRow(
+            LivePatternSequencerProcessor& processor,
+            std::size_t playerIndex,
+            std::size_t slot)
+            : processor_(processor), playerIndex_(playerIndex), slot_(slot),
+              grid_(processor, playerIndex)
+        {
+            patternMenu_.setTooltip(
+                "Select or save this player's pattern with a rendered preview");
+            patternMenu_.onClick = [this] { showPatternMenu(); };
+            addAndMakeVisible(patternMenu_);
+
+            speedSelector_.addItem("0.5x", 1);
+            speedSelector_.addItem("1x", 2);
+            speedSelector_.addItem("2x", 3);
+            speedSelector_.onChange = [this]
+            {
+                const auto selected = speedSelector_.getSelectedItemIndex();
+                if (selected >= 0)
+                    processor_.setPlayerPlaybackSpeed(
+                        playerIndex_, static_cast<std::size_t>(selected));
+            };
+            addAndMakeVisible(speedSelector_);
+
+            left_.setButtonText("<");
+            right_.setButtonText(">");
+            left_.setTooltip("Rotate this rhythm left");
+            right_.setTooltip("Rotate this rhythm right");
+            left_.onClick = [this]
+            {
+                processor_.offsetPlayerPatternLeft(playerIndex_);
+                refresh();
+            };
+            right_.onClick = [this]
+            {
+                processor_.offsetPlayerPatternRight(playerIndex_);
+                refresh();
+            };
+            addAndMakeVisible(left_);
+            addAndMakeVisible(right_);
+
+            reset_.setButtonText("R");
+            reset_.setTooltip(
+                "At the next start of the BD1 pattern, restart this rhythm at its active loop start");
+            reset_.onClick = [this]
+            {
+                (void) processor_.resetSynthPatternToMaster(slot_);
+                refresh();
+            };
+            addAndMakeVisible(reset_);
+
+            mute_.setClickingTogglesState(false);
+            mute_.setColour(
+                juce::TextButton::buttonColourId,
+                juce::Colour(uiGreen).darker(0.12f));
+            mute_.setColour(
+                juce::TextButton::buttonOnColourId,
+                juce::Colour(muteRed));
+            mute_.setColour(
+                juce::TextButton::textColourOffId,
+                juce::Colour(secondaryText).darker(0.12f));
+            mute_.setColour(
+                juce::TextButton::textColourOnId,
+                juce::Colour(primaryText).brighter(0.10f));
+            mute_.onClick = [this]
+            {
+                const bool targetMuted =
+                    processor_.playerTargetMutedForUi(playerIndex_);
+                (void) processor_.schedulePlayerMute(
+                    playerIndex_, !targetMuted, 1);
+                refresh();
+            };
+            addAndMakeVisible(mute_);
+
+            modulation_.setButtonText("V/P/G");
+            modulation_.setTooltip(
+                "Edit velocity, pitch, and gate modulation for this pattern player");
+            modulation_.onClick = [this] { showPatternModulation(); };
+            addAndMakeVisible(modulation_);
+            addAndMakeVisible(grid_);
+            refresh();
+        }
+
+        void paint(juce::Graphics& graphics) override
+        {
+            graphics.setColour(juce::Colour(panel));
+            graphics.fillRoundedRectangle(getLocalBounds().toFloat(), 4.0f);
+            graphics.setColour(juce::Colour(border));
+            graphics.drawRoundedRectangle(
+                getLocalBounds().toFloat().reduced(0.5f), 4.0f, 1.0f);
+            graphics.setColour(juce::Colour(primaryText));
+            graphics.setFont(juce::Font(
+                juce::FontOptions(12.0f, juce::Font::bold)));
+            graphics.drawText(
+                "PATTERN " + juce::String(static_cast<int>(slot_ + 1)),
+                8, 0, labelWidth - 12, getHeight(),
+                juce::Justification::centredLeft);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(5);
+            area.removeFromLeft(labelWidth);
+            patternMenu_.setBounds(area.removeFromLeft(44).reduced(2));
+            speedSelector_.setBounds(area.removeFromLeft(62).reduced(2));
+            left_.setBounds(area.removeFromLeft(38).reduced(2));
+            right_.setBounds(area.removeFromLeft(38).reduced(2));
+            reset_.setBounds(area.removeFromLeft(38).reduced(2));
+            mute_.setBounds(area.removeFromLeft(42).reduced(2));
+            modulation_.setBounds(area.removeFromLeft(62).reduced(2));
+            area.removeFromLeft(6);
+            grid_.setBounds(area);
+        }
+
+        void refresh()
+        {
+            if (playerIndex_ >= processor_.playerCountForUi())
+                return;
+            const auto selected = processor_.selectedPatternForPlayer(playerIndex_);
+            const bool modified = processor_.playerPatternModifiedForUi(playerIndex_);
+            patternMenu_.setButtonText(modified ? "P*" : "P");
+            patternMenu_.setTooltip(
+                processor_.patternNameForUi(selected)
+                    + " — select or save this player's pattern");
+            patternMenu_.setColour(
+                juce::TextButton::buttonColourId,
+                juce::Colour(modified ? amber : inactive));
+            speedSelector_.setSelectedItemIndex(
+                static_cast<int>(processor_.playerPlaybackSpeed(playerIndex_)),
+                juce::dontSendNotification);
+            const bool resetPending =
+                processor_.synthPatternResetPendingForUi(slot_);
+            reset_.setButtonText(resetPending ? "Q" : "R");
+            reset_.setEnabled(!resetPending);
+            reset_.setTooltip(resetPending
+                ? "Reset queued for the next start of the BD1 pattern"
+                : "At the next start of the BD1 pattern, restart this rhythm at its active loop start");
+            if (resetPending)
+            {
+                reset_.setColour(
+                    juce::TextButton::buttonColourId,
+                    juce::Colour(uiYellow).darker(0.55f));
+            }
+            else
+            {
+                reset_.removeColour(juce::TextButton::buttonColourId);
+            }
+            const bool targetMuted =
+                processor_.playerTargetMutedForUi(playerIndex_);
+            mute_.setToggleState(targetMuted, juce::dontSendNotification);
+            mute_.setKind(targetMuted
+                ? SpeakerButton::Kind::unmute
+                : SpeakerButton::Kind::mute);
+            mute_.setScheduledTarget(targetBarForOffset(
+                processor_.currentBarForUi(),
+                processor_.playerMuteChangeBarsRemainingForUi(playerIndex_)));
+            mute_.setTooltip(targetMuted
+                ? "Schedule unmute at the next bass-drum bar"
+                : "Schedule mute at the next bass-drum bar");
+            grid_.repaint();
+        }
+
+    private:
+        void showPatternModulation()
+        {
+            auto* editor =
+                findParentComponentOfClass<LivePatternSequencerEditor>();
+            if (editor == nullptr)
+                return;
+            auto modulationPanel = std::make_unique<PatternModulationPanel>(
+                processor_, playerIndex_);
+            const auto anchor = editor->getLocalArea(
+                &modulation_, modulation_.getLocalBounds());
+            juce::CallOutBox::launchAsynchronously(
+                std::move(modulationPanel), anchor, editor);
+        }
+
+        void showPatternMenu()
+        {
+            constexpr int saveItemId = 20000;
+            juce::PopupMenu menu;
+            menu.addSectionHeader("SELECT PATTERN");
+            const auto selected = processor_.selectedPatternForPlayer(playerIndex_);
+            for (std::size_t index = 0;
+                 index < processor_.patternCountForUi();
+                 ++index)
+            {
+                menu.addCustomItem(
+                    static_cast<int>(index + 1),
+                    std::make_unique<PatternPreviewMenuItem>(
+                        processor_.patternAtForUi(index), index == selected),
+                    nullptr,
+                    processor_.patternNameForUi(index));
+            }
+            menu.addSeparator();
+            menu.addItem(
+                saveItemId,
+                "SAVE PATTERN",
+                processor_.playerPatternModifiedForUi(playerIndex_));
+
+            const juce::Component::SafePointer<PatternRow> safeThis(this);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options {}.withTargetComponent(&patternMenu_),
+                [safeThis](int result)
+                {
+                    if (safeThis == nullptr || result == 0)
+                        return;
+                    if (result == saveItemId)
+                    {
+                        const auto saved = safeThis->processor_.savePlayerPattern(
+                            safeThis->playerIndex_);
+                        if (saved.status
+                            == LivePatternSequencerProcessor::SavePatternStatus::failed)
+                        {
+                            juce::AlertWindow::showMessageBoxAsync(
+                                juce::MessageBoxIconType::WarningIcon,
+                                "Pattern Library",
+                                "The pattern could not be saved.\n\n"
+                                    + safeThis->processor_.patternCatalogErrorForUi());
+                        }
+                    }
+                    else
+                    {
+                        const auto index = static_cast<std::size_t>(result - 1);
+                        if (index < safeThis->processor_.patternCountForUi())
+                        {
+                            (void) safeThis->processor_.schedulePatternForPlayer(
+                                safeThis->playerIndex_, index, 1);
+                        }
+                    }
+                    safeThis->refresh();
+                });
+        }
+
+        static constexpr int labelWidth = 86;
+        LivePatternSequencerProcessor& processor_;
+        std::size_t playerIndex_ = 0;
+        std::size_t slot_ = 0;
+        juce::TextButton patternMenu_;
+        juce::ComboBox speedSelector_;
+        juce::TextButton left_;
+        juce::TextButton right_;
+        juce::TextButton reset_;
+        SpeakerButton mute_;
+        juce::TextButton modulation_;
+        PatternGrid grid_;
+    };
+
+    class ModulationRow final : public juce::Component
+    {
+    public:
+        ModulationRow(
+            LivePatternSequencerProcessor& processor,
+            std::size_t laneIndex)
+            : processor_(processor), laneIndex_(laneIndex),
+              info_(processor_.synthLaneInfoForUi(laneIndex))
+        {
+            modulationMenu_.setTooltip(
+                "Select or save this modulation with a rendered preview");
+            modulationMenu_.onClick = [this] { showModulationMenu(); };
+            addAndMakeVisible(modulationMenu_);
+
+            advanceOn_.addItem("CLOCK", 1);
+            for (std::size_t slot = 0;
+                 slot < LivePatternSequencerProcessor::synthTwoPatternCount;
+                 ++slot)
+            {
+                advanceOn_.addItem(
+                    "HIT · PATTERN "
+                        + juce::String(static_cast<int>(slot + 1)),
+                    static_cast<int>(slot + 2));
+            }
+            advanceOn_.setTextWhenNothingSelected("ADVANCE ON…");
+            advanceOn_.setTooltip(
+                "Advance on the clock, or follow hits from a specific rhythm pattern");
+            advanceOn_.onChange = [this]
+            {
+                const auto selected = advanceOn_.getSelectedId();
+                if (selected == 1)
+                {
+                    processor_.setSynthLaneAdvanceMode(
+                        laneIndex_,
+                        LivePatternSequencerProcessor::ModulationAdvanceMode::onClock);
+                }
+                else if (selected >= 2)
+                {
+                    processor_.setSynthLanePatternSlot(
+                        laneIndex_, static_cast<std::size_t>(selected - 2));
+                    processor_.setSynthLaneAdvanceMode(
+                        laneIndex_,
+                        LivePatternSequencerProcessor::ModulationAdvanceMode::onHit);
+                }
+            };
+            addAndMakeVisible(advanceOn_);
+
+            reset_.setButtonText("R");
+            reset_.onClick = [this]
+            {
+                (void) processor_.resetSynthLane(laneIndex_);
+                refresh();
+            };
+            addAndMakeVisible(reset_);
+
+            shorter_.setButtonText("-");
+            longer_.setButtonText("+");
+            shorter_.setTooltip("Remove the final modulation step");
+            longer_.setTooltip("Append a modulation step");
+            shorter_.onClick = [this]
+            {
+                const auto modulation = processor_.synthLaneModulationForUi(
+                    laneIndex_);
+                if (modulation.length > 1)
+                    processor_.setSynthLaneLength(
+                        laneIndex_, modulation.length - 1);
+                refresh();
+            };
+            longer_.onClick = [this]
+            {
+                const auto modulation = processor_.synthLaneModulationForUi(
+                    laneIndex_);
+                if (modulation.length < lps::Modulation::maxLength)
+                    processor_.setSynthLaneLength(
+                        laneIndex_, modulation.length + 1);
+                refresh();
+            };
+            addAndMakeVisible(shorter_);
+            addAndMakeVisible(longer_);
+
+            for (std::size_t step = 0; step < values_.size(); ++step)
+            {
+                auto& slider = values_[step];
+                slider.setSliderStyle(juce::Slider::LinearBarVertical);
+                slider.setRange(0.0, 127.0, 1.0);
+                slider.setTextBoxStyle(
+                    juce::Slider::NoTextBox, false, 0, 0);
+                slider.setScrollWheelEnabled(false);
+                slider.setMouseDragSensitivity(140);
+                slider.setTooltip(
+                    info_.name + " step "
+                    + juce::String(static_cast<int>(step + 1)));
+                auto* sliderPtr = &slider;
+                slider.onValueChange = [this, step, sliderPtr]
+                {
+                    const auto raw = static_cast<std::uint8_t>(juce::jlimit(
+                        0,
+                        255,
+                        juce::roundToInt(
+                            static_cast<float>(sliderPtr->getValue())
+                            * 255.0f / 127.0f)));
+                    processor_.setSynthLaneValue(laneIndex_, step, raw);
+                };
+                addAndMakeVisible(slider);
+            }
+            refresh();
+        }
+
+        void paint(juce::Graphics& graphics) override
+        {
+            graphics.setColour(juce::Colour(panel));
+            graphics.fillRoundedRectangle(getLocalBounds().toFloat(), 4.0f);
+            graphics.setColour(juce::Colour(border));
+            graphics.drawRoundedRectangle(
+                getLocalBounds().toFloat().reduced(0.5f), 4.0f, 1.0f);
+            graphics.setColour(juce::Colour(primaryText));
+            graphics.setFont(juce::Font(
+                juce::FontOptions(11.0f, juce::Font::bold)));
+            auto label = info_.name;
+            if (info_.midiCc >= 0)
+                label += "  CC " + juce::String(info_.midiCc);
+            graphics.drawFittedText(
+                label,
+                8, 0, labelWidth - 12, getHeight(),
+                juce::Justification::centredLeft,
+                2,
+                0.75f);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(5);
+            area.removeFromLeft(labelWidth);
+            modulationMenu_.setBounds(area.removeFromLeft(42).reduced(2));
+            advanceOn_.setBounds(area.removeFromLeft(104).reduced(2));
+            reset_.setBounds(area.removeFromLeft(38).reduced(2));
+            shorter_.setBounds(area.removeFromLeft(30).reduced(2));
+            longer_.setBounds(area.removeFromLeft(30).reduced(2));
+            area.removeFromLeft(6);
+            const int gap = 1;
+            const int width = std::max(
+                7, (area.getWidth() - static_cast<int>(values_.size() - 1) * gap)
+                    / static_cast<int>(values_.size()));
+            for (auto& slider : values_)
+            {
+                slider.setBounds(area.removeFromLeft(width));
+                area.removeFromLeft(gap);
+            }
+        }
+
+        void refresh()
+        {
+            const auto mode = processor_.synthLaneAdvanceModeForUi(laneIndex_);
+            const auto patternSlot = processor_.synthLanePatternSlotForUi(
+                laneIndex_);
+            advanceOn_.setSelectedId(
+                mode == LivePatternSequencerProcessor::ModulationAdvanceMode::onClock
+                    ? 1 : static_cast<int>(patternSlot + 2),
+                juce::dontSendNotification);
+            const bool resetPending =
+                processor_.synthLaneResetPendingForUi(laneIndex_);
+            reset_.setButtonText(resetPending ? "Q" : "R");
+            reset_.setEnabled(!resetPending);
+            reset_.setTooltip(resetPending
+                ? "Modulation reset queued"
+                : mode == LivePatternSequencerProcessor::ModulationAdvanceMode::onClock
+                    ? "At the first beat of the next BD1 pattern, restart this modulation at its first value"
+                    : "On the next hit from Pattern "
+                        + juce::String(static_cast<int>(patternSlot + 1))
+                        + ", restart this modulation at its first value");
+            if (resetPending)
+            {
+                reset_.setColour(
+                    juce::TextButton::buttonColourId,
+                    juce::Colour(uiYellow).darker(0.55f));
+            }
+            else
+            {
+                reset_.removeColour(juce::TextButton::buttonColourId);
+            }
+            const auto selected =
+                processor_.selectedSynthLaneModulationForUi(laneIndex_);
+            const bool modified =
+                processor_.synthLaneModulationModifiedForUi(laneIndex_);
+            modulationMenu_.setButtonText(modified ? "M*" : "M");
+            modulationMenu_.setTooltip(
+                processor_.modulationNameForUi(selected)
+                    + " — select or save this modulation");
+            modulationMenu_.setColour(
+                juce::TextButton::buttonColourId,
+                juce::Colour(modified ? amber : inactive));
+            const auto modulation = processor_.synthLaneModulationForUi(laneIndex_);
+            const int current = processor_.playingForUi()
+                ? processor_.synthLaneCurrentStepForUi(laneIndex_) : -1;
+            for (std::size_t step = 0; step < values_.size(); ++step)
+            {
+                const bool active = step < modulation.length;
+                auto& slider = values_[step];
+                slider.setEnabled(active);
+                slider.setAlpha(active ? 1.0f : 0.22f);
+                if (active)
+                {
+                    slider.setValue(
+                        modulation.values[step].toFloat() * 127.0f,
+                        juce::dontSendNotification);
+                }
+                slider.setColour(
+                    juce::Slider::thumbColourId,
+                    juce::Colour(static_cast<int>(step) == current
+                        ? uiBlue : uiYellow));
+                slider.setColour(
+                    juce::Slider::trackColourId,
+                    juce::Colour(static_cast<int>(step) == current
+                        ? uiBlue : warmIvory));
+                slider.repaint();
+            }
+            shorter_.setEnabled(modulation.length > 1);
+            longer_.setEnabled(modulation.length < lps::Modulation::maxLength);
+        }
+
+    private:
+        void showModulationMenu()
+        {
+            constexpr int saveItemId = 20000;
+            juce::PopupMenu menu;
+            menu.addSectionHeader("SELECT MODULATION");
+            const auto selected =
+                processor_.selectedSynthLaneModulationForUi(laneIndex_);
+            for (std::size_t index = 0;
+                 index < processor_.modulationCountForUi();
+                 ++index)
+            {
+                const auto modulation = processor_.modulationAtForUi(index);
+                if (modulation.length <= 1)
+                    continue;
+                menu.addCustomItem(
+                    static_cast<int>(index + 1),
+                    std::make_unique<ModulationPreviewMenuItem>(
+                        modulation, index == selected, false),
+                    nullptr,
+                    processor_.modulationNameForUi(index));
+            }
+            menu.addSeparator();
+            menu.addItem(
+                saveItemId,
+                "SAVE MODULATION",
+                processor_.synthLaneModulationModifiedForUi(laneIndex_));
+
+            const juce::Component::SafePointer<ModulationRow> safeThis(this);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options {}.withTargetComponent(
+                    &modulationMenu_),
+                [safeThis](int result)
+                {
+                    if (safeThis == nullptr || result == 0)
+                        return;
+                    if (result == saveItemId)
+                    {
+                        const auto saved = safeThis->processor_
+                            .saveSynthLaneModulation(safeThis->laneIndex_);
+                        if (saved.status
+                            == LivePatternSequencerProcessor::SaveModulationStatus::failed)
+                        {
+                            juce::AlertWindow::showMessageBoxAsync(
+                                juce::MessageBoxIconType::WarningIcon,
+                                "Modulation Library",
+                                "The modulation could not be saved.\n\n"
+                                    + safeThis->processor_
+                                        .modulationCatalogErrorForUi());
+                        }
+                    }
+                    else
+                    {
+                        const auto index = static_cast<std::size_t>(result - 1);
+                        if (index < safeThis->processor_.modulationCountForUi())
+                        {
+                            safeThis->processor_.selectModulationForSynthLane(
+                                safeThis->laneIndex_, index);
+                        }
+                    }
+                    safeThis->refresh();
+                });
+        }
+
+        static constexpr int labelWidth = 126;
+        LivePatternSequencerProcessor& processor_;
+        std::size_t laneIndex_ = 0;
+        LivePatternSequencerProcessor::SynthLaneInfo info_;
+        juce::TextButton modulationMenu_;
+        juce::ComboBox advanceOn_;
+        juce::TextButton reset_;
+        juce::TextButton shorter_;
+        juce::TextButton longer_;
+        std::array<juce::Slider, lps::Modulation::maxLength> values_;
+    };
+
+    static constexpr int topPadding = 8;
+    static constexpr int titleHeight = 38;
+    static constexpr int sectionHeaderHeight = 24;
+    static constexpr int sectionGapHeight = 12;
+    static constexpr int patternRowHeight = 70;
+    static constexpr int modulationRowHeight = 62;
+    static constexpr std::size_t modulationColumnCount = 2;
+    static constexpr int modulationSectionTitleHeight = 20;
+    static constexpr int modulationSectionGap = 8;
+    static constexpr int bottomPadding = 16;
+
+    struct ModulationSection
+    {
+        juce::String name;
+        std::vector<ModulationRow*> rows;
+    };
+
+    LivePatternSequencerProcessor& processor_;
+    std::vector<std::unique_ptr<PatternRow>> patternRows_;
+    std::vector<std::unique_ptr<ModulationRow>> modulationRows_;
+    std::vector<ModulationSection> modulationSections_;
+};
 
 LivePatternSequencerEditor::ContentComponent::ContentComponent(
     LivePatternSequencerEditor& editor) noexcept
@@ -1841,6 +3084,12 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     viewport_.setWantsKeyboardFocus(false);
     addAndMakeVisible(viewport_);
 
+    synthPage_ = std::make_unique<SynthPageComponent>(processor_);
+    synthViewport_.setViewedComponent(synthPage_.get(), false);
+    synthViewport_.setScrollBarsShown(true, true);
+    synthViewport_.setScrollOnDragMode(juce::Viewport::ScrollOnDragMode::all);
+    addAndMakeVisible(synthViewport_);
+
     controlVoiceLabels_.reserve(playerCount_);
     controlVoiceMuteButtons_.reserve(playerCount_);
     const auto configureSpeakerActionButton = [](
@@ -2014,6 +3263,14 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     suppressionButton_.setClickingTogglesState(true);
     suppressionButton_.onClick = [this] { showSuppressionMatrix(); };
     addAndMakeVisible(suppressionButton_);
+    voicesPageButton_.setClickingTogglesState(false);
+    synthTwoPageButton_.setClickingTogglesState(false);
+    voicesPageButton_.setTooltip("Open the all-voices sequencer page");
+    synthTwoPageButton_.setTooltip("Open the focused Synth 2 page");
+    voicesPageButton_.onClick = [this] { showSynthPage(false); };
+    synthTwoPageButton_.onClick = [this] { showSynthPage(true); };
+    addAndMakeVisible(voicesPageButton_);
+    addAndMakeVisible(synthTwoPageButton_);
     addAndMakeVisible(controlPane_);
     addChildComponent(modulationBlockLayer_);
     addChildComponent(modulationEditor_);
@@ -2028,6 +3285,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     setResizable(true, false);
     setResizeLimits(800, 400, 4096, 2160);
     setSize(editorWidth, initialEditorHeight);
+    showSynthPage(true);
     startTimerHz(30);
 
     const auto catalogError = processor_.patternCatalogErrorForUi();
@@ -2045,6 +3303,7 @@ LivePatternSequencerEditor::~LivePatternSequencerEditor()
     stopTimer();
     setLookAndFeel(nullptr);
     viewport_.setViewedComponent(nullptr, false);
+    synthViewport_.setViewedComponent(nullptr, false);
 }
 
 void LivePatternSequencerEditor::paint(juce::Graphics& graphics)
@@ -2057,7 +3316,29 @@ void LivePatternSequencerEditor::resized()
     modulationBlockLayer_.setBounds(getLocalBounds());
     menuDismissLayer_.setBounds(getLocalBounds());
     auto bounds = getLocalBounds().reduced(outerPadding);
-    bounds.removeFromTop(headerHeight + sectionGap);
+    auto tabs = bounds.removeFromTop(pageTabsHeight);
+    voicesPageButton_.setBounds(tabs.removeFromLeft(126).reduced(2));
+    synthTwoPageButton_.setBounds(tabs.removeFromLeft(126).reduced(2));
+    bounds.removeFromTop(sectionGap);
+
+    if (synthPageVisible_)
+    {
+        const int utilitySize = std::max(28, pageTabsHeight - 4);
+        auto utility = tabs.removeFromRight(utilitySize * 2 + perVoiceControlGap);
+        globalPlayButton_.setBounds(
+            utility.removeFromLeft(utilitySize).reduced(1));
+        utility.removeFromLeft(perVoiceControlGap);
+        suppressionButton_.setBounds(
+            utility.removeFromLeft(utilitySize).reduced(1));
+        synthViewport_.setBounds(bounds);
+        if (synthPage_ != nullptr)
+        {
+            synthPage_->setSize(
+                std::max(1380, synthViewport_.getMaximumVisibleWidth()),
+                synthPage_->preferredHeight());
+        }
+        return;
+    }
 
     auto controls = bounds.removeFromBottom(controlPaneHeight);
     bounds.removeFromBottom(sectionGap);
@@ -2109,6 +3390,29 @@ void LivePatternSequencerEditor::resized()
         0, static_cast<int>(firstVisiblePlayer_) * playerStride());
     updatePageButtons();
     positionModulationEditor();
+}
+
+void LivePatternSequencerEditor::showSynthPage(bool show)
+{
+    synthPageVisible_ = show;
+    voicesPageButton_.setToggleState(!show, juce::dontSendNotification);
+    synthTwoPageButton_.setToggleState(show, juce::dontSendNotification);
+    synthViewport_.setVisible(show);
+    viewport_.setVisible(!show);
+    controlPane_.setVisible(!show);
+    barScheduler_.setVisible(!show);
+    previousPageButton_.setVisible(!show);
+    nextPageButton_.setVisible(!show);
+    globalPlayButton_.setVisible(true);
+    suppressionButton_.setVisible(true);
+    if (show)
+    {
+        openModulationPlayer_.reset();
+        modulationBlockLayer_.setVisible(false);
+        modulationEditor_.setVisible(false);
+    }
+    resized();
+    repaint();
 }
 
 void LivePatternSequencerEditor::resizedContent()
@@ -2437,6 +3741,20 @@ void LivePatternSequencerEditor::matrixMouseDown(
     const juce::MouseEvent& event,
     juce::Component& matrix)
 {
+    constexpr int tabTop = 24;
+    constexpr int tabHeight = 28;
+    constexpr int tabWidth = 126;
+    if (event.y >= tabTop && event.y < tabTop + tabHeight)
+    {
+        if (event.x >= 8 && event.x < 8 + tabWidth)
+            suppressionMatrixScope_ = SuppressionMatrixScope::patternPlayers;
+        else if (event.x >= 8 + tabWidth
+            && event.x < 8 + tabWidth * 2)
+            suppressionMatrixScope_ = SuppressionMatrixScope::voices;
+        matrix.repaint();
+        return;
+    }
+
     const int relativeX = event.x - matrixGridLeft;
     const int relativeY = event.y - matrixGridTop;
     if (relativeX < 0 || relativeY < 0)
@@ -2444,16 +3762,29 @@ void LivePatternSequencerEditor::matrixMouseDown(
 
     const auto column = static_cast<std::size_t>(relativeX / matrixCellWidth);
     const auto row = static_cast<std::size_t>(relativeY / matrixCellHeight);
-    if (row >= playerCount_ || column >= playerCount_ || row == column)
+    const auto count = suppressionMatrixScope_
+            == SuppressionMatrixScope::patternPlayers
+        ? playerCount_ : processor_.voiceCountForUi();
+    if (row >= count || column >= count || row == column)
         return;
 
-    processor_.setSuppression(
-        row, column, !processor_.suppression(row, column));
+    if (suppressionMatrixScope_ == SuppressionMatrixScope::patternPlayers)
+    {
+        processor_.setSuppression(
+            row, column, !processor_.suppression(row, column));
+    }
+    else
+    {
+        processor_.setVoiceSuppression(
+            row, column, !processor_.voiceSuppression(row, column));
+    }
     matrix.repaint();
 }
 
 void LivePatternSequencerEditor::timerCallback()
 {
+    if (synthPageVisible_ && synthPage_ != nullptr)
+        synthPage_->refresh();
     const auto heldBar = heldScheduleBar();
     if (heldBar != selectedScheduleBar_)
     {
@@ -4334,9 +5665,34 @@ void LivePatternSequencerEditor::paintMatrix(
         matrix.getWidth() - 16, 16,
         juce::Justification::centredLeft);
 
-    for (std::size_t row = 0; row < playerCount_; ++row)
+    constexpr int tabTop = 24;
+    constexpr int tabHeight = 28;
+    constexpr int tabWidth = 126;
+    const auto paintTab = [&](int x, const juce::String& text, bool selected)
     {
-        for (std::size_t column = 0; column < playerCount_; ++column)
+        const juce::Rectangle<int> tab {x, tabTop, tabWidth, tabHeight};
+        graphics.setColour(juce::Colour(selected ? uiYellow : inactive));
+        graphics.fillRoundedRectangle(tab.toFloat(), 3.0f);
+        graphics.setColour(juce::Colour(selected ? uiBlack : primaryText));
+        graphics.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+        graphics.drawText(text, tab, juce::Justification::centred);
+    };
+    paintTab(
+        8,
+        "PATTERN PLAYERS",
+        suppressionMatrixScope_ == SuppressionMatrixScope::patternPlayers);
+    paintTab(
+        8 + tabWidth,
+        "VOICES (ALL PLAYERS)",
+        suppressionMatrixScope_ == SuppressionMatrixScope::voices);
+
+    const auto matrixCount = suppressionMatrixScope_
+            == SuppressionMatrixScope::patternPlayers
+        ? playerCount_ : processor_.voiceCountForUi();
+
+    for (std::size_t row = 0; row < matrixCount; ++row)
+    {
+        for (std::size_t column = 0; column < matrixCount; ++column)
         {
             const juce::Rectangle<int> cell(
                 matrixGridLeft + static_cast<int>(column) * matrixCellWidth,
@@ -4345,7 +5701,10 @@ void LivePatternSequencerEditor::paintMatrix(
                 matrixCellHeight);
             const bool isDiagonal = row == column;
             const bool isActive = !isDiagonal
-                && processor_.suppression(row, column);
+                && (suppressionMatrixScope_
+                        == SuppressionMatrixScope::patternPlayers
+                    ? processor_.suppression(row, column)
+                    : processor_.voiceSuppression(row, column));
 
             graphics.setColour(juce::Colour(
                 isActive
@@ -4360,9 +5719,12 @@ void LivePatternSequencerEditor::paintMatrix(
 
     graphics.setColour(juce::Colour(secondaryText));
     graphics.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
-    for (std::size_t index = 0; index < playerCount_; ++index)
+    for (std::size_t index = 0; index < matrixCount; ++index)
     {
-        auto label = processor_.playerNameForUi(index);
+        auto label = suppressionMatrixScope_
+                == SuppressionMatrixScope::patternPlayers
+            ? processor_.playerNameForUi(index)
+            : processor_.voiceNameForUi(index);
         if (label.isEmpty())
             label = "P" + juce::String(static_cast<int>(index + 1));
 

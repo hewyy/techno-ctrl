@@ -146,6 +146,24 @@ void testClockUsesHalfOpenBlocks()
     CHECK(std::abs(output[2].ppqPosition - 0.5) < 1.0e-12);
 }
 
+void testSwitchingToClockWhilePlayingSchedulesNextGridStep()
+{
+    lps::ModulationLibrary library;
+    lps::ModulationPlayer player(library, lps::ModulationPlayerId {4});
+    player.setAdvanceSource(
+        lps::PatternHitAdvance {lps::PatternPlayerId {1}});
+    player.prepare({});
+    lps::PlayerSignalBuffer output;
+    player.command(lps::PlayerCommand::resetAndPlay, 0.0, output);
+    CHECK(output.size() == 1);
+
+    player.setAdvanceSource(lps::ClockAdvance {0.25});
+    player.processClock(
+        {0.10, 0.30, 120.0, 48'000.0, 4'800, true, false}, output);
+    CHECK(output.size() == 2);
+    CHECK(std::abs(output[1].ppqPosition - 0.25) < 1.0e-12);
+}
+
 void testNonFiniteNormalizedInputIsDeterministic()
 {
     CHECK(lps::NormalizedValue::fromFloat(
@@ -165,6 +183,7 @@ int main()
     testSelectionCanWaitForOwningPatternCycle();
     testOneShotAndCommandSemantics();
     testClockUsesHalfOpenBlocks();
+    testSwitchingToClockWhilePlayingSchedulesNextGridStep();
     testNonFiniteNormalizedInputIsDeterministic();
     std::cout << "ModulationPlayer tests passed\n";
     return EXIT_SUCCESS;

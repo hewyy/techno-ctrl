@@ -11,6 +11,37 @@ MidiBufferRenderer::MidiBufferRenderer(int midiChannel) noexcept
 {
 }
 
+bool MidiBufferRenderer::configureControlRoute(
+    RouteId route,
+    int controllerNumber) noexcept
+{
+    if (!route.isValid() || controllerNumber < 0 || controllerNumber > 127)
+        return false;
+
+    for (auto& configured : controlRoutes_)
+    {
+        if (configured.configured && configured.route == route)
+        {
+            configured.controllerNumber = static_cast<std::uint8_t>(
+                controllerNumber);
+            return true;
+        }
+    }
+    for (auto& configured : controlRoutes_)
+    {
+        if (!configured.configured)
+        {
+            configured = {
+                route,
+                static_cast<std::uint8_t>(controllerNumber),
+                true
+            };
+            return true;
+        }
+    }
+    return false;
+}
+
 void MidiBufferRenderer::setMidiBuffer(juce::MidiBuffer& midiBuffer) noexcept
 {
     midiBuffer_ = &midiBuffer;
@@ -37,7 +68,23 @@ bool MidiBufferRenderer::renderBlock(
     for (const auto& routed : events)
     {
         if (routed.event.type == SemanticEventType::controlPoint)
+        {
+            const auto* route = controlRoute(routed.routeId);
+            if (route == nullptr)
+                return false;
+            const auto value = std::clamp(
+                static_cast<int>(std::lround(routed.event.normalizedValue)),
+                0,
+                127);
+            if (!midiBuffer_->addEvent(
+                    juce::MidiMessage::controllerEvent(
+                        midiChannel_, route->controllerNumber, value),
+                    static_cast<int>(routed.frameOffset)))
+            {
+                return false;
+            }
             continue;
+        }
 
         std::optional<std::uint8_t> note;
         if (routed.event.type == SemanticEventType::triggerStart)
@@ -118,6 +165,15 @@ bool MidiBufferRenderer::rememberStart(
         }
     }
     return false;
+}
+
+const MidiBufferRenderer::ControlRoute* MidiBufferRenderer::controlRoute(
+    RouteId route) const noexcept
+{
+    for (const auto& configured : controlRoutes_)
+        if (configured.configured && configured.route == route)
+            return &configured;
+    return nullptr;
 }
 
 } // namespace lps

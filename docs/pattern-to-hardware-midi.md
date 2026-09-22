@@ -69,7 +69,8 @@ PatternHit {
 
 It also emits `PatternCycleBoundary` at the first position of every active
 window, even when that position is a rest. Cycle signals drive external pattern
-transitions and armed reset-to-master commands; they are never rendered.
+transitions, rhythm resets, and clock-modulation resets; hit signals can arm
+hit-following modulation resets. These control signals are never rendered.
 
 BD1's PatternPlayer does not read a velocity shape, select note 36, calculate a
 gate end, or know that MIDI and CV exist.
@@ -109,8 +110,9 @@ endPpq = hitPpq + gateRatio * nominalStepLengthPpq
 ```
 
 The minimum positive duration is one sample in PPQ. Gate zero produces no
-audible resolved trigger. If another hit arrives while the Voice is active, the
-old end is emitted before the replacement start.
+audible resolved trigger. If another hit arrives from the same PatternPlayer,
+its old end is emitted before the replacement start. Hits from other
+PatternPlayers belonging to the Voice keep independent trigger lifetimes.
 
 The default BD1 constants resolve approximately to:
 

@@ -30,7 +30,16 @@ void ModulationPlayer::setAdvanceSource(AdvanceSource source) noexcept
             id_.value, clock->stepLengthPpq);
         return;
     }
+    const bool changed = source.index() != advanceSource_.index()
+        || (std::holds_alternative<ClockAdvance>(source)
+            && std::get<ClockAdvance>(source).stepLengthPpq
+                != std::get<ClockAdvance>(advanceSource_).stepLengthPpq)
+        || (std::holds_alternative<PatternHitAdvance>(source)
+            && std::get<PatternHitAdvance>(source).source
+                != std::get<PatternHitAdvance>(advanceSource_).source);
     advanceSource_ = source;
+    if (changed)
+        nextClockPpq_ = std::numeric_limits<double>::infinity();
 }
 
 const AdvanceSource& ModulationPlayer::advanceSource() const noexcept
@@ -286,6 +295,13 @@ void ModulationPlayer::processClock(
         || block.ppqEnd <= block.ppqStart)
     {
         return;
+    }
+
+    if (!std::isfinite(nextClockPpq_))
+    {
+        const auto completedSteps = std::floor(
+            block.ppqStart / clock->stepLengthPpq + 1.0e-12);
+        nextClockPpq_ = (completedSteps + 1.0) * clock->stepLengthPpq;
     }
 
     while (nextClockPpq_ < block.ppqEnd

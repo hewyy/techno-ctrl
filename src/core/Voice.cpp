@@ -72,26 +72,32 @@ const Voice::ParameterState* Voice::findRole(
 bool Voice::applyParameterValue(
     VoiceParameterId destination,
     const PlayerSignal& value,
-    SequencerEventBuffer& output) noexcept
+    SequencerEventBuffer& output,
+    PatternPlayerId triggerScope) noexcept
 {
     if (value.type != PlayerSignalType::modulationValue
         || !std::isfinite(value.ppqPosition))
         return false;
 
     auto* state = findParameter(destination);
-    if (state == nullptr)
+    if (state == nullptr
+        || (state->descriptor.behavior == VoiceParameterBehavior::continuous
+            && triggerScope.isValid()))
         return false;
 
-    state->normalized = value.normalizedValue;
-    state->mapped = state->descriptor.map(value.normalizedValue);
-    state->valid = true;
+    auto* destinationValue = valueFor(*state, triggerScope);
+    if (destinationValue == nullptr)
+        return false;
+    destinationValue->normalized = value.normalizedValue;
+    destinationValue->mapped = state->descriptor.map(value.normalizedValue);
+    destinationValue->valid = true;
     if (state->descriptor.behavior != VoiceParameterBehavior::continuous)
         return true;
 
     if (!output.push(SequencerEvent::voiceControlPoint(
             value.ppqPosition,
             destination,
-            state->mapped,
+            destinationValue->mapped,
             state->descriptor.interpolation)))
     {
         incrementBounded(eventOverflowCount_);
@@ -104,11 +110,46 @@ bool Voice::applyParameterValue(
     return true;
 }
 
-bool Voice::requiredParametersAreValid() const noexcept
+Voice::ParameterValue* Voice::valueFor(
+    ParameterState& state,
+    PatternPlayerId triggerSource) noexcept
+{
+    if (!triggerSource.isValid())
+        return &state.voiceWide;
+
+    for (auto& value : state.scoped)
+        if (value.triggerSource == triggerSource)
+            return &value;
+    for (auto& value : state.scoped)
+    {
+        if (!value.triggerSource.isValid())
+        {
+            value.triggerSource = triggerSource;
+            return &value;
+        }
+    }
+    return nullptr;
+}
+
+const Voice::ParameterValue* Voice::valueFor(
+    const ParameterState& state,
+    PatternPlayerId triggerSource) noexcept
+{
+    if (triggerSource.isValid())
+    {
+        for (const auto& value : state.scoped)
+            if (value.triggerSource == triggerSource && value.valid)
+                return &value;
+    }
+    return state.voiceWide.valid ? &state.voiceWide : nullptr;
+}
+
+bool Voice::requiredParametersAreValid(
+    PatternPlayerId triggerSource) const noexcept
 {
     for (std::size_t index = 0; index < parameterCount_; ++index)
         if (parameters_[index].descriptor.requiredForTrigger
-            && !parameters_[index].valid)
+            && valueFor(parameters_[index], triggerSource) == nullptr)
             return false;
     return true;
 }
@@ -126,11 +167,13 @@ void Voice::incrementBounded(std::atomic<std::uint32_t>& value) noexcept
 }
 
 void Voice::endActive(
-    double ppqPosition, SequencerEventBuffer& output) noexcept
+    ActiveTrigger& trigger,
+    double ppqPosition,
+    SequencerEventBuffer& output) noexcept
 {
-    if (!active_)
+    if (!trigger.active)
         return;
-    if (!output.push(SequencerEvent::triggerEnd(ppqPosition, activeTriggerId_)))
+    if (!output.push(SequencerEvent::triggerEnd(ppqPosition, trigger.id)))
     {
         incrementBounded(eventOverflowCount_);
         const auto count = eventOverflowCount_.load(std::memory_order_relaxed);
@@ -138,8 +181,7 @@ void Voice::endActive(
             Logger::logf(LogLevel::error, "voice", "event_buffer_overflow",
                 "voice_id=%u count=%u semantic_event=trigger_end", id_.value, count);
     }
-    active_ = false;
-    activeTriggerId_ = {};
+    trigger = {};
 }
 
 void Voice::emitEndsBefore(
@@ -147,11 +189,14 @@ void Voice::emitEndsBefore(
     bool inclusive,
     SequencerEventBuffer& output) noexcept
 {
-    if (active_
-        && (activeEndPpq_ < ppqPosition
-            || (inclusive && activeEndPpq_ <= ppqPosition)))
+    for (auto& trigger : activeTriggers_)
     {
-        endActive(activeEndPpq_, output);
+        if (trigger.active
+            && (trigger.endPpq < ppqPosition
+                || (inclusive && trigger.endPpq <= ppqPosition)))
+        {
+            endActive(trigger, trigger.endPpq, output);
+        }
     }
 }
 
@@ -174,16 +219,40 @@ bool Voice::trigger(
     }
 
     emitEndsBefore(hit.ppqPosition, true, output);
-    if (active_)
-        endActive(hit.ppqPosition, output);
+    ActiveTrigger* activeTrigger = nullptr;
+    for (auto& trigger : activeTriggers_)
+    {
+        if (trigger.active && trigger.source == hit.patternPlayerId)
+        {
+            endActive(trigger, hit.ppqPosition, output);
+            activeTrigger = &trigger;
+            break;
+        }
+    }
+    if (activeTrigger == nullptr)
+    {
+        for (auto& trigger : activeTriggers_)
+        {
+            if (!trigger.active)
+            {
+                activeTrigger = &trigger;
+                break;
+            }
+        }
+    }
 
     const auto* pitch = findRole(VoiceParameterRole::pitch);
     const auto* intensity = findRole(VoiceParameterRole::intensity);
     const auto* gate = findRole(VoiceParameterRole::gate);
-    if (!requiredParametersAreValid()
-        || pitch == nullptr || !pitch->valid
-        || intensity == nullptr || !intensity->valid
-        || gate == nullptr || !gate->valid)
+    const auto* pitchValue = pitch != nullptr
+        ? valueFor(*pitch, hit.patternPlayerId) : nullptr;
+    const auto* intensityValue = intensity != nullptr
+        ? valueFor(*intensity, hit.patternPlayerId) : nullptr;
+    const auto* gateValue = gate != nullptr
+        ? valueFor(*gate, hit.patternPlayerId) : nullptr;
+    if (!requiredParametersAreValid(hit.patternPlayerId)
+        || pitchValue == nullptr || intensityValue == nullptr
+        || gateValue == nullptr)
     {
         incrementBounded(droppedMissingRequired_);
         const auto count = droppedMissingRequired_.load(std::memory_order_relaxed);
@@ -194,45 +263,65 @@ bool Voice::trigger(
         return false;
     }
 
-    const auto gateRatio = std::clamp(gate->mapped, 0.0f, 1.0f);
+    const auto gateRatio = std::clamp(gateValue->mapped, 0.0f, 1.0f);
     if (gateRatio <= 0.0f)
         return true;
 
+    if (activeTrigger == nullptr)
+    {
+        incrementBounded(droppedInvalidTrigger_);
+        return false;
+    }
+
     const auto voicePart = static_cast<std::uint64_t>(id_.value) << 32u;
-    activeTriggerId_ = TriggerId {voicePart | nextTriggerSequence_++};
+    const auto triggerId = TriggerId {voicePart | nextTriggerSequence_++};
     if (!output.push(SequencerEvent::triggerStart(
             hit.ppqPosition,
-            activeTriggerId_,
-            std::clamp(intensity->mapped, 0.0f, 1.0f),
-            pitch->mapped)))
+            triggerId,
+            std::clamp(intensityValue->mapped, 0.0f, 1.0f),
+            pitchValue->mapped)))
     {
         incrementBounded(eventOverflowCount_);
         const auto count = eventOverflowCount_.load(std::memory_order_relaxed);
         if (shouldReportCount(count))
             Logger::logf(LogLevel::error, "voice", "event_buffer_overflow",
                 "voice_id=%u count=%u semantic_event=trigger_start", id_.value, count);
-        activeTriggerId_ = {};
         return false;
     }
 
     const auto minimumGate = std::isfinite(minimumPositiveGatePpq)
         ? std::max(minimumPositiveGatePpq, 0.0)
         : 0.0;
-    activeEndPpq_ = hit.ppqPosition + std::max(
-        static_cast<double>(gateRatio) * hit.nominalStepLengthPpq,
-        minimumGate);
-    active_ = true;
+    *activeTrigger = {
+        hit.patternPlayerId,
+        triggerId,
+        hit.ppqPosition + std::max(
+            static_cast<double>(gateRatio) * hit.nominalStepLengthPpq,
+            minimumGate),
+        true
+    };
     return true;
 }
 
 void Voice::reset() noexcept
 {
-    active_ = false;
-    activeTriggerId_ = {};
-    activeEndPpq_ = 0.0;
+    for (auto& trigger : activeTriggers_)
+        trigger = {};
     nextTriggerSequence_ = 1;
     for (std::size_t index = 0; index < parameterCount_; ++index)
-        parameters_[index].valid = false;
+    {
+        parameters_[index].voiceWide.valid = false;
+        for (auto& value : parameters_[index].scoped)
+            value = {};
+    }
+}
+
+bool Voice::active() const noexcept
+{
+    return std::any_of(
+        activeTriggers_.begin(),
+        activeTriggers_.end(),
+        [](const auto& trigger) { return trigger.active; });
 }
 
 VoiceDiagnostics Voice::diagnostics() const noexcept

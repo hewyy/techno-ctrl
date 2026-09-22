@@ -139,6 +139,38 @@ void testContinuousParameterEmitsWithoutTrigger()
     CHECK(output[0].interpolation == lps::InterpolationPolicy::linear);
     CHECK(std::abs(output[0].normalizedValue - 0.5f) < 0.001f);
 }
+
+void testSampledParametersCanBeScopedToPatternPlayers()
+{
+    lps::Voice voice(lps::VoiceId {2});
+    configureVoice(voice);
+    lps::SequencerEventBuffer output;
+    const lps::PatternPlayerId first {1};
+    const lps::PatternPlayerId second {2};
+    for (const auto source : {first, second})
+    {
+        CHECK(voice.applyParameterValue(
+            intensityId, value(0.0, 1.0f), output, source));
+        CHECK(voice.applyParameterValue(
+            gateId, value(0.0, 0.5f), output, source));
+    }
+    CHECK(voice.applyParameterValue(
+        pitchId, value(0.0, 36.0f / 127.0f), output, first));
+    CHECK(voice.applyParameterValue(
+        pitchId, value(0.0, 72.0f / 127.0f), output, second));
+
+    auto firstHit = hit(1.0);
+    firstHit.patternPlayerId = first;
+    CHECK(voice.trigger(firstHit, 0.001, output));
+    auto secondHit = hit(1.05);
+    secondHit.patternPlayerId = second;
+    CHECK(voice.trigger(secondHit, 0.001, output));
+
+    CHECK(output.size() == 2);
+    CHECK(std::abs(output[0].musicalPitchSemitones - 36.0f) < 0.01f);
+    CHECK(std::abs(output[1].musicalPitchSemitones - 72.0f) < 0.01f);
+    CHECK(voice.active());
+}
 } // namespace
 
 int main()
@@ -148,6 +180,7 @@ int main()
     testRetriggerEndsBeforeReplacementStart();
     testZeroGateWithholdsStart();
     testContinuousParameterEmitsWithoutTrigger();
+    testSampledParametersCanBeScopedToPatternPlayers();
     std::cout << "Voice tests passed\n";
     return EXIT_SUCCESS;
 }

@@ -14,6 +14,8 @@ class MidiBufferRenderer final : public IOutputRenderer
 public:
     explicit MidiBufferRenderer(int midiChannel = 1) noexcept;
 
+    [[nodiscard]] bool configureControlRoute(
+        RouteId route, int controllerNumber) noexcept;
     void setMidiBuffer(juce::MidiBuffer& midiBuffer) noexcept;
     void clearMidiBuffer() noexcept;
 
@@ -24,6 +26,13 @@ public:
     void resetOutputs() noexcept override;
 
 private:
+    struct ControlRoute
+    {
+        RouteId route;
+        std::uint8_t controllerNumber = 0;
+        bool configured = false;
+    };
+
     struct ActiveTrigger
     {
         VoiceId voiceId;
@@ -38,10 +47,13 @@ private:
     [[nodiscard]] bool rememberStart(
         const RoutedEvent& event,
         std::uint8_t note) noexcept;
+    [[nodiscard]] const ControlRoute* controlRoute(
+        RouteId route) const noexcept;
 
     juce::MidiBuffer* midiBuffer_ = nullptr;
     int midiChannel_;
     std::array<ActiveTrigger, SequencerEventBuffer::capacity> activeTriggers_ {};
+    std::array<ControlRoute, 64> controlRoutes_ {};
 };
 
 } // namespace lps

@@ -14,6 +14,37 @@ namespace
 constexpr int drumMidiChannel = 11;
 constexpr int synthOneMidiChannel = 12;
 constexpr int synthTwoMidiChannel = 13;
+constexpr std::size_t synthTwoVoiceIndex = 11;
+
+struct SynthParameterDefinition
+{
+    const char* section;
+    const char* name;
+    std::uint8_t midiCc;
+    std::uint8_t initialValue;
+};
+
+// Korg volca keys MIDI implementation from volca keys.csv. These remain
+// data, rather than new parameter types: every row is a 7-bit continuous
+// Voice parameter whose renderer route determines the outgoing MIDI CC.
+constexpr std::array synthTwoParameters {
+    SynthParameterDefinition {"VCO", "Portamento", 5, 0},
+    SynthParameterDefinition {"General", "Expression", 11, 127},
+    SynthParameterDefinition {"General", "Voice", 40, 0},
+    SynthParameterDefinition {"General", "Octave", 41, 44},
+    SynthParameterDefinition {"VCO", "Detune", 42, 64},
+    SynthParameterDefinition {"VCO", "VCO EG depth", 43, 64},
+    SynthParameterDefinition {"VCF", "Cutoff", 44, 127},
+    SynthParameterDefinition {"VCF", "VCF EG intensity", 45, 64},
+    SynthParameterDefinition {"LFO", "Rate", 46, 64},
+    SynthParameterDefinition {"LFO", "Pitch intensity", 47, 0},
+    SynthParameterDefinition {"LFO", "Cutoff intensity", 48, 0},
+    SynthParameterDefinition {"EG", "Attack", 49, 0},
+    SynthParameterDefinition {"EG", "Decay/release", 50, 64},
+    SynthParameterDefinition {"EG", "Sustain", 51, 127},
+    SynthParameterDefinition {"Delay", "Delay time", 52, 0},
+    SynthParameterDefinition {"Delay", "Delay feedback", 53, 0}
+};
 
 struct VoiceDefinition
 {
@@ -128,13 +159,21 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         lps::Logger::logf(lps::LogLevel::error, "plugin", "modulation_catalog_load_failed",
             "reason=\"%s\"", modulationLibraryFileStore_.lastError().toRawUTF8());
 
-    const auto totalPlayerCount = defaultVoices.size();
+    const auto totalPlayerCount = defaultVoices.size()
+        + synthTwoPatternCount - 1;
     players_.reserve(totalPlayerCount);
+    voices_.reserve(defaultVoices.size());
+    synthParameterLanes_.reserve(synthTwoParameters.size());
     currentSteps_.reserve(totalPlayerCount);
     currentModulationSteps_.reserve(
         totalPlayerCount * modulationLaneCount);
     modulationLocks_.reserve(totalPlayerCount * modulationLaneCount);
     playerGroupMasks_.reserve(totalPlayerCount);
+    synthParameterCurrentSteps_.reserve(synthTwoParameters.size());
+    synthLaneAdvanceModes_.reserve(
+        synthTwoPatternCount + synthTwoParameters.size());
+    synthLanePatternSlots_.reserve(
+        synthTwoPatternCount + synthTwoParameters.size());
 
     const auto addDefaultModulation = [this](
         std::string name,
@@ -157,7 +196,6 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     const auto gateRecord = addDefaultModulation(
         "Constant Gate 1/2", constantModulation(0.5f));
     jassert(gateRecord.entry != nullptr);
-    lps::RuntimeGraphConfig graphConfig;
     const bool outputsRegistered = runtimeGraph_->registerOutputEndpoint(
             drumMidiOutputEndpoint, *drumRenderer_)
         && runtimeGraph_->registerOutputEndpoint(
@@ -169,9 +207,54 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     jassert(outputsRegistered);
     (void) outputsRegistered;
 
-    for (std::size_t index = 0; index < defaultVoices.size(); ++index)
+    constexpr lps::VoiceParameterId pitchParameter {0};
+    constexpr lps::VoiceParameterId intensityParameter {1};
+    constexpr lps::VoiceParameterId gateParameter {2};
+    for (std::size_t voiceIndex = 0;
+         voiceIndex < defaultVoices.size();
+         ++voiceIndex)
     {
-        const auto& voice = defaultVoices[index];
+        const auto voiceId = lps::VoiceId {
+            static_cast<std::uint32_t>(voiceIndex) };
+        auto resolvedVoice = std::make_unique<lps::Voice>(voiceId);
+        bool voiceConfigured = resolvedVoice->addParameter(
+                lps::VoiceParameterDescriptor::pitch(pitchParameter))
+            && resolvedVoice->addParameter(
+                lps::VoiceParameterDescriptor::intensity(intensityParameter))
+            && resolvedVoice->addParameter(
+                lps::VoiceParameterDescriptor::gate(gateParameter));
+        if (voiceIndex == synthTwoVoiceIndex)
+        {
+            for (std::size_t parameterIndex = 0;
+                 parameterIndex < synthTwoParameters.size();
+                 ++parameterIndex)
+            {
+                lps::VoiceParameterDescriptor descriptor;
+                descriptor.id = lps::VoiceParameterId {
+                    static_cast<std::uint16_t>(parameterIndex + 3) };
+                descriptor.role = lps::VoiceParameterRole::continuousControl;
+                descriptor.behavior = lps::VoiceParameterBehavior::continuous;
+                descriptor.minimum = 0.0f;
+                descriptor.maximum = 127.0f;
+                descriptor.interpolation = lps::InterpolationPolicy::step;
+                voiceConfigured = resolvedVoice->addParameter(descriptor)
+                    && voiceConfigured;
+            }
+        }
+        const bool registered = runtimeGraph_->registerVoice(*resolvedVoice);
+        jassert(voiceConfigured && registered);
+        (void) voiceConfigured;
+        (void) registered;
+        voices_.push_back(std::move(resolvedVoice));
+    }
+
+    for (std::size_t index = 0; index < totalPlayerCount; ++index)
+    {
+        const auto voiceIndex = index < defaultVoices.size()
+            ? index : synthTwoVoiceIndex;
+        const auto& voice = defaultVoices[voiceIndex];
+        const auto voiceId = lps::VoiceId {
+            static_cast<std::uint32_t>(voiceIndex) };
         auto player = std::make_unique<lps::PatternPlayer>(patternLibrary_);
         player->setRuntimeId(static_cast<std::uint32_t>(index));
         if (patternLibrary_.size() != 0)
@@ -181,8 +264,6 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         }
         auto* patternController = player.get();
         const auto patternId = lps::PatternPlayerId {
-            static_cast<std::uint32_t>(index) };
-        const auto voiceId = lps::VoiceId {
             static_cast<std::uint32_t>(index) };
         const auto modulationBase = static_cast<std::uint32_t>(index * 3);
         const auto pitchModulationId = lps::ModulationPlayerId {modulationBase};
@@ -205,24 +286,10 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         gatePlayer->selectModulation(gateRecord.entry->id);
         const auto hitAdvance = lps::PatternHitAdvance {patternId};
 
-        auto resolvedVoice = std::make_unique<lps::Voice>(voiceId);
-        constexpr lps::VoiceParameterId pitchParameter {0};
-        constexpr lps::VoiceParameterId intensityParameter {1};
-        constexpr lps::VoiceParameterId gateParameter {2};
-        const bool voiceConfigured = resolvedVoice->addParameter(
-                lps::VoiceParameterDescriptor::pitch(pitchParameter))
-            && resolvedVoice->addParameter(
-                lps::VoiceParameterDescriptor::intensity(intensityParameter))
-            && resolvedVoice->addParameter(
-                lps::VoiceParameterDescriptor::gate(gateParameter));
-        jassert(voiceConfigured);
-        (void) voiceConfigured;
-
         const bool nodesRegistered = runtimeGraph_->registerPatternPlayer(*player)
             && runtimeGraph_->registerModulationPlayer(*pitchPlayer)
             && runtimeGraph_->registerModulationPlayer(*velocityPlayer)
-            && runtimeGraph_->registerModulationPlayer(*gatePlayer)
-            && runtimeGraph_->registerVoice(*resolvedVoice);
+            && runtimeGraph_->registerModulationPlayer(*gatePlayer);
         jassert(nodesRegistered);
         (void) nodesRegistered;
 
@@ -231,84 +298,60 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
                 lps::PatternTransitionPolicyType::explicitBoundary, {}}
             : lps::PatternTransitionPolicy {
                 lps::PatternTransitionPolicyType::immediate, {}};
-        const bool playerConfigsAdded = graphConfig.addPlayerConfig(
+        const bool playerConfigsAdded = runtimeConfig_.addPlayerConfig(
                 {patternId, lps::ClockAdvance {0.25},
                     lps::PlayMode::continuous, transitionPolicy})
-            && graphConfig.addPlayerConfig(
+            && runtimeConfig_.addPlayerConfig(
                 {pitchModulationId, hitAdvance, lps::PlayMode::continuous,
                     waitForCycleBeforeSelection})
-            && graphConfig.addPlayerConfig(
+            && runtimeConfig_.addPlayerConfig(
                 {velocityModulationId, hitAdvance, lps::PlayMode::continuous,
                     waitForCycleBeforeSelection})
-            && graphConfig.addPlayerConfig(
+            && runtimeConfig_.addPlayerConfig(
                 {gateModulationId, hitAdvance, lps::PlayMode::continuous,
                     waitForCycleBeforeSelection});
         jassert(playerConfigsAdded);
         (void) playerConfigsAdded;
 
-        const auto midiEndpoint = voice.midiChannel == synthOneMidiChannel
-            ? synthOneMidiOutputEndpoint
-            : voice.midiChannel == synthTwoMidiChannel
-                ? synthTwoMidiOutputEndpoint
-                : drumMidiOutputEndpoint;
-        bool bindingsAdded = graphConfig.add(lps::TriggerBinding {
+        const bool bindingsAdded = runtimeConfig_.add(lps::TriggerBinding {
                 lps::TriggerBindingId {static_cast<std::uint32_t>(index)},
                 patternId, voiceId})
-            && graphConfig.add(lps::ParameterBinding {
+            && runtimeConfig_.add(lps::ParameterBinding {
                 lps::ParameterBindingId {modulationBase},
-                pitchModulationId, voiceId, pitchParameter})
-            && graphConfig.add(lps::ParameterBinding {
+                pitchModulationId, voiceId, pitchParameter, patternId})
+            && runtimeConfig_.add(lps::ParameterBinding {
                 lps::ParameterBindingId {modulationBase + 1},
-                velocityModulationId, voiceId, intensityParameter})
-            && graphConfig.add(lps::ParameterBinding {
+                velocityModulationId, voiceId, intensityParameter, patternId})
+            && runtimeConfig_.add(lps::ParameterBinding {
                 lps::ParameterBindingId {modulationBase + 2},
-                gateModulationId, voiceId, gateParameter})
-            && graphConfig.add(lps::OutputBinding {
-                lps::OutputBindingId {
-                    static_cast<std::uint32_t>(index * 2) },
-                voiceId, midiEndpoint,
-                lps::RouteId {static_cast<std::uint32_t>(index)}, {},
-                lps::OutputSignalType::triggers});
-        if (voice.hasCvOutput)
-        {
-            bindingsAdded = bindingsAdded
-                && graphConfig.add(lps::OutputBinding {
-                lps::OutputBindingId {
-                    static_cast<std::uint32_t>(index * 2 + 1) },
-                voiceId, cvOutputEndpoint,
-                lps::RouteId {static_cast<std::uint32_t>(index)}, {},
-                lps::OutputSignalType::triggers});
-        }
+                gateModulationId, voiceId, gateParameter, patternId});
         jassert(bindingsAdded);
         (void) bindingsAdded;
 
-        const auto routeId = lps::RouteId {static_cast<std::uint32_t>(index)};
+        const auto routeId = lps::RouteId {
+            static_cast<std::uint32_t>(voiceIndex)};
         const auto cvRouteId = routeId;
-        if (voice.hasCvOutput)
-        {
-            jassert(index < cvPlayerCapacity);
-            const int cvChannel = static_cast<int>(index)
-                * cvChannelsPerPlayer;
-            const bool cvConfigured = cvRenderer_->configureRoute(
-                    cvRouteId,
-                    { cvChannel, cvChannel + 1, cvChannel + 2 });
-            jassert(cvConfigured);
-            (void) cvConfigured;
-        }
 
         PlayerBundle bundle;
+        const auto synthSlot = index >= synthTwoVoiceIndex
+            ? index - synthTwoVoiceIndex : 0;
+        const auto playerName = voiceIndex == synthTwoVoiceIndex
+            ? juce::String("Synth 2 / Pattern ")
+                + juce::String(static_cast<int>(synthSlot + 1))
+            : juce::String(voice.name);
         bundle.descriptor = {
-            voice.name,
+            playerName,
             voice.midiNote,
             voice.midiChannel,
-            voice.hasCvOutput
+            voice.hasCvOutput,
+            voiceIndex,
+            voiceId
         };
         bundle.patternController = patternController;
         bundle.patternModel = patternController;
         bundle.pitchPlayer = std::move(pitchPlayer);
         bundle.velocityPlayer = std::move(velocityPlayer);
         bundle.gatePlayer = std::move(gatePlayer);
-        bundle.voice = std::move(resolvedVoice);
         bundle.midiRouteId = routeId;
         bundle.cvRouteId = cvRouteId;
         bundle.realtime = std::move(player);
@@ -325,7 +368,137 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         }
     }
 
-    const bool graphActivated = runtimeGraph_->activate(graphConfig);
+    for (std::size_t slot = 0; slot < synthTwoPatternCount; ++slot)
+    {
+        synthLaneAdvanceModes_.push_back(
+            std::make_unique<std::atomic<std::uint8_t>>(
+                static_cast<std::uint8_t>(ModulationAdvanceMode::onHit)));
+        synthLanePatternSlots_.push_back(
+            std::make_unique<std::atomic<std::size_t>>(slot));
+    }
+
+    const auto firstSynthParameterModulationId = static_cast<std::uint32_t>(
+        totalPlayerCount * modulationLaneCount);
+    const auto synthVoiceId = lps::VoiceId {
+        static_cast<std::uint32_t>(synthTwoVoiceIndex) };
+    const auto firstSynthPatternId = lps::PatternPlayerId {
+        static_cast<std::uint32_t>(synthTwoVoiceIndex) };
+    for (std::size_t parameterIndex = 0;
+         parameterIndex < synthTwoParameters.size();
+         ++parameterIndex)
+    {
+        const auto& definition = synthTwoParameters[parameterIndex];
+        const auto modulationId = lps::ModulationPlayerId {
+            firstSynthParameterModulationId
+                + static_cast<std::uint32_t>(parameterIndex) };
+        const auto parameterId = lps::VoiceParameterId {
+            static_cast<std::uint16_t>(parameterIndex + 3) };
+        const auto record = addDefaultModulation(
+            std::string("Volca Keys ") + definition.name,
+            constantModulation(
+                static_cast<float>(definition.initialValue) / 127.0f));
+        jassert(record.entry != nullptr);
+        auto player = std::make_unique<lps::ModulationPlayer>(
+            modulationLibrary_, modulationId);
+        player->selectModulation(record.entry->id);
+        const bool registered = runtimeGraph_->registerModulationPlayer(*player);
+        const bool configured = runtimeConfig_.addPlayerConfig({
+            modulationId,
+            lps::PatternHitAdvance {firstSynthPatternId},
+            lps::PlayMode::continuous,
+            waitForCycleBeforeSelection});
+        const bool bound = runtimeConfig_.add(lps::ParameterBinding {
+            lps::ParameterBindingId {modulationId.value},
+            modulationId,
+            synthVoiceId,
+            parameterId,
+            {}});
+        jassert(registered && configured && bound);
+        (void) registered;
+        (void) configured;
+        (void) bound;
+
+        synthParameterLanes_.push_back({
+            std::move(player),
+            parameterId,
+            definition.section,
+            definition.name,
+            definition.midiCc
+        });
+        synthParameterCurrentSteps_.push_back(
+            std::make_unique<std::atomic<int>>(-1));
+        synthLaneAdvanceModes_.push_back(
+            std::make_unique<std::atomic<std::uint8_t>>(
+                static_cast<std::uint8_t>(ModulationAdvanceMode::onHit)));
+        synthLanePatternSlots_.push_back(
+            std::make_unique<std::atomic<std::size_t>>(0));
+    }
+
+    std::uint32_t outputBindingId = 0;
+    for (std::size_t voiceIndex = 0;
+         voiceIndex < defaultVoices.size();
+         ++voiceIndex)
+    {
+        const auto& voice = defaultVoices[voiceIndex];
+        const auto voiceId = lps::VoiceId {
+            static_cast<std::uint32_t>(voiceIndex) };
+        const auto route = lps::RouteId {
+            static_cast<std::uint32_t>(voiceIndex) };
+        const auto midiEndpoint = voice.midiChannel == synthOneMidiChannel
+            ? synthOneMidiOutputEndpoint
+            : voice.midiChannel == synthTwoMidiChannel
+                ? synthTwoMidiOutputEndpoint
+                : drumMidiOutputEndpoint;
+        bool added = runtimeConfig_.add(lps::OutputBinding {
+            lps::OutputBindingId {outputBindingId++},
+            voiceId,
+            midiEndpoint,
+            route,
+            {},
+            lps::OutputSignalType::triggers});
+        if (voice.hasCvOutput)
+        {
+            added = runtimeConfig_.add(lps::OutputBinding {
+                lps::OutputBindingId {outputBindingId++},
+                voiceId,
+                cvOutputEndpoint,
+                route,
+                {},
+                lps::OutputSignalType::triggers}) && added;
+            jassert(voiceIndex < cvPlayerCapacity);
+            const int cvChannel = static_cast<int>(voiceIndex)
+                * cvChannelsPerPlayer;
+            const bool cvConfigured = cvRenderer_->configureRoute(
+                route, {cvChannel, cvChannel + 1, cvChannel + 2});
+            jassert(cvConfigured);
+            (void) cvConfigured;
+        }
+        jassert(added);
+        (void) added;
+    }
+
+    for (std::size_t parameterIndex = 0;
+         parameterIndex < synthParameterLanes_.size();
+         ++parameterIndex)
+    {
+        const auto route = lps::RouteId {
+            static_cast<std::uint32_t>(100 + parameterIndex) };
+        const auto& lane = synthParameterLanes_[parameterIndex];
+        const bool routeConfigured = synthTwoRenderer_->configureControlRoute(
+            route, lane.midiCc);
+        const bool outputAdded = runtimeConfig_.add(lps::OutputBinding {
+            lps::OutputBindingId {outputBindingId++},
+            synthVoiceId,
+            synthTwoMidiOutputEndpoint,
+            route,
+            lane.parameter,
+            lps::OutputSignalType::continuousParameter});
+        jassert(routeConfigured && outputAdded);
+        (void) routeConfigured;
+        (void) outputAdded;
+    }
+
+    const bool graphActivated = runtimeGraph_->activate(runtimeConfig_);
     jassert(graphActivated);
     (void) graphActivated;
     const bool barClockConfigured = runtimeGraph_->configureBarClock(
@@ -364,6 +537,50 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
                 lps::PlayerRef::modulation(
                     lps::ModulationPlayerId {modulationBase + 2}),
                 lps::PlayerCommand::resetAndPlay);
+        jassert(configured);
+        (void) configured;
+    }
+
+    const auto master = lps::PatternPlayerId {
+        static_cast<std::uint32_t>(configuredMasterIndex()) };
+    for (std::size_t slot = 0; slot < synthTwoPatternCount; ++slot)
+    {
+        const auto playerIndex = synthTwoPlayerIndexForUi(slot);
+        const bool configured = runtimeGraph_->configureArmedCommand(
+            synthPatternResetGroup(slot),
+            {master, lps::ControlSourcePort::cycleBoundary},
+            lps::PlayerRef::pattern(lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex) }),
+            lps::PlayerCommand::resetAndPlay);
+        jassert(configured);
+        (void) configured;
+    }
+
+    for (std::size_t laneIndex = 0;
+         laneIndex < synthLaneCountForUi();
+         ++laneIndex)
+    {
+        auto* lanePlayer = synthLanePlayerAt(laneIndex);
+        jassert(lanePlayer != nullptr);
+        if (lanePlayer == nullptr)
+            continue;
+
+        bool configured = runtimeGraph_->configureArmedCommand(
+            synthLaneResetGroup(laneIndex, 0),
+            {master, lps::ControlSourcePort::cycleBoundary},
+            lanePlayer->playerRef(),
+            lps::PlayerCommand::resetAndPlay);
+        for (std::size_t slot = 0; slot < synthTwoPatternCount; ++slot)
+        {
+            const auto sourceIndex = synthTwoPlayerIndexForUi(slot);
+            configured = runtimeGraph_->configureArmedCommand(
+                synthLaneResetGroup(laneIndex, slot + 1),
+                {lps::PatternPlayerId {
+                     static_cast<std::uint32_t>(sourceIndex)},
+                    lps::ControlSourcePort::hit},
+                lanePlayer->playerRef(),
+                lps::PlayerCommand::resetAndPlay) && configured;
+        }
         jassert(configured);
         (void) configured;
     }
@@ -541,7 +758,7 @@ void LivePatternSequencerProcessor::getStateInformation(
 {
     auto root = juce::DynamicObject::Ptr(new juce::DynamicObject());
     root->setProperty("format", "live-pattern-sequencer-graph-state");
-    root->setProperty("schemaVersion", 1);
+    root->setProperty("schemaVersion", 2);
 
     juce::Array<juce::var> serializedPlayers;
     for (std::size_t index = 0; index < players_.size(); ++index)
@@ -590,9 +807,41 @@ void LivePatternSequencerProcessor::getStateInformation(
         object->setProperty("muted", playerMutedForUi(index));
         object->setProperty("groupMask", static_cast<int>(
             playerGroupMasks_[index]->load(std::memory_order_relaxed)));
+        if (index >= synthTwoVoiceIndex
+            && index < synthTwoVoiceIndex + synthTwoPatternCount)
+        {
+            const auto laneIndex = index - synthTwoVoiceIndex;
+            object->setProperty(
+                "pitchAdvanceMode",
+                static_cast<int>(synthLaneAdvanceModeForUi(laneIndex)));
+        }
         serializedPlayers.add(juce::var(object.get()));
     }
     root->setProperty("players", serializedPlayers);
+
+    juce::Array<juce::var> serializedSynthLanes;
+    for (std::size_t index = 0; index < synthParameterLanes_.size(); ++index)
+    {
+        const auto laneIndex = synthTwoPatternCount + index;
+        const auto& lane = synthParameterLanes_[index];
+        auto object = juce::DynamicObject::Ptr(new juce::DynamicObject());
+        object->setProperty("cc", lane.midiCc);
+        object->setProperty("modulationId", static_cast<juce::int64>(
+            lane.player->selectedModulationId().value()));
+        juce::Array<juce::var> values;
+        const auto modulation = lane.player->modulationForSave();
+        for (std::size_t step = 0; step < modulation.length; ++step)
+            values.add(static_cast<int>(modulation.values[step].raw));
+        object->setProperty("values", values);
+        object->setProperty(
+            "advanceMode",
+            static_cast<int>(synthLaneAdvanceModeForUi(laneIndex)));
+        object->setProperty(
+            "patternSlot",
+            static_cast<int>(synthLanePatternSlotForUi(laneIndex)));
+        serializedSynthLanes.add(juce::var(object.get()));
+    }
+    root->setProperty("synthTwoParameterLanes", serializedSynthLanes);
 
     juce::Array<juce::var> suppressions;
     for (std::size_t from = 0; from < players_.size(); ++from)
@@ -619,10 +868,12 @@ void LivePatternSequencerProcessor::setStateInformation(
     const auto parsed = juce::JSON::parse(juce::String::fromUTF8(
         static_cast<const char*>(data), sizeInBytes));
     const auto* root = parsed.getDynamicObject();
+    const auto schemaVersion = root != nullptr
+        ? static_cast<int>(root->getProperty("schemaVersion")) : 0;
     if (root == nullptr
         || root->getProperty("format").toString()
             != "live-pattern-sequencer-graph-state"
-        || static_cast<int>(root->getProperty("schemaVersion")) != 1)
+        || schemaVersion < 1 || schemaVersion > 2)
         return;
 
     const auto* serializedPlayers = root->getProperty("players").getArray();
@@ -757,8 +1008,9 @@ void LivePatternSequencerProcessor::setStateInformation(
                     && static_cast<bool>(
                         object->getProperty(saved.lockedProperty)));
         }
-        runtimeGraph_->setVoiceMuted(
-            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)},
+        runtimeGraph_->setPatternPlayerMuted(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex)},
             static_cast<bool>(object->getProperty("muted")));
         playerGroupMasks_[playerIndex]->store(
             object->hasProperty("groupMask")
@@ -766,6 +1018,97 @@ void LivePatternSequencerProcessor::setStateInformation(
                     static_cast<int>(object->getProperty("groupMask")))
                 : 0,
             std::memory_order_relaxed);
+
+        if (playerIndex >= synthTwoVoiceIndex
+            && playerIndex < synthTwoVoiceIndex + synthTwoPatternCount
+            && object->hasProperty("pitchAdvanceMode"))
+        {
+            const auto mode = static_cast<int>(
+                object->getProperty("pitchAdvanceMode"));
+            if (mode < static_cast<int>(ModulationAdvanceMode::onHit)
+                || mode > static_cast<int>(ModulationAdvanceMode::onClock))
+            {
+                return;
+            }
+            setSynthLaneAdvanceMode(
+                playerIndex - synthTwoVoiceIndex,
+                static_cast<ModulationAdvanceMode>(mode));
+        }
+    }
+
+    if (schemaVersion >= 2)
+    {
+        const auto* serializedSynthLanes = root->getProperty(
+            "synthTwoParameterLanes").getArray();
+        if (serializedSynthLanes == nullptr
+            || serializedSynthLanes->size()
+                != static_cast<int>(synthParameterLanes_.size()))
+        {
+            return;
+        }
+        for (const auto& serialized : *serializedSynthLanes)
+        {
+            const auto* object = serialized.getDynamicObject();
+            const auto* values = object != nullptr
+                ? object->getProperty("values").getArray() : nullptr;
+            if (object == nullptr || values == nullptr
+                || values->isEmpty()
+                || values->size()
+                    > static_cast<int>(lps::Modulation::maxLength))
+            {
+                return;
+            }
+            const int cc = static_cast<int>(object->getProperty("cc"));
+            const auto lane = std::find_if(
+                synthParameterLanes_.begin(),
+                synthParameterLanes_.end(),
+                [cc](const auto& candidate) { return candidate.midiCc == cc; });
+            if (lane == synthParameterLanes_.end())
+                return;
+            const auto parameterIndex = static_cast<std::size_t>(
+                std::distance(synthParameterLanes_.begin(), lane));
+            const auto laneIndex = synthTwoPatternCount + parameterIndex;
+            const auto modulationId = lps::ModulationId {
+                static_cast<std::uint64_t>(static_cast<juce::int64>(
+                    object->getProperty("modulationId"))) };
+            const int mode = static_cast<int>(
+                object->getProperty("advanceMode"));
+            const int patternSlot = static_cast<int>(
+                object->getProperty("patternSlot"));
+            if (modulationLibrary_.find(modulationId) == nullptr
+                || mode < static_cast<int>(ModulationAdvanceMode::onHit)
+                || mode > static_cast<int>(ModulationAdvanceMode::onClock)
+                || patternSlot < 0
+                || patternSlot >= static_cast<int>(synthTwoPatternCount))
+            {
+                return;
+            }
+            for (const auto& value : *values)
+            {
+                if (!(value.isInt() || value.isInt64())
+                    || static_cast<juce::int64>(value) < 0
+                    || static_cast<juce::int64>(value)
+                        > lps::NormalizedValue::maximum)
+                {
+                    return;
+                }
+            }
+
+            lane->player->selectModulation(modulationId);
+            lane->player->prepare({});
+            lane->player->setLength(static_cast<std::size_t>(values->size()));
+            for (int step = 0; step < values->size(); ++step)
+            {
+                lane->player->setValue(
+                    static_cast<std::size_t>(step),
+                    {static_cast<std::uint16_t>(static_cast<juce::int64>(
+                        values->getReference(step)))});
+            }
+            setSynthLanePatternSlot(
+                laneIndex, static_cast<std::size_t>(patternSlot));
+            setSynthLaneAdvanceMode(
+                laneIndex, static_cast<ModulationAdvanceMode>(mode));
+        }
     }
 
     for (std::size_t from = 0; from < players_.size(); ++from)
@@ -881,6 +1224,27 @@ juce::String LivePatternSequencerProcessor::playerNameForUi(std::size_t playerIn
     return playerIndex < players_.size()
         ? players_[playerIndex].descriptor.name
         : juce::String {};
+}
+
+std::size_t LivePatternSequencerProcessor::voiceCountForUi() const noexcept
+{
+    return voices_.size();
+}
+
+juce::String LivePatternSequencerProcessor::voiceNameForUi(
+    std::size_t voiceIndex) const
+{
+    return voiceIndex < defaultVoices.size()
+        ? juce::String(defaultVoices[voiceIndex].name)
+        : juce::String {};
+}
+
+std::size_t LivePatternSequencerProcessor::playerVoiceIndexForUi(
+    std::size_t playerIndex) const noexcept
+{
+    return playerIndex < players_.size()
+        ? players_[playerIndex].descriptor.voiceIndex
+        : voices_.size();
 }
 
 bool LivePatternSequencerProcessor::playerSupportsPatternEditingForUi(
@@ -1278,6 +1642,15 @@ LivePatternSequencerProcessor::savePlayerModulation(
         return {};
     }
 
+    return saveModulationPlayer(*player, candidateModulation, name);
+}
+
+LivePatternSequencerProcessor::SaveModulationResult
+LivePatternSequencerProcessor::saveModulationPlayer(
+    lps::ModulationPlayer& player,
+    const lps::Modulation& candidateModulation,
+    const juce::String& name)
+{
     try
     {
         if (const auto* existing = modulationLibrary_.findEquivalent(
@@ -1287,7 +1660,7 @@ LivePatternSequencerProcessor::savePlayerModulation(
             if (!index)
                 return {};
 
-            player->selectModulation(existing->id);
+            player.selectModulation(existing->id);
             return {
                 SaveModulationStatus::selectedExisting,
                 *index,
@@ -1310,7 +1683,7 @@ LivePatternSequencerProcessor::savePlayerModulation(
         if (!index)
             return {};
 
-        player->selectModulation(insertion.entry->id);
+        player.selectModulation(insertion.entry->id);
         return {
             insertion.inserted
                 ? SaveModulationStatus::savedNew
@@ -1387,8 +1760,9 @@ bool LivePatternSequencerProcessor::schedulePlayerMute(
     std::size_t barsFromNow) noexcept
 {
     return playerIndex < players_.size()
-        && runtimeGraph_->scheduleVoiceMute(
-            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)},
+        && runtimeGraph_->schedulePatternPlayerMute(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex)},
             muted,
             barsFromNow);
 }
@@ -1397,8 +1771,9 @@ bool LivePatternSequencerProcessor::playerMutedForUi(
     std::size_t playerIndex) const noexcept
 {
     return playerIndex < players_.size()
-        && runtimeGraph_->voiceMuted(
-            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)});
+        && runtimeGraph_->patternPlayerMuted(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex)});
 }
 
 bool LivePatternSequencerProcessor::playerTargetMutedForUi(
@@ -1406,8 +1781,9 @@ bool LivePatternSequencerProcessor::playerTargetMutedForUi(
 {
     if (playerIndex >= players_.size())
         return false;
-    const auto pending = runtimeGraph_->scheduledVoiceMute(
-        lps::VoiceId {static_cast<std::uint32_t>(playerIndex)});
+    const auto pending = runtimeGraph_->scheduledPatternPlayerMute(
+        lps::PatternPlayerId {
+            static_cast<std::uint32_t>(playerIndex)});
     return pending.value_or(playerMutedForUi(playerIndex));
 }
 
@@ -1415,8 +1791,9 @@ bool LivePatternSequencerProcessor::playerMuteChangePendingForUi(
     std::size_t playerIndex) const noexcept
 {
     return playerIndex < players_.size()
-        && runtimeGraph_->scheduledVoiceMuteBarsRemaining(
-            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)}) != 0;
+        && runtimeGraph_->scheduledPatternPlayerMuteBarsRemaining(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex)}) != 0;
 }
 
 std::size_t LivePatternSequencerProcessor::currentBarForUi() const noexcept
@@ -1434,8 +1811,9 @@ LivePatternSequencerProcessor::playerMuteChangeBarsRemainingForUi(
     std::size_t playerIndex) const noexcept
 {
     return playerIndex < players_.size()
-        ? runtimeGraph_->scheduledVoiceMuteBarsRemaining(
-            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)})
+        ? runtimeGraph_->scheduledPatternPlayerMuteBarsRemaining(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex)})
         : 0;
 }
 
@@ -1445,8 +1823,9 @@ bool LivePatternSequencerProcessor::playerMuteScheduledAtBarOffsetForUi(
     std::size_t barsFromNow) const noexcept
 {
     return playerIndex < players_.size()
-        && runtimeGraph_->voiceMuteScheduledAtBarOffset(
-            lps::VoiceId {static_cast<std::uint32_t>(playerIndex)},
+        && runtimeGraph_->patternPlayerMuteScheduledAtBarOffset(
+            lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex)},
             muted,
             barsFromNow);
 }
@@ -1575,8 +1954,9 @@ bool LivePatternSequencerProcessor::groupMuteScheduledAtBarOffsetForUi(
     for (std::size_t playerIndex = 0; playerIndex < players_.size(); ++playerIndex)
     {
         if (playerInGroupForUi(playerIndex, groupIndex)
-            && runtimeGraph_->voiceMuteScheduledAtBarOffset(
-                lps::VoiceId {static_cast<std::uint32_t>(playerIndex)},
+            && runtimeGraph_->patternPlayerMuteScheduledAtBarOffset(
+                lps::PatternPlayerId {
+                    static_cast<std::uint32_t>(playerIndex)},
                 muted,
                 barsFromNow))
         {
@@ -1618,6 +1998,365 @@ bool LivePatternSequencerProcessor::suppression(
                 static_cast<std::uint32_t>(suppressedIndex) });
 }
 
+void LivePatternSequencerProcessor::setVoiceSuppression(
+    std::size_t suppressorVoiceIndex,
+    std::size_t suppressedVoiceIndex,
+    bool enabled) noexcept
+{
+    if (suppressorVoiceIndex >= voices_.size()
+        || suppressedVoiceIndex >= voices_.size()
+        || suppressorVoiceIndex == suppressedVoiceIndex)
+    {
+        return;
+    }
+
+    for (std::size_t from = 0; from < players_.size(); ++from)
+        for (std::size_t to = 0; to < players_.size(); ++to)
+            if (players_[from].descriptor.voiceIndex == suppressorVoiceIndex
+                && players_[to].descriptor.voiceIndex == suppressedVoiceIndex)
+                setSuppression(from, to, enabled);
+}
+
+bool LivePatternSequencerProcessor::voiceSuppression(
+    std::size_t suppressorVoiceIndex,
+    std::size_t suppressedVoiceIndex) const noexcept
+{
+    if (suppressorVoiceIndex >= voices_.size()
+        || suppressedVoiceIndex >= voices_.size()
+        || suppressorVoiceIndex == suppressedVoiceIndex)
+    {
+        return false;
+    }
+
+    bool found = false;
+    for (std::size_t from = 0; from < players_.size(); ++from)
+    {
+        for (std::size_t to = 0; to < players_.size(); ++to)
+        {
+            if (players_[from].descriptor.voiceIndex != suppressorVoiceIndex
+                || players_[to].descriptor.voiceIndex != suppressedVoiceIndex)
+            {
+                continue;
+            }
+            found = true;
+            if (!suppression(from, to))
+                return false;
+        }
+    }
+    return found;
+}
+
+std::size_t LivePatternSequencerProcessor::synthTwoPlayerIndexForUi(
+    std::size_t patternSlot) const noexcept
+{
+    const auto index = synthTwoVoiceIndex + patternSlot;
+    return patternSlot < synthTwoPatternCount && index < players_.size()
+        ? index : players_.size();
+}
+
+std::size_t LivePatternSequencerProcessor::synthPatternResetGroup(
+    std::size_t patternSlot) const noexcept
+{
+    return players_.size() + patternSlot;
+}
+
+std::size_t LivePatternSequencerProcessor::synthLaneResetGroup(
+    std::size_t laneIndex,
+    std::size_t sourceIndex) const noexcept
+{
+    constexpr std::size_t sourceCount = synthTwoPatternCount + 1;
+    return players_.size() + synthTwoPatternCount
+        + laneIndex * sourceCount + sourceIndex;
+}
+
+bool LivePatternSequencerProcessor::resetSynthPatternToMaster(
+    std::size_t patternSlot) noexcept
+{
+    if (synthTwoPlayerIndexForUi(patternSlot) >= players_.size())
+        return false;
+    return runtimeGraph_->armCommand(synthPatternResetGroup(patternSlot));
+}
+
+bool LivePatternSequencerProcessor::synthPatternResetPendingForUi(
+    std::size_t patternSlot) const noexcept
+{
+    return patternSlot < synthTwoPatternCount
+        && runtimeGraph_->commandPending(
+            synthPatternResetGroup(patternSlot));
+}
+
+std::size_t LivePatternSequencerProcessor::synthLaneCountForUi() const noexcept
+{
+    return synthTwoPatternCount + synthParameterLanes_.size();
+}
+
+LivePatternSequencerProcessor::SynthLaneInfo
+LivePatternSequencerProcessor::synthLaneInfoForUi(
+    std::size_t laneIndex) const
+{
+    if (laneIndex < synthTwoPatternCount)
+    {
+        return {
+            "Notes",
+            "Pitch " + juce::String(static_cast<int>(laneIndex + 1)),
+            -1,
+            true,
+            laneIndex
+        };
+    }
+    const auto parameterIndex = laneIndex - synthTwoPatternCount;
+    if (parameterIndex >= synthParameterLanes_.size())
+        return {};
+    const auto& lane = synthParameterLanes_[parameterIndex];
+    return {
+        lane.section,
+        lane.name,
+        lane.midiCc,
+        false,
+        synthLanePatternSlotForUi(laneIndex)
+    };
+}
+
+lps::ModulationPlayer* LivePatternSequencerProcessor::synthLanePlayerAt(
+    std::size_t laneIndex) noexcept
+{
+    if (laneIndex < synthTwoPatternCount)
+    {
+        const auto playerIndex = synthTwoPlayerIndexForUi(laneIndex);
+        return modulationPlayerAt(playerIndex, ModulationLane::pitch);
+    }
+    const auto parameterIndex = laneIndex - synthTwoPatternCount;
+    return parameterIndex < synthParameterLanes_.size()
+        ? synthParameterLanes_[parameterIndex].player.get() : nullptr;
+}
+
+const lps::ModulationPlayer* LivePatternSequencerProcessor::synthLanePlayerAt(
+    std::size_t laneIndex) const noexcept
+{
+    if (laneIndex < synthTwoPatternCount)
+    {
+        const auto playerIndex = synthTwoPlayerIndexForUi(laneIndex);
+        return modulationPlayerAt(playerIndex, ModulationLane::pitch);
+    }
+    const auto parameterIndex = laneIndex - synthTwoPatternCount;
+    return parameterIndex < synthParameterLanes_.size()
+        ? synthParameterLanes_[parameterIndex].player.get() : nullptr;
+}
+
+lps::Modulation LivePatternSequencerProcessor::synthLaneModulationForUi(
+    std::size_t laneIndex) const noexcept
+{
+    const auto* player = synthLanePlayerAt(laneIndex);
+    return player != nullptr ? player->modulationForUi() : lps::Modulation {};
+}
+
+bool LivePatternSequencerProcessor::synthLaneModulationModifiedForUi(
+    std::size_t laneIndex) const noexcept
+{
+    const auto* player = synthLanePlayerAt(laneIndex);
+    return player != nullptr && player->hasUnsavedChanges();
+}
+
+std::size_t LivePatternSequencerProcessor::selectedSynthLaneModulationForUi(
+    std::size_t laneIndex) const noexcept
+{
+    const auto* player = synthLanePlayerAt(laneIndex);
+    if (player == nullptr)
+        return 0;
+
+    return modulationLibrary_.indexOf(
+        player->selectedModulationId()).value_or(0);
+}
+
+void LivePatternSequencerProcessor::selectModulationForSynthLane(
+    std::size_t laneIndex,
+    std::size_t modulationIndex) noexcept
+{
+    auto* player = synthLanePlayerAt(laneIndex);
+    const auto* modulation = modulationLibrary_.recordAt(modulationIndex);
+    if (player != nullptr && modulation != nullptr)
+        player->selectModulation(modulation->id);
+}
+
+LivePatternSequencerProcessor::SaveModulationResult
+LivePatternSequencerProcessor::saveSynthLaneModulation(
+    std::size_t laneIndex,
+    const juce::String& name)
+{
+    auto* player = synthLanePlayerAt(laneIndex);
+    if (player == nullptr)
+        return {};
+
+    const auto candidate = player->modulationForSave();
+    if (candidate.length == 0
+        || candidate.length > lps::Modulation::maxLength)
+    {
+        return {};
+    }
+
+    return saveModulationPlayer(*player, candidate, name);
+}
+
+int LivePatternSequencerProcessor::synthLaneCurrentStepForUi(
+    std::size_t laneIndex) const noexcept
+{
+    if (laneIndex < synthTwoPatternCount)
+    {
+        return currentModulationStepForUi(
+            synthTwoPlayerIndexForUi(laneIndex), ModulationLane::pitch);
+    }
+    const auto parameterIndex = laneIndex - synthTwoPatternCount;
+    return parameterIndex < synthParameterCurrentSteps_.size()
+        ? synthParameterCurrentSteps_[parameterIndex]->load(
+            std::memory_order_relaxed)
+        : -1;
+}
+
+LivePatternSequencerProcessor::ModulationAdvanceMode
+LivePatternSequencerProcessor::synthLaneAdvanceModeForUi(
+    std::size_t laneIndex) const noexcept
+{
+    if (laneIndex >= synthLaneAdvanceModes_.size())
+        return ModulationAdvanceMode::onHit;
+    return static_cast<ModulationAdvanceMode>(
+        synthLaneAdvanceModes_[laneIndex]->load(std::memory_order_relaxed));
+}
+
+std::size_t LivePatternSequencerProcessor::synthLanePatternSlotForUi(
+    std::size_t laneIndex) const noexcept
+{
+    return laneIndex < synthLanePatternSlots_.size()
+        ? synthLanePatternSlots_[laneIndex]->load(std::memory_order_relaxed)
+        : 0;
+}
+
+bool LivePatternSequencerProcessor::resetSynthLane(
+    std::size_t laneIndex) noexcept
+{
+    if (laneIndex >= synthLaneCountForUi())
+        return false;
+    const auto mode = synthLaneAdvanceModeForUi(laneIndex);
+    const auto sourceIndex = mode == ModulationAdvanceMode::onClock
+        ? 0
+        : synthLanePatternSlotForUi(laneIndex) + 1;
+    return runtimeGraph_->armCommand(
+        synthLaneResetGroup(laneIndex, sourceIndex));
+}
+
+bool LivePatternSequencerProcessor::synthLaneResetPendingForUi(
+    std::size_t laneIndex) const noexcept
+{
+    if (laneIndex >= synthLaneCountForUi())
+        return false;
+    for (std::size_t sourceIndex = 0;
+         sourceIndex <= synthTwoPatternCount;
+         ++sourceIndex)
+    {
+        if (runtimeGraph_->commandPending(
+                synthLaneResetGroup(laneIndex, sourceIndex)))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LivePatternSequencerProcessor::publishSynthLaneAdvanceSource(
+    std::size_t laneIndex,
+    ModulationAdvanceMode mode,
+    std::size_t patternSlot) noexcept
+{
+    auto* player = synthLanePlayerAt(laneIndex);
+    const auto sourceIndex = synthTwoPlayerIndexForUi(patternSlot);
+    if (player == nullptr || sourceIndex >= players_.size()
+        || laneIndex >= synthLaneAdvanceModes_.size()
+        || laneIndex >= synthLanePatternSlots_.size())
+    {
+        return false;
+    }
+
+    auto candidate = runtimeConfig_;
+    bool found = false;
+    for (std::size_t index = 0;
+         index < candidate.modulationPlayerConfigCount;
+         ++index)
+    {
+        auto& config = candidate.modulationPlayerConfigs[index];
+        if (config.player.value != player->playerRef().value)
+            continue;
+        config.advanceSource = mode == ModulationAdvanceMode::onClock
+            ? lps::AdvanceSource {lps::ClockAdvance {0.25}}
+            : lps::AdvanceSource {lps::PatternHitAdvance {
+                lps::PatternPlayerId {
+                    static_cast<std::uint32_t>(sourceIndex) }}};
+        config.quantizeSelectionToPatternCycle =
+            mode == ModulationAdvanceMode::onHit
+                && waitForCycleBeforeSelection;
+        found = true;
+        break;
+    }
+    if (!found || !runtimeGraph_->publish(candidate))
+        return false;
+
+    runtimeConfig_ = candidate;
+    synthLaneAdvanceModes_[laneIndex]->store(
+        static_cast<std::uint8_t>(mode), std::memory_order_relaxed);
+    synthLanePatternSlots_[laneIndex]->store(
+        patternSlot, std::memory_order_relaxed);
+    return true;
+}
+
+void LivePatternSequencerProcessor::setSynthLaneAdvanceMode(
+    std::size_t laneIndex,
+    ModulationAdvanceMode mode) noexcept
+{
+    (void) publishSynthLaneAdvanceSource(
+        laneIndex, mode, synthLanePatternSlotForUi(laneIndex));
+}
+
+void LivePatternSequencerProcessor::setSynthLanePatternSlot(
+    std::size_t laneIndex,
+    std::size_t patternSlot) noexcept
+{
+    if (patternSlot < synthTwoPatternCount)
+        (void) publishSynthLaneAdvanceSource(
+            laneIndex, synthLaneAdvanceModeForUi(laneIndex), patternSlot);
+}
+
+void LivePatternSequencerProcessor::setSynthLaneValue(
+    std::size_t laneIndex,
+    std::size_t step,
+    std::uint8_t value) noexcept
+{
+    if (laneIndex < synthTwoPatternCount)
+    {
+        setPlayerModulationValue(
+            synthTwoPlayerIndexForUi(laneIndex),
+            ModulationLane::pitch,
+            step,
+            value);
+        return;
+    }
+    if (auto* player = synthLanePlayerAt(laneIndex))
+        player->setUnipolar8Value(step, value);
+}
+
+void LivePatternSequencerProcessor::setSynthLaneLength(
+    std::size_t laneIndex,
+    std::size_t length) noexcept
+{
+    if (laneIndex < synthTwoPatternCount)
+    {
+        setPlayerModulationLength(
+            synthTwoPlayerIndexForUi(laneIndex),
+            ModulationLane::pitch,
+            length);
+        return;
+    }
+    if (auto* player = synthLanePlayerAt(laneIndex))
+        player->setLength(length);
+}
+
 void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
 {
     bool anyPlaying = false;
@@ -1646,6 +2385,16 @@ void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
                 ->store(snapshot.currentStep, std::memory_order_relaxed);
         }
         anyPlaying = anyPlaying || patternSnapshot.playing;
+    }
+
+    for (std::size_t index = 0;
+         index < synthParameterLanes_.size();
+         ++index)
+    {
+        const auto snapshot = synthParameterLanes_[index].player
+            ->modulationPlaybackSnapshot();
+        synthParameterCurrentSteps_[index]->store(
+            snapshot.currentStep, std::memory_order_relaxed);
     }
 
     playing_.store(anyPlaying, std::memory_order_relaxed);
