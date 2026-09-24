@@ -189,6 +189,135 @@ void testContinuousControlRoutesRenderMidiCc()
     CHECK(metadata.getMessage().getControllerNumber() == 44);
     CHECK(metadata.getMessage().getControllerValue() == 91);
 }
+
+void testVolcaSampleSelectionRendersBankAndRemainderControllers()
+{
+    lps::MidiBufferRenderer renderer {11};
+    CHECK(renderer.configureVolcaSampleSelectRoute({42}));
+    CHECK(renderer.configureMidiChannel({42}, 4));
+    juce::MidiBuffer midi;
+    renderer.setMidiBuffer(midi);
+
+    lps::RoutedEvent routed;
+    routed.routeId = {42};
+    routed.frameOffset = 17;
+    routed.event = lps::SequencerEvent::voiceControlPoint(
+        0.0, lps::VoiceParameterId {3}, 150.0f);
+    CHECK(renderer.renderBlock({}, {&routed, 1}));
+    CHECK(midi.getNumEvents() == 2);
+    auto event = midi.begin();
+    CHECK((*event).getMessage().getChannel() == 4);
+    CHECK((*event).getMessage().getControllerNumber() == 3);
+    CHECK((*event).getMessage().getControllerValue() == 1);
+    ++event;
+    CHECK((*event).getMessage().getChannel() == 4);
+    CHECK((*event).getMessage().getControllerNumber() == 35);
+    CHECK((*event).getMessage().getControllerValue() == 50);
+
+    // Staying in the same hundred suppresses the unchanged bank CC.
+    midi.clear();
+    routed.event.normalizedValue = 175.0f;
+    CHECK(renderer.renderBlock({}, {&routed, 1}));
+    CHECK(midi.getNumEvents() == 1);
+    CHECK((*midi.begin()).getMessage().getControllerNumber() == 35);
+    CHECK((*midi.begin()).getMessage().getControllerValue() == 75);
+}
+
+void testUnchangedContinuousControlsAreSuppressedUntilReset()
+{
+    lps::MidiBufferRenderer renderer {13};
+    CHECK(renderer.configureControlRoute({42}, 44));
+    CHECK(renderer.configureControlRoute({43}, 44));
+    juce::MidiBuffer midi;
+    renderer.setMidiBuffer(midi);
+
+    lps::RoutedEvent first;
+    first.routeId = {42};
+    first.frameOffset = 17;
+    first.event = lps::SequencerEvent::voiceControlPoint(
+        0.0, lps::VoiceParameterId {3}, 91.0f);
+    CHECK(renderer.renderBlock({}, {&first, 1}));
+    CHECK(midi.getNumEvents() == 1);
+
+    // The cache is keyed by the rendered channel/controller destination,
+    // rather than the logical route that happened to produce the value.
+    midi.clear();
+    auto sameDestination = first;
+    sameDestination.routeId = {43};
+    sameDestination.frameOffset = 29;
+    CHECK(renderer.renderBlock({}, {&sameDestination, 1}));
+    CHECK(midi.isEmpty());
+
+    midi.clear();
+    auto changed = first;
+    changed.event.normalizedValue = 92.0f;
+    CHECK(renderer.renderBlock({}, {&changed, 1}));
+    CHECK(midi.getNumEvents() == 1);
+    CHECK((*midi.begin()).getMessage().getControllerValue() == 92);
+
+    renderer.resetOutputs();
+    midi.clear();
+    CHECK(renderer.renderBlock({}, {&changed, 1}));
+    CHECK(midi.getNumEvents() == 1);
+    CHECK((*midi.begin()).getMessage().isController());
+
+    midi.clear();
+    CHECK(renderer.renderBlock({}, {&changed, 1}));
+    CHECK(midi.isEmpty());
+
+    renderer.prepare({48'000.0, 512});
+    CHECK(renderer.renderBlock({}, {&changed, 1}));
+    CHECK(midi.getNumEvents() == 1);
+    CHECK((*midi.begin()).getMessage().isController());
+}
+
+void testChangedControlPrecedesNoteAtTheSameFrame()
+{
+    lps::MidiBufferRenderer renderer {13};
+    CHECK(renderer.configureControlRoute({42}, 44));
+    juce::MidiBuffer midi;
+    renderer.setMidiBuffer(midi);
+
+    lps::RoutedEvent control;
+    control.routeId = {42};
+    control.frameOffset = 17;
+    control.event = lps::SequencerEvent::voiceControlPoint(
+        0.0, lps::VoiceParameterId {3}, 91.0f);
+    auto note = routedTrigger(
+        lps::SemanticEventType::triggerStart, 1, 60.0f, 1.0f, 17);
+    note.routeId = control.routeId;
+    const std::array events {control, note};
+
+    CHECK(renderer.renderBlock({}, {events.data(), events.size()}));
+    CHECK(midi.getNumEvents() == 2);
+    auto event = midi.begin();
+    CHECK((*event).getMessage().isController());
+    ++event;
+    CHECK((*event).getMessage().isNoteOn());
+}
+
+void testRoutesCanOverrideTheTransportMidiChannel()
+{
+    lps::MidiBufferRenderer renderer {11};
+    CHECK(renderer.configureMidiChannel({7}, 4));
+    CHECK(renderer.configureMidiChannel({8}, 9));
+    juce::MidiBuffer midi;
+    renderer.setMidiBuffer(midi);
+
+    auto first = routedTrigger(
+        lps::SemanticEventType::triggerStart, 1, 60.0f, 1.0f, 0);
+    first.routeId = {7};
+    auto second = routedTrigger(
+        lps::SemanticEventType::triggerStart, 2, 61.0f, 1.0f, 1);
+    second.routeId = {8};
+    const std::array events {first, second};
+    CHECK(renderer.renderBlock({}, {events.data(), events.size()}));
+
+    auto event = midi.begin();
+    CHECK((*event).getMessage().getChannel() == 4);
+    ++event;
+    CHECK((*event).getMessage().getChannel() == 9);
+}
 }
 
 int main()
@@ -199,6 +328,10 @@ int main()
     testTriggerEndUsesThePitchRememberedForItsStart();
     testRenderReportsMissingDestination();
     testContinuousControlRoutesRenderMidiCc();
+    testVolcaSampleSelectionRendersBankAndRemainderControllers();
+    testUnchangedContinuousControlsAreSuppressedUntilReset();
+    testChangedControlPrecedesNoteAtTheSameFrame();
+    testRoutesCanOverrideTheTransportMidiChannel();
     std::cout << "All MIDI buffer transport tests passed.\n";
     return 0;
 }

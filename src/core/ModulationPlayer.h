@@ -60,6 +60,7 @@ public:
     [[nodiscard]] ModulationId activeModulationId() const noexcept;
     void setValue(std::size_t step, NormalizedValue value) noexcept;
     void setUnipolar8Value(std::size_t step, std::uint8_t value) noexcept;
+    void replaceDraft(const Modulation& modulation) noexcept;
     void setLength(std::size_t length) noexcept;
     [[nodiscard]] Modulation modulationForUi() const noexcept;
     [[nodiscard]] Modulation modulationForSave() const noexcept;

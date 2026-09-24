@@ -260,9 +260,9 @@ std::uint64_t RuntimeGraph::encodeScheduledChange(
 {
     constexpr std::uint64_t valueShift = 32;
     constexpr std::uint64_t targetShift = 41;
-    constexpr std::uint64_t barsShift = 45;
-    constexpr std::uint64_t typeShift = 49;
-    constexpr std::uint64_t activeBit = std::uint64_t {1} << 51;
+    constexpr std::uint64_t barsShift = 46;
+    constexpr std::uint64_t typeShift = 50;
+    constexpr std::uint64_t activeBit = std::uint64_t {1} << 52;
     return activeBit
         | (static_cast<std::uint64_t>(change.type) << typeShift)
         | (static_cast<std::uint64_t>(change.barsRemaining) << barsShift)
@@ -276,11 +276,11 @@ RuntimeGraph::ScheduledChangeView RuntimeGraph::decodeScheduledChange(
 {
     constexpr std::uint64_t valueShift = 32;
     constexpr std::uint64_t targetShift = 41;
-    constexpr std::uint64_t barsShift = 45;
-    constexpr std::uint64_t typeShift = 49;
+    constexpr std::uint64_t barsShift = 46;
+    constexpr std::uint64_t typeShift = 50;
     return {
         static_cast<ScheduledChangeType>((encoded >> typeShift) & 0x3u),
-        static_cast<std::size_t>((encoded >> targetShift) & 0xfu),
+        static_cast<std::size_t>((encoded >> targetShift) & 0x1fu),
         static_cast<std::uint16_t>((encoded >> valueShift) & 0x1ffu),
         static_cast<std::size_t>((encoded >> barsShift) & 0xfu),
         static_cast<std::uint32_t>(encoded & 0xffffffffu)
@@ -289,7 +289,7 @@ RuntimeGraph::ScheduledChangeView RuntimeGraph::decodeScheduledChange(
 
 bool RuntimeGraph::scheduledChangeActive(std::uint64_t encoded) noexcept
 {
-    constexpr std::uint64_t activeBit = std::uint64_t {1} << 51;
+    constexpr std::uint64_t activeBit = std::uint64_t {1} << 52;
     return (encoded & activeBit) != 0;
 }
 

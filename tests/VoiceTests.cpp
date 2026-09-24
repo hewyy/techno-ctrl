@@ -1,8 +1,10 @@
 #include "core/Voice.h"
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <utility>
 
 namespace
 {
@@ -171,6 +173,35 @@ void testSampledParametersCanBeScopedToPatternPlayers()
     CHECK(std::abs(output[1].musicalPitchSemitones - 72.0f) < 0.01f);
     CHECK(voice.active());
 }
+
+void testPitchPlaybackUsesFixedModulationMapping()
+{
+    for (const auto mapping : std::array<std::pair<std::uint8_t, float>, 3> {{
+             {120, 60.0f},
+             {121, 60.0f},
+             {122, 61.0f}
+         }})
+    {
+        lps::Voice voice(lps::VoiceId {2});
+        configureVoice(voice);
+        lps::SequencerEventBuffer output;
+        CHECK(voice.applyParameterValue(
+            pitchId,
+            lps::PlayerSignal::modulationValue(
+                0.0,
+                lps::ModulationPlayerId {4},
+                lps::NormalizedValue::fromUnipolar8(mapping.first),
+                0),
+            output));
+        CHECK(voice.applyParameterValue(
+            intensityId, value(0.0, 1.0f), output));
+        CHECK(voice.applyParameterValue(
+            gateId, value(0.0, 0.5f), output));
+        CHECK(voice.trigger(hit(1.0), 0.001, output));
+        CHECK(output.size() == 1);
+        CHECK(output[0].musicalPitchSemitones == mapping.second);
+    }
+}
 } // namespace
 
 int main()
@@ -181,6 +212,7 @@ int main()
     testZeroGateWithholdsStart();
     testContinuousParameterEmitsWithoutTrigger();
     testSampledParametersCanBeScopedToPatternPlayers();
+    testPitchPlaybackUsesFixedModulationMapping();
     std::cout << "Voice tests passed\n";
     return EXIT_SUCCESS;
 }

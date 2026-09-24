@@ -171,14 +171,23 @@ private:
         ModulationCell();
 
         void setActive(bool);
+        void setPitchDisplay(bool shouldDisplayPitch) noexcept
+        {
+            pitchDisplay_ = shouldDisplayPitch;
+            repaint();
+        }
         void paint(juce::Graphics&) override;
         void mouseDown(const juce::MouseEvent&) override;
         void mouseDrag(const juce::MouseEvent&) override;
         void mouseUp(const juce::MouseEvent&) override;
+        [[nodiscard]] int takeEditDirection() noexcept;
+        void setValueFromModel(double value);
 
     private:
         std::unique_ptr<juce::Component> activePopup_;
+        lps::QuantizedValueEditTracker editTracker_;
         bool active_ = false;
+        bool pitchDisplay_ = false;
     };
 
     using ModulationLane = LivePatternSequencerProcessor::ModulationLane;
@@ -196,7 +205,9 @@ private:
     void resizedContent();
     void resizedControlPane();
     void resizedModulationEditor();
-    void toggleModulationEditor(std::size_t playerIndex);
+    void toggleModulationEditor(
+        std::size_t playerIndex,
+        juce::Component* anchorComponent = nullptr);
     void positionModulationEditor();
     void modulationBlockLayerMouseDown();
     [[nodiscard]] std::size_t scheduledBarsFromNow() const noexcept;
@@ -241,7 +252,8 @@ private:
     [[nodiscard]] std::size_t pageSize() const noexcept;
     void pageVoices(int direction);
     void updatePageButtons();
-    void showSynthPage(bool show);
+    enum class MainPage { allVoices, synthTwo, sample };
+    void showPage(MainPage page);
     void refreshModulationControls(
         std::size_t playerIndex,
         ModulationLane lane,
@@ -263,6 +275,7 @@ private:
     PagedViewport viewport_;
     juce::Viewport synthViewport_;
     std::unique_ptr<SynthPageComponent> synthPage_;
+    std::unique_ptr<SynthPageComponent> samplePage_;
     ControlPaneComponent controlPane_;
     BarSchedulerComponent barScheduler_;
     ModulationBlockLayer modulationBlockLayer_;
@@ -274,6 +287,7 @@ private:
     UtilityButton globalPlayButton_;
     juce::TextButton voicesPageButton_ {"ALL VOICES"};
     juce::TextButton synthTwoPageButton_ {"SYNTH 2"};
+    juce::TextButton samplePageButton_ {"SAMPLE"};
     juce::Label selectionLabel_;
     std::vector<std::unique_ptr<juce::Label>> controlVoiceLabels_;
     std::vector<std::unique_ptr<SpeakerButton>>
@@ -287,7 +301,7 @@ private:
     std::array<juce::TextButton,
         LivePatternSequencerProcessor::groupCount> groupResetButtons_;
     bool suppressionMenuOpen_ = false;
-    bool synthPageVisible_ = true;
+    MainPage visiblePage_ = MainPage::synthTwo;
     enum class SuppressionMatrixScope { patternPlayers, voices };
     SuppressionMatrixScope suppressionMatrixScope_ =
         SuppressionMatrixScope::patternPlayers;
@@ -327,6 +341,7 @@ private:
     std::size_t primaryPlayerIndex_ = 0;
     std::size_t firstVisiblePlayer_ = 0;
     std::optional<std::size_t> openModulationPlayer_;
+    juce::Component* modulationEditorAnchor_ = nullptr;
     std::optional<std::size_t> selectedScheduleBar_;
     PopupKind activePopupKind_ = PopupKind::none;
     juce::Component* activePopupTarget_ = nullptr;

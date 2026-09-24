@@ -88,12 +88,12 @@ struct ModulationPlayerRuntimeConfig
 
 struct RuntimeGraphConfig
 {
-    static constexpr std::size_t maximumTriggerBindings = 32;
-    static constexpr std::size_t maximumParameterBindings = 64;
+    static constexpr std::size_t maximumTriggerBindings = 64;
+    static constexpr std::size_t maximumParameterBindings = 256;
     static constexpr std::size_t maximumCommandBindings = 64;
-    static constexpr std::size_t maximumOutputBindings = 64;
-    static constexpr std::size_t maximumPatternPlayerConfigs = 16;
-    static constexpr std::size_t maximumModulationPlayerConfigs = 64;
+    static constexpr std::size_t maximumOutputBindings = 256;
+    static constexpr std::size_t maximumPatternPlayerConfigs = 32;
+    static constexpr std::size_t maximumModulationPlayerConfigs = 256;
 
     std::array<TriggerBinding, maximumTriggerBindings> triggerBindings {};
     std::array<ParameterBinding, maximumParameterBindings> parameterBindings {};
@@ -168,17 +168,17 @@ private:
 class RuntimeGraph
 {
 public:
-    static constexpr std::size_t maximumPatternPlayers = 16;
-    static constexpr std::size_t maximumModulationPlayers = 64;
-    static constexpr std::size_t maximumVoices = 16;
-    static constexpr std::size_t maximumArmedCommandGroups = 128;
-    static constexpr std::size_t maximumArmedCommands = 192;
+    static constexpr std::size_t maximumPatternPlayers = 32;
+    static constexpr std::size_t maximumModulationPlayers = 256;
+    static constexpr std::size_t maximumVoices = 32;
+    static constexpr std::size_t maximumArmedCommandGroups = 2048;
+    static constexpr std::size_t maximumArmedCommands = 2048;
     static constexpr std::size_t maximumScheduledBars = 8;
     static constexpr std::size_t maximumScheduledChanges = 128;
     static constexpr std::size_t maximumWorkSignals = 1024;
     static constexpr std::size_t maximumOutputEndpoints = 8;
     static constexpr std::size_t maximumRoutedEventsPerEndpoint = 1024;
-    static_assert(maximumPatternPlayers <= 16 && maximumVoices <= 16);
+    static_assert(maximumPatternPlayers <= 32 && maximumVoices <= 32);
     static_assert(PatternLibrary::maxEntryCount <= 0x1ffu);
 
     [[nodiscard]] bool registerPatternPlayer(PatternPlayer& player) noexcept;

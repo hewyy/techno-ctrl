@@ -128,6 +128,26 @@ void ModulationPlayer::setUnipolar8Value(
     setValue(step, NormalizedValue::fromUnipolar8(value));
 }
 
+void ModulationPlayer::replaceDraft(const Modulation& modulation) noexcept
+{
+    if (modulation.length == 0
+        || modulation.length > Modulation::maxLength)
+    {
+        return;
+    }
+
+    const DraftWriteGuard guard {*this};
+    for (std::size_t step = 0; step < Modulation::maxLength; ++step)
+    {
+        const auto value = step < modulation.length
+            ? modulation.values[step] : NormalizedValue {};
+        values_[step].store(value.raw, std::memory_order_relaxed);
+    }
+    length_.store(modulation.length, std::memory_order_relaxed);
+    if (nextStep_ >= modulation.length)
+        nextStep_ = 0;
+}
+
 void ModulationPlayer::setLength(std::size_t length) noexcept
 {
     if (length == 0 || length > Modulation::maxLength)

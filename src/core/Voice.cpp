@@ -1,5 +1,6 @@
 #include "core/Voice.h"
 #include "core/Logger.h"
+#include "core/PitchEditing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -89,7 +90,17 @@ bool Voice::applyParameterValue(
     if (destinationValue == nullptr)
         return false;
     destinationValue->normalized = value.normalizedValue;
-    destinationValue->mapped = state->descriptor.map(value.normalizedValue);
+    if (state->descriptor.role == VoiceParameterRole::pitch)
+    {
+        const auto modulationValue = static_cast<std::uint8_t>(
+            value.normalizedValue.raw / 257u);
+        destinationValue->mapped = static_cast<float>(
+            midiNoteFromModulation(modulationValue));
+    }
+    else
+    {
+        destinationValue->mapped = state->descriptor.map(value.normalizedValue);
+    }
     destinationValue->valid = true;
     if (state->descriptor.behavior != VoiceParameterBehavior::continuous)
         return true;

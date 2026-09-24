@@ -2,6 +2,7 @@
 
 #include "core/PatternLibrary.h"
 #include "core/PatternPlayer.h"
+#include "core/PitchEditing.h"
 #include "core/ModulationLibrary.h"
 #include "core/ModulationPlayer.h"
 #include "core/RuntimeGraph.h"
@@ -41,12 +42,15 @@ public:
         juce::String section;
         juce::String name;
         int midiCc = -1;
+        int secondaryMidiCc = -1;
+        int maximumValue = 127;
         bool pitch = false;
         std::size_t patternSlot = 0;
     };
 
     static constexpr std::size_t modulationLaneCount = 3;
     static constexpr std::size_t synthTwoPatternCount = 3;
+    static constexpr std::size_t samplePartCount = 10;
     static constexpr std::size_t groupCount = 4;
     static constexpr std::size_t maximumScheduledBars =
         lps::RuntimeGraph::maximumScheduledBars;
@@ -209,6 +213,25 @@ public:
         ModulationLane lane,
         std::size_t step,
         std::uint8_t value) noexcept;
+    [[nodiscard]] lps::PitchEditContext pitchEditContextForPlayer(
+        std::size_t playerIndex) const noexcept;
+    void setPitchEditModeForPlayer(
+        std::size_t playerIndex,
+        lps::PitchEditMode mode) noexcept;
+    void setPitchRootForPlayer(
+        std::size_t playerIndex,
+        std::uint8_t rootPitchClass) noexcept;
+    void setPitchScaleForPlayer(
+        std::size_t playerIndex,
+        lps::ScaleId scaleId) noexcept;
+    void editPlayerPitch(
+        std::size_t playerIndex,
+        std::size_t step,
+        int direction) noexcept;
+    [[nodiscard]] bool adjustPlayerPitchToScale(
+        std::size_t playerIndex) noexcept;
+    [[nodiscard]] juce::String pitchValueDisplayForUi(
+        std::uint8_t value) const;
     void setPlayerModulationLength(
         std::size_t playerIndex,
         ModulationLane lane,
@@ -316,6 +339,46 @@ public:
         std::size_t laneIndex,
         std::size_t length) noexcept;
 
+    [[nodiscard]] std::size_t samplePlayerIndexForUi(
+        std::size_t partSlot) const noexcept;
+    [[nodiscard]] std::size_t sampleLaneCountForUi() const noexcept;
+    [[nodiscard]] SynthLaneInfo sampleLaneInfoForUi(
+        std::size_t laneIndex) const;
+    [[nodiscard]] lps::Modulation sampleLaneModulationForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] bool sampleLaneModulationModifiedForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] std::size_t selectedSampleLaneModulationForUi(
+        std::size_t laneIndex) const noexcept;
+    void selectModulationForSampleLane(
+        std::size_t laneIndex,
+        std::size_t modulationIndex) noexcept;
+    [[nodiscard]] SaveModulationResult saveSampleLaneModulation(
+        std::size_t laneIndex,
+        const juce::String& name = {});
+    [[nodiscard]] int sampleLaneCurrentStepForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] ModulationAdvanceMode sampleLaneAdvanceModeForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] std::size_t sampleLanePatternSlotForUi(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] bool resetSampleLane(std::size_t laneIndex) noexcept;
+    [[nodiscard]] bool sampleLaneResetPendingForUi(
+        std::size_t laneIndex) const noexcept;
+    void setSampleLaneAdvanceMode(
+        std::size_t laneIndex,
+        ModulationAdvanceMode mode) noexcept;
+    void setSampleLanePatternSlot(
+        std::size_t laneIndex,
+        std::size_t partSlot) noexcept;
+    void setSampleLaneValue(
+        std::size_t laneIndex,
+        std::size_t step,
+        std::uint8_t value) noexcept;
+    void setSampleLaneLength(
+        std::size_t laneIndex,
+        std::size_t length) noexcept;
+
 private:
     // This is intentionally a policy switch so a future configuration menu
     // can expose immediate selection without changing the graph topology.
@@ -328,6 +391,7 @@ private:
     static constexpr lps::OutputEndpointId cvOutputEndpoint {1};
     static constexpr lps::OutputEndpointId synthOneMidiOutputEndpoint {2};
     static constexpr lps::OutputEndpointId synthTwoMidiOutputEndpoint {3};
+    static constexpr lps::OutputEndpointId sampleMidiOutputEndpoint {4};
 
     struct PlayerDescriptor
     {
@@ -359,6 +423,9 @@ private:
         juce::String section;
         juce::String name;
         int midiCc = -1;
+        int secondaryMidiCc = -1;
+        int maximumValue = 127;
+        std::size_t patternSlot = 0;
     };
 
     void updateUiSnapshot() noexcept;
@@ -394,6 +461,17 @@ private:
     [[nodiscard]] std::size_t synthLaneResetGroup(
         std::size_t laneIndex,
         std::size_t sourceIndex) const noexcept;
+    [[nodiscard]] lps::ModulationPlayer* sampleLanePlayerAt(
+        std::size_t laneIndex) noexcept;
+    [[nodiscard]] const lps::ModulationPlayer* sampleLanePlayerAt(
+        std::size_t laneIndex) const noexcept;
+    [[nodiscard]] bool publishSampleLaneAdvanceSource(
+        std::size_t laneIndex,
+        ModulationAdvanceMode mode,
+        std::size_t patternSlot) noexcept;
+    [[nodiscard]] std::size_t sampleLaneResetGroup(
+        std::size_t laneIndex,
+        std::size_t sourceIndex) const noexcept;
 
     // The library must outlive every player because players keep a read-only
     // reference to its immutable, append-only entries.
@@ -402,11 +480,14 @@ private:
     PatternLibraryFileStore patternLibraryFileStore_;
     ModulationLibraryFileStore modulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
+    std::vector<lps::PitchEditContext> pitchEditContexts_;
     std::vector<std::unique_ptr<lps::Voice>> voices_;
     std::vector<SynthParameterLane> synthParameterLanes_;
+    std::vector<SynthParameterLane> sampleParameterLanes_;
     std::unique_ptr<lps::MidiBufferRenderer> drumRenderer_;
     std::unique_ptr<lps::MidiBufferRenderer> synthOneRenderer_;
     std::unique_ptr<lps::MidiBufferRenderer> synthTwoRenderer_;
+    std::unique_ptr<lps::MidiBufferRenderer> sampleRenderer_;
     std::unique_ptr<lps::CvBufferRenderer> cvRenderer_;
     std::unique_ptr<lps::RuntimeGraph> runtimeGraph_;
     lps::RuntimeGraphConfig runtimeConfig_;
@@ -424,10 +505,16 @@ private:
         modulationLocks_;
     std::vector<std::unique_ptr<std::atomic<int>>>
         synthParameterCurrentSteps_;
+    std::vector<std::unique_ptr<std::atomic<int>>>
+        sampleParameterCurrentSteps_;
     std::vector<std::unique_ptr<std::atomic<std::uint8_t>>>
         synthLaneAdvanceModes_;
     std::vector<std::unique_ptr<std::atomic<std::size_t>>>
         synthLanePatternSlots_;
+    std::vector<std::unique_ptr<std::atomic<std::uint8_t>>>
+        sampleLaneAdvanceModes_;
+    std::vector<std::unique_ptr<std::atomic<std::size_t>>>
+        sampleLanePatternSlots_;
     std::vector<std::unique_ptr<std::atomic<std::uint8_t>>>
         playerGroupMasks_;
     std::atomic<bool> playing_ { false };
