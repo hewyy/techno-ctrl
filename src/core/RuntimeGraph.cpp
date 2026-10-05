@@ -391,6 +391,34 @@ bool RuntimeGraph::schedulePatternSelection(
             barsFromNow);
 }
 
+void RuntimeGraph::cancelPatternSelection(PatternPlayerId player) noexcept
+{
+    const auto target = patternPlayerIndex(player);
+    if (target >= patternPlayerCount_)
+        return;
+
+    for (auto& slot : scheduledChanges_)
+    {
+        auto encoded = slot.load(std::memory_order_acquire);
+        while (scheduledChangeActive(encoded))
+        {
+            const auto change = decodeScheduledChange(encoded);
+            if (change.type != ScheduledChangeType::patternSelection
+                || change.targetIndex != target)
+            {
+                break;
+            }
+            if (slot.compare_exchange_weak(
+                    encoded, 0,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+            {
+                break;
+            }
+        }
+    }
+}
+
 std::optional<RuntimeGraph::ScheduledChangeView>
 RuntimeGraph::nextScheduledChange(
     ScheduledChangeType type,

@@ -218,8 +218,8 @@ bool Voice::trigger(
 {
     if (hit.type != PlayerSignalType::patternHit
         || !std::isfinite(hit.ppqPosition)
-        || !std::isfinite(hit.nominalStepLengthPpq)
-        || hit.nominalStepLengthPpq <= 0.0)
+        || !std::isfinite(hit.baseDurationPpq)
+        || hit.baseDurationPpq <= 0.0)
     {
         incrementBounded(droppedInvalidTrigger_);
         const auto count = droppedInvalidTrigger_.load(std::memory_order_relaxed);
@@ -307,7 +307,7 @@ bool Voice::trigger(
         hit.patternPlayerId,
         triggerId,
         hit.ppqPosition + std::max(
-            static_cast<double>(gateRatio) * hit.nominalStepLengthPpq,
+            static_cast<double>(gateRatio) * hit.baseDurationPpq,
             minimumGate),
         true
     };

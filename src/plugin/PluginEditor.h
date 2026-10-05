@@ -118,6 +118,7 @@ private:
     };
 
     class SynthPageComponent;
+    class PatternEditorComponent;
 
     class UtilityButton final : public juce::TextButton
     {
@@ -136,9 +137,9 @@ private:
     class SpeakerButton final : public juce::TextButton
     {
     public:
-        enum class Kind { mute, unmute };
+        enum class Kind { out, in };
 
-        explicit SpeakerButton(Kind kind = Kind::mute) noexcept;
+        explicit SpeakerButton(Kind kind = Kind::out) noexcept;
         void setKind(Kind kind) noexcept;
         void setScheduledTarget(std::size_t targetBar);
         void paintButton(juce::Graphics&, bool isMouseOverButton,
@@ -252,8 +253,10 @@ private:
     [[nodiscard]] std::size_t pageSize() const noexcept;
     void pageVoices(int direction);
     void updatePageButtons();
-    enum class MainPage { allVoices, synthTwo, sample };
+    enum class MainPage { allVoices, synthTwo, sample, patternEditor };
     void showPage(MainPage page);
+    void openVoiceProfile(std::size_t playerIndex);
+    void openPatternEditor(std::size_t playerIndex);
     void refreshModulationControls(
         std::size_t playerIndex,
         ModulationLane lane,
@@ -276,6 +279,7 @@ private:
     juce::Viewport synthViewport_;
     std::unique_ptr<SynthPageComponent> synthPage_;
     std::unique_ptr<SynthPageComponent> samplePage_;
+    std::unique_ptr<PatternEditorComponent> patternEditorPage_;
     ControlPaneComponent controlPane_;
     BarSchedulerComponent barScheduler_;
     ModulationBlockLayer modulationBlockLayer_;
@@ -288,6 +292,7 @@ private:
     juce::TextButton voicesPageButton_ {"ALL VOICES"};
     juce::TextButton synthTwoPageButton_ {"SYNTH 2"};
     juce::TextButton samplePageButton_ {"SAMPLE"};
+    juce::TextButton backButton_ {"< BACK"};
     juce::Label selectionLabel_;
     std::vector<std::unique_ptr<juce::Label>> controlVoiceLabels_;
     std::vector<std::unique_ptr<SpeakerButton>>
@@ -302,6 +307,7 @@ private:
         LivePatternSequencerProcessor::groupCount> groupResetButtons_;
     bool suppressionMenuOpen_ = false;
     MainPage visiblePage_ = MainPage::synthTwo;
+    std::optional<std::size_t> patternEditorPlayer_;
     enum class SuppressionMatrixScope { patternPlayers, voices };
     SuppressionMatrixScope suppressionMatrixScope_ =
         SuppressionMatrixScope::patternPlayers;
@@ -312,7 +318,7 @@ private:
     std::vector<std::unique_ptr<juce::ComboBox>> patternSelectors_;
     std::vector<std::unique_ptr<juce::TextButton>> savePatternButtons_;
     std::vector<std::unique_ptr<juce::TextButton>> resetToMasterButtons_;
-    std::vector<std::unique_ptr<juce::ComboBox>> speedSelectors_;
+    std::vector<std::unique_ptr<juce::TextButton>> voiceProfileButtons_;
     std::vector<std::unique_ptr<juce::TextButton>> offsetLeftButtons_;
     std::vector<std::unique_ptr<juce::TextButton>> offsetRightButtons_;
     std::vector<std::unique_ptr<SpeakerButton>> muteButtons_;
@@ -347,13 +353,6 @@ private:
     juce::Component* activePopupTarget_ = nullptr;
     std::uint64_t popupGeneration_ = 0;
 
-    enum class DraggedRangeHandle { none, start, end };
-    DraggedRangeHandle draggedRangeHandle_ = DraggedRangeHandle::none;
-    std::size_t draggedPlayerIndex_ = 0;
-    int draggedRangeHandleOffsetX_ = 0;
-    juce::Point<int> rangeHandleDragStart_;
-    bool rangeHandleWasDragged_ = false;
-
     [[nodiscard]] juce::Rectangle<int> cellsAreaForPlayer(std::size_t playerIndex) const;
     [[nodiscard]] juce::Rectangle<int> modulationPreviewAreaForPlayer(
         std::size_t playerIndex) const;
@@ -368,9 +367,6 @@ private:
     }
     void updateContentSize();
     [[nodiscard]] int matrixPanelWidth() const;
-    [[nodiscard]] std::size_t stepAtX(std::size_t playerIndex, int x) const;
-    [[nodiscard]] std::size_t nearestStepAtX(std::size_t playerIndex, int x) const;
-    void updateDraggedRange(int mouseX);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LivePatternSequencerEditor)
 };

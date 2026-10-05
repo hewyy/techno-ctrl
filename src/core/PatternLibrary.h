@@ -45,9 +45,14 @@ struct PatternLibraryEntry
     PatternId id;
     std::string name;
     Pattern pattern;
+    // Informational catalog metadata. It is deliberately excluded from
+    // rhythm equality and content deduplication.
+    std::optional<std::string> originVoiceName;
 };
 
 [[nodiscard]] bool patternsEqual(const Pattern& left, const Pattern& right) noexcept;
+[[nodiscard]] bool patternIsValid(const Pattern& pattern) noexcept;
+[[nodiscard]] Pattern normalizedPattern(Pattern pattern) noexcept;
 
 struct PatternLibraryInsertResult
 {
@@ -60,7 +65,7 @@ class PatternLibrary
 public:
     using BeforePublish = std::function<bool(PatternLibraryEntry&)>;
 
-    static constexpr std::size_t builtInCount = 10;
+    static constexpr std::size_t builtInCount = 1;
     static constexpr std::size_t maxEntryCount = 256;
 
     PatternLibrary();

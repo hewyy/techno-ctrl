@@ -25,7 +25,9 @@ public:
     // ID collisions.
     [[nodiscard]] bool persistNewEntry(
         const lps::PatternLibrary& library,
-        lps::PatternLibraryEntry& stagedEntry);
+        lps::PatternLibraryEntry& stagedEntry,
+        const std::vector<lps::PatternId>& excludedIds = {});
+    [[nodiscard]] bool deleteEntry(lps::PatternId id);
 
     [[nodiscard]] const juce::File& catalogFile() const noexcept
     {

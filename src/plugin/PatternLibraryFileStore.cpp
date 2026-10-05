@@ -1,19 +1,60 @@
 #include "plugin/PatternLibraryFileStore.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <utility>
 
 namespace
 {
-constexpr int schemaVersion = 1;
-constexpr juce::int64 maximumCatalogBytes = 1024 * 1024;
+constexpr int schemaVersion = 3;
+constexpr int oldestReadableSchemaVersion = 2;
+constexpr juce::int64 maximumCatalogBytes = 16 * 1024 * 1024;
 constexpr int catalogLockTimeoutMilliseconds = 2000;
 constexpr auto catalogFormat = "live-pattern-sequencer-pattern-library";
 constexpr auto catalogLockName = "com.hew.livepatternsequencer.pattern-library";
 std::timed_mutex catalogProcessMutex;
+
+[[nodiscard]] bool isLegacyBuiltIn(
+    const lps::PatternLibraryEntry& entry) noexcept
+{
+    constexpr std::array<const char*, 10> names {{
+        "Basic Kick", "All Steps", "Backbeat", "Offbeat Hats", "Tresillo",
+        "3-Step Pulse", "5-Step Pulse", "7-Step Pulse", "9-Step Pulse",
+        "Euclidean 5/12"
+    }};
+    const auto id = entry.id.value();
+    if (id == 1 && entry.name == "None"
+        && !entry.originVoiceName.has_value())
+    {
+        return true;
+    }
+    return id >= 1 && id <= names.size()
+        && !entry.originVoiceName.has_value()
+        && entry.name == names[static_cast<std::size_t>(id - 1)];
+}
+
+[[nodiscard]] bool catalogsEqual(
+    const std::vector<lps::PatternLibraryEntry>& left,
+    const std::vector<lps::PatternLibraryEntry>& right) noexcept
+{
+    if (left.size() != right.size())
+        return false;
+    for (std::size_t index = 0; index < left.size(); ++index)
+    {
+        if (left[index].id != right[index].id
+            || left[index].name != right[index].name
+            || left[index].originVoiceName != right[index].originVoiceName
+            || !lps::patternsEqual(left[index].pattern, right[index].pattern))
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
 class CatalogLockGuard
 {
@@ -88,8 +129,7 @@ private:
         const auto& candidate = entries[index];
         if (!candidate.id.isValid()
             || candidate.id.value() > lps::PatternLibrary::maxEntryCount
-            || candidate.pattern.length == 0
-            || candidate.pattern.length > lps::Pattern::maxLength)
+            || !lps::patternIsValid(candidate.pattern))
         {
             return false;
         }
@@ -156,15 +196,6 @@ private:
     return true;
 }
 
-[[nodiscard]] juce::String patternSteps(const lps::Pattern& pattern)
-{
-    juce::String steps;
-    steps.preallocateBytes(static_cast<std::size_t>(pattern.length));
-    for (std::size_t step = 0; step < pattern.length; ++step)
-        steps << (pattern.hits[step] ? 'x' : '-');
-    return steps;
-}
-
 [[nodiscard]] juce::var makeCatalogJson(
     const std::vector<lps::PatternLibraryEntry>& entries)
 {
@@ -182,7 +213,26 @@ private:
         if (!entry.name.empty())
             serialized->setProperty(
                 "name", juce::String::fromUTF8(entry.name.c_str()));
-        serialized->setProperty("steps", patternSteps(entry.pattern));
+        if (entry.originVoiceName && !entry.originVoiceName->empty())
+            serialized->setProperty(
+                "originVoiceName",
+                juce::String::fromUTF8(entry.originVoiceName->c_str()));
+        serialized->setProperty(
+            "cycleLengthTicks",
+            static_cast<juce::int64>(entry.pattern.cycleLengthTicks));
+        juce::Array<juce::var> hits;
+        hits.ensureStorageAllocated(static_cast<int>(entry.pattern.hitCount));
+        for (std::size_t index = 0; index < entry.pattern.hitCount; ++index)
+        {
+            const auto& hit = entry.pattern.hits[index];
+            auto* serializedHit = new juce::DynamicObject();
+            serializedHit->setProperty(
+                "startTick", static_cast<juce::int64>(hit.startTick));
+            serializedHit->setProperty(
+                "durationTicks", static_cast<juce::int64>(hit.durationTicks));
+            hits.add(juce::var(serializedHit));
+        }
+        serialized->setProperty("hits", hits);
         serializedPatterns.add(juce::var(serialized));
     }
 
@@ -253,13 +303,39 @@ bool PatternLibraryFileStore::loadOrCreate(lps::PatternLibrary& library)
     }
 
     std::vector<lps::PatternLibraryEntry> loadedEntries;
-    if (!readEntries(loadedEntries)
-        || !library.replaceEntriesForStartup(loadedEntries))
+    if (!readEntries(loadedEntries))
     {
         lastError_ =
             "The pattern catalog is malformed, unsupported, or unreadable:\n"
             + catalogFile_.getFullPathName()
             + "\n\nThe file was left untouched. Correct it or move it aside, then reopen the plug-in.";
+        return false;
+    }
+
+    std::vector<lps::PatternLibraryEntry> migratedEntries;
+    migratedEntries.reserve(loadedEntries.size() + 1);
+    if (const auto* none = library.recordAt(0))
+        migratedEntries.push_back(*none);
+    for (const auto& entry : loadedEntries)
+    {
+        if (isLegacyBuiltIn(entry))
+            continue;
+        if (!appendIfMissing(migratedEntries, entry))
+        {
+            lastError_ =
+                "The pattern catalog could not be migrated to the current defaults:\n"
+                + catalogFile_.getFullPathName();
+            return false;
+        }
+    }
+    const bool migrated = !catalogsEqual(loadedEntries, migratedEntries);
+    if (!library.replaceEntriesForStartup(migratedEntries)
+        || (migrated && !writeEntries(migratedEntries)))
+    {
+        lastError_ =
+            "The pattern catalog is malformed, unsupported, or unreadable:\n"
+            + catalogFile_.getFullPathName()
+            + "\n\nThe catalog could not be migrated safely.";
         return false;
     }
 
@@ -269,7 +345,8 @@ bool PatternLibraryFileStore::loadOrCreate(lps::PatternLibrary& library)
 
 bool PatternLibraryFileStore::persistNewEntry(
     const lps::PatternLibrary& library,
-    lps::PatternLibraryEntry& stagedEntry)
+    lps::PatternLibraryEntry& stagedEntry,
+    const std::vector<lps::PatternId>& excludedIds)
 {
     std::unique_lock<std::timed_mutex> processLock(
         catalogProcessMutex, std::defer_lock);
@@ -306,6 +383,12 @@ bool PatternLibraryFileStore::persistNewEntry(
     for (std::size_t index = 0; index < library.size(); ++index)
     {
         const auto* entry = library.recordAt(index);
+        if (entry != nullptr
+            && std::find(excludedIds.begin(), excludedIds.end(), entry->id)
+                != excludedIds.end())
+        {
+            continue;
+        }
         if (entry == nullptr || !mergePublishedEntry(mergedEntries, *entry))
         {
             lastError_ =
@@ -339,6 +422,65 @@ bool PatternLibraryFileStore::persistNewEntry(
     return true;
 }
 
+bool PatternLibraryFileStore::deleteEntry(lps::PatternId id)
+{
+    if (!id.isValid() || id.value() == 1)
+        return false;
+
+    std::unique_lock<std::timed_mutex> processLock(
+        catalogProcessMutex, std::defer_lock);
+    if (!processLock.try_lock_for(
+            std::chrono::milliseconds(catalogLockTimeoutMilliseconds)))
+    {
+        lastError_ =
+            "Timed out waiting for another in-process pattern catalog operation:\n"
+            + catalogFile_.getFullPathName();
+        return false;
+    }
+
+    const CatalogLockGuard lock(catalogLock_);
+    if (!lock.isLocked())
+    {
+        lastError_ =
+            "Timed out waiting for access to the pattern catalog:\n"
+            + catalogFile_.getFullPathName();
+        return false;
+    }
+
+    std::vector<lps::PatternLibraryEntry> entries;
+    if (!readEntries(entries))
+    {
+        lastError_ =
+            "The existing pattern catalog is malformed or unreadable:\n"
+            + catalogFile_.getFullPathName()
+            + "\n\nIt was not overwritten.";
+        return false;
+    }
+
+    const auto found = std::find_if(
+        entries.begin(), entries.end(), [id](const auto& entry)
+        {
+            return entry.id == id;
+        });
+    if (found == entries.end())
+    {
+        lastError_ = "The saved pattern could not be found in the catalog.";
+        return false;
+    }
+
+    entries.erase(found);
+    if (!entriesAreValid(entries) || !writeEntries(entries))
+    {
+        lastError_ =
+            "Could not update the pattern catalog:\n"
+            + catalogFile_.getFullPathName();
+        return false;
+    }
+
+    lastError_.clear();
+    return true;
+}
+
 bool PatternLibraryFileStore::readEntries(
     std::vector<lps::PatternLibraryEntry>& entries) const
 {
@@ -363,7 +505,8 @@ bool PatternLibraryFileStore::readEntries(
     if (!format.isString()
         || format.toString() != catalogFormat
         || !(version.isInt() || version.isInt64())
-        || static_cast<juce::int64>(version) != schemaVersion
+        || static_cast<juce::int64>(version) < oldestReadableSchemaVersion
+        || static_cast<juce::int64>(version) > schemaVersion
         || patterns == nullptr
         || patterns->isEmpty()
         || patterns->size() > static_cast<int>(lps::PatternLibrary::maxEntryCount))
@@ -381,39 +524,71 @@ bool PatternLibraryFileStore::readEntries(
 
         const auto& idValue = serialized->getProperty("id");
         const auto& nameValue = serialized->getProperty("name");
-        const auto& stepsValue = serialized->getProperty("steps");
+        const auto& originValue = serialized->getProperty("originVoiceName");
+        const auto& cycleValue = serialized->getProperty("cycleLengthTicks");
+        const auto* hits = serialized->getProperty("hits").getArray();
         if (!(idValue.isInt() || idValue.isInt64())
             || (!nameValue.isVoid() && !nameValue.isString())
-            || !stepsValue.isString())
+            || (!originValue.isVoid() && !originValue.isString())
+            || !(cycleValue.isInt() || cycleValue.isInt64())
+            || hits == nullptr
+            || hits->size() > static_cast<int>(lps::Pattern::maximumHitCount))
         {
             return false;
         }
 
         const auto id = static_cast<juce::int64>(idValue);
         const auto name = nameValue.toString();
-        const auto steps = stepsValue.toString();
+        const auto cycleLength = static_cast<juce::int64>(cycleValue);
         if (id <= 0
             || id > static_cast<juce::int64>(lps::PatternLibrary::maxEntryCount)
-            || steps.isEmpty()
-            || steps.length() > static_cast<int>(lps::Pattern::maxLength))
+            || cycleLength <= 0
+            || cycleLength > lps::Pattern::maximumCycleLengthTicks)
         {
             return false;
         }
 
         lps::Pattern pattern;
-        pattern.length = static_cast<std::size_t>(steps.length());
-        for (int step = 0; step < steps.length(); ++step)
+        pattern.cycleLengthTicks = static_cast<lps::PatternTick>(cycleLength);
+        pattern.hitCount = static_cast<std::uint16_t>(hits->size());
+        for (int index = 0; index < hits->size(); ++index)
         {
-            const auto symbol = steps[step];
-            if (symbol != 'x' && symbol != '-')
+            const auto* serializedHit = hits->getReference(index).getDynamicObject();
+            if (serializedHit == nullptr)
                 return false;
-            pattern.hits[static_cast<std::size_t>(step)] = symbol == 'x';
+            const auto& startValue = serializedHit->getProperty("startTick");
+            const auto& durationValue = serializedHit->getProperty("durationTicks");
+            if (!(startValue.isInt() || startValue.isInt64())
+                || !(durationValue.isInt() || durationValue.isInt64()))
+            {
+                return false;
+            }
+            const auto start = static_cast<juce::int64>(startValue);
+            const auto duration = static_cast<juce::int64>(durationValue);
+            if (start < 0
+                || start > std::numeric_limits<lps::PatternTick>::max()
+                || duration <= 0
+                || duration > std::numeric_limits<lps::PatternTick>::max())
+            {
+                return false;
+            }
+            pattern.hits[static_cast<std::size_t>(index)] = {
+                static_cast<lps::PatternTick>(start),
+                static_cast<lps::PatternTick>(duration)
+            };
         }
+
+        if (!lps::patternIsValid(pattern))
+            return false;
 
         parsedEntries.push_back({
             lps::PatternId {static_cast<std::uint64_t>(id)},
             name.toStdString(),
-            pattern
+            pattern,
+            originValue.isString()
+                ? std::optional<std::string> {
+                    originValue.toString().toStdString() }
+                : std::nullopt
         });
     }
 

@@ -32,13 +32,13 @@ lps::PlayerSignal value(double ppq, float normalized, std::uint8_t step = 0)
         step);
 }
 
-lps::PlayerSignal hit(double ppq, double nominalStep = 0.25)
+lps::PlayerSignal hit(double ppq, double baseDuration = 0.25)
 {
     return lps::PlayerSignal::patternHit(
         ppq,
         lps::PatternPlayerId {1},
         lps::TriggerId {9},
-        nominalStep);
+        baseDuration);
 }
 
 void configureVoice(lps::Voice& voice)
@@ -118,6 +118,31 @@ void testZeroGateWithholdsStart()
     CHECK(voice.trigger(hit(3.0), 0.001, output));
     CHECK(output.empty());
     CHECK(!voice.active());
+}
+
+void testGateScalesStoredDurationAndEnforcesOneSampleMinimum()
+{
+    for (const auto gate : std::array<float, 3> {0.1f, 0.5f, 1.0f})
+    {
+        lps::Voice voice(lps::VoiceId {2});
+        configureVoice(voice);
+        lps::SequencerEventBuffer output;
+        setRequiredValues(voice, output, 0.5f, 1.0f, gate);
+        CHECK(voice.trigger(hit(1.0, 3.0), 0.001, output));
+        voice.emitEndsBefore(5.0, false, output);
+        CHECK(output.size() == 2);
+        CHECK(std::abs(output[1].ppqPosition
+            - (1.0 + static_cast<double>(gate) * 3.0)) < 1.0e-4);
+    }
+
+    lps::Voice voice(lps::VoiceId {2});
+    configureVoice(voice);
+    lps::SequencerEventBuffer output;
+    setRequiredValues(voice, output, 0.5f, 1.0f, 0.1f);
+    CHECK(voice.trigger(hit(2.0, 0.00001), 0.001, output));
+    voice.emitEndsBefore(3.0, false, output);
+    CHECK(output.size() == 2);
+    CHECK(std::abs(output[1].ppqPosition - 2.001) < 1.0e-9);
 }
 
 void testContinuousParameterEmitsWithoutTrigger()
@@ -210,6 +235,7 @@ int main()
     testSampledValuesAndGateLifetime();
     testRetriggerEndsBeforeReplacementStart();
     testZeroGateWithholdsStart();
+    testGateScalesStoredDurationAndEnforcesOneSampleMinimum();
     testContinuousParameterEmitsWithoutTrigger();
     testSampledParametersCanBeScopedToPatternPlayers();
     testPitchPlaybackUsesFixedModulationMapping();

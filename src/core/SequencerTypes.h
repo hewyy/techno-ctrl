@@ -205,7 +205,7 @@ enum class PlayerSignalType : std::uint8_t
 struct PlayerSignal
 {
     double ppqPosition = 0.0;
-    double nominalStepLengthPpq = 0.0;
+    double baseDurationPpq = 0.0;
     TriggerId triggerId;
     PatternPlayerId patternPlayerId;
     ModulationPlayerId modulationPlayerId;
@@ -217,11 +217,11 @@ struct PlayerSignal
         double ppq,
         PatternPlayerId source,
         TriggerId id,
-        double nominalStepLength) noexcept
+        double baseDuration) noexcept
     {
         PlayerSignal signal;
         signal.ppqPosition = ppq;
-        signal.nominalStepLengthPpq = nominalStepLength;
+        signal.baseDurationPpq = baseDuration;
         signal.triggerId = id;
         signal.patternPlayerId = source;
         signal.type = PlayerSignalType::patternHit;
@@ -260,7 +260,7 @@ static_assert(std::is_trivially_copyable_v<PlayerSignal>);
 class PlayerSignalBuffer
 {
 public:
-    static constexpr std::size_t capacity = 128;
+    static constexpr std::size_t capacity = 1024;
 
     void clear() noexcept
     {
@@ -406,7 +406,7 @@ static_assert(std::is_trivially_copyable_v<RoutedEvent>);
 class SequencerEventBuffer
 {
 public:
-    static constexpr std::size_t capacity = 128;
+    static constexpr std::size_t capacity = 1024;
 
     void clear() noexcept
     {
@@ -447,11 +447,32 @@ private:
     std::size_t droppedCount_ = 0;
 };
 
+using PatternTick = std::uint32_t;
+
+struct PatternHit
+{
+    PatternTick startTick = 0;
+    PatternTick durationTicks = 0;
+
+    friend constexpr bool operator==(
+        PatternHit left, PatternHit right) noexcept
+    {
+        return left.startTick == right.startTick
+            && left.durationTicks == right.durationTicks;
+    }
+};
+
 struct Pattern
 {
-    static constexpr std::size_t maxLength = 32;
-    std::array<bool, maxLength> hits {};
-    std::size_t length = 0;
+    static constexpr PatternTick ticksPerQuarterNote = 960;
+    static constexpr PatternTick legacyStepTicks = 240;
+    static constexpr PatternTick maximumCycleLengthTicks =
+        64 * ticksPerQuarterNote;
+    static constexpr std::size_t maximumHitCount = 256;
+
+    PatternTick cycleLengthTicks = 0;
+    std::uint16_t hitCount = 0;
+    std::array<PatternHit, maximumHitCount> hits {};
 };
 
 struct PitchList
@@ -461,37 +482,15 @@ struct PitchList
 
 struct PatternView
 {
-    // The per-player draft capacity. A library Pattern::length instead sets
-    // the default playback end when that pattern is loaded.
-    std::uint16_t stepCount = 0;
-    std::uint32_t hitMask = 0;
-    int stepOffset = 0;
-    std::uint16_t playbackStart = 0;
-    std::uint16_t playbackEnd = 0;
-
-    [[nodiscard]] bool isHit(std::uint16_t step) const noexcept
-    {
-        if (stepCount == 0 || step >= stepCount)
-            return false;
-
-        const auto length = static_cast<int>(stepCount);
-        auto sourceStep = (static_cast<int>(step) - stepOffset) % length;
-        if (sourceStep < 0)
-            sourceStep += length;
-        if (sourceStep >= 32)
-            return false;
-        return (hitMask & (std::uint32_t { 1 } << sourceStep)) != 0;
-    }
-
-    [[nodiscard]] bool isInsidePlaybackWindow(std::uint16_t step) const noexcept
-    {
-        return step < stepCount && step >= playbackStart && step <= playbackEnd;
-    }
+    Pattern pattern;
+    std::int32_t offsetTicks = 0;
+    PatternTick playbackStartTick = 0;
+    PatternTick playbackEndTick = 0;
 };
 
 struct PatternPlaybackSnapshot
 {
-    int currentStep = -1;
+    PatternTick currentTick = 0;
     bool playing = false;
     // Normalized position through the active playback window. This is a UI
     // snapshot only; scheduling remains driven by exact cycle boundaries.

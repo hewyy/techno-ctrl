@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <string>
 
 namespace
@@ -210,7 +211,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
     synthParameterLanes_.reserve(synthTwoParameters.size());
     sampleParameterLanes_.reserve(
         samplePartCount * sampleParameters.size());
-    currentSteps_.reserve(totalPlayerCount);
+    currentTicks_.reserve(totalPlayerCount);
     currentModulationSteps_.reserve(
         totalPlayerCount * modulationLaneCount);
     modulationLocks_.reserve(totalPlayerCount * modulationLaneCount);
@@ -332,7 +333,13 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         if (patternLibrary_.size() != 0)
         {
             if (const auto* pattern = patternLibrary_.recordAt(index % patternLibrary_.size()))
-                player->selectPattern(pattern->id);
+            {
+                // PatternPlayer already activates entry zero in its
+                // constructor. Re-selecting the same entry queues a reset
+                // that would discard edits made before prepareToPlay().
+                if (player->selectedPatternId() != pattern->id)
+                    player->selectPattern(pattern->id);
+            }
         }
         auto* patternController = player.get();
         const auto patternId = lps::PatternPlayerId {
@@ -430,7 +437,7 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         bundle.realtime = std::move(player);
         players_.push_back(std::move(bundle));
         pitchEditContexts_.push_back({});
-        currentSteps_.push_back(std::make_unique<std::atomic<int>>(-1));
+        currentTicks_.push_back(std::make_unique<std::atomic<int>>(-1));
         playerGroupMasks_.push_back(
             std::make_unique<std::atomic<std::uint8_t>>(0));
         for (std::size_t lane = 0; lane < modulationLaneCount; ++lane)
@@ -881,6 +888,17 @@ void LivePatternSequencerProcessor::processBlock(
                 }
             }
 
+            if (const auto signature = position->getTimeSignature())
+            {
+                if (signature->numerator > 0 && signature->denominator > 0)
+                {
+                    hostTimeSignatureNumerator_.store(
+                        signature->numerator, std::memory_order_relaxed);
+                    hostTimeSignatureDenominator_.store(
+                        signature->denominator, std::memory_order_relaxed);
+                }
+            }
+
             if (const auto ppq = position->getPpqPosition())
             {
                 block.ppqStart = *ppq;
@@ -980,7 +998,7 @@ void LivePatternSequencerProcessor::getStateInformation(
 {
     auto root = juce::DynamicObject::Ptr(new juce::DynamicObject());
     root->setProperty("format", "live-pattern-sequencer-graph-state");
-    root->setProperty("schemaVersion", 3);
+    root->setProperty("schemaVersion", 4);
 
     juce::Array<juce::var> serializedPlayers;
     for (std::size_t index = 0; index < players_.size(); ++index)
@@ -990,11 +1008,30 @@ void LivePatternSequencerProcessor::getStateInformation(
         auto object = juce::DynamicObject::Ptr(new juce::DynamicObject());
         object->setProperty("patternId",
             static_cast<juce::int64>(pattern.patternId.value()));
-        object->setProperty("hitMask",
-            static_cast<juce::int64>(pattern.hitMask));
-        object->setProperty("offset", pattern.patternOffset);
-        object->setProperty("playbackStart", pattern.playbackStart);
-        object->setProperty("playbackEnd", pattern.playbackEnd);
+        object->setProperty(
+            "cycleLengthTicks",
+            static_cast<juce::int64>(pattern.pattern.cycleLengthTicks));
+        juce::Array<juce::var> patternHits;
+        for (std::size_t hitIndex = 0;
+             hitIndex < pattern.pattern.hitCount;
+             ++hitIndex)
+        {
+            const auto& hit = pattern.pattern.hits[hitIndex];
+            auto hitObject = juce::DynamicObject::Ptr(new juce::DynamicObject());
+            hitObject->setProperty(
+                "startTick", static_cast<juce::int64>(hit.startTick));
+            hitObject->setProperty(
+                "durationTicks", static_cast<juce::int64>(hit.durationTicks));
+            patternHits.add(juce::var(hitObject.get()));
+        }
+        object->setProperty("patternHits", patternHits);
+        object->setProperty("offsetTicks", pattern.patternOffsetTicks);
+        object->setProperty(
+            "playbackStartTick",
+            static_cast<juce::int64>(pattern.playbackStartTick));
+        object->setProperty(
+            "playbackEndTick",
+            static_cast<juce::int64>(pattern.playbackEndTick));
         object->setProperty("playbackSpeed", pattern.playbackSpeed);
         const auto serializeModulation = [this, &object, index](
             const char* idProperty,
@@ -1139,7 +1176,7 @@ void LivePatternSequencerProcessor::setStateInformation(
     if (root == nullptr
         || root->getProperty("format").toString()
             != "live-pattern-sequencer-graph-state"
-        || schemaVersion < 1 || schemaVersion > 3)
+        || schemaVersion < 1 || schemaVersion > 4)
         return;
 
     const auto* serializedPlayers = root->getProperty("players").getArray();
@@ -1164,20 +1201,105 @@ void LivePatternSequencerProcessor::setStateInformation(
         lps::PatternPlayerPersistentState pattern;
         pattern.patternId = lps::PatternId {static_cast<std::uint64_t>(
             static_cast<juce::int64>(object->getProperty("patternId")))};
-        pattern.hitMask = static_cast<std::uint32_t>(
-            static_cast<juce::int64>(object->getProperty("hitMask")));
-        pattern.patternOffset = static_cast<int>(object->getProperty("offset"));
-        pattern.playbackStart = static_cast<std::uint16_t>(
-            static_cast<int>(object->getProperty("playbackStart")));
-        pattern.playbackEnd = static_cast<std::uint16_t>(
-            static_cast<int>(object->getProperty("playbackEnd")));
+        if (patternHiddenForUi(pattern.patternId))
+            pattern.patternId = {};
         pattern.playbackSpeed = static_cast<std::uint8_t>(
             static_cast<int>(object->getProperty("playbackSpeed")));
+        if (schemaVersion >= 4)
+        {
+            const auto& cycleValue = object->getProperty("cycleLengthTicks");
+            const auto* hits = object->getProperty("patternHits").getArray();
+            const auto& offsetValue = object->getProperty("offsetTicks");
+            const auto& startValue = object->getProperty("playbackStartTick");
+            const auto& endValue = object->getProperty("playbackEndTick");
+            if (!(cycleValue.isInt() || cycleValue.isInt64())
+                || hits == nullptr
+                || hits->size() > static_cast<int>(lps::Pattern::maximumHitCount)
+                || !(offsetValue.isInt() || offsetValue.isInt64())
+                || !(startValue.isInt() || startValue.isInt64())
+                || !(endValue.isInt() || endValue.isInt64()))
+            {
+                return;
+            }
+            const auto cycle = static_cast<juce::int64>(cycleValue);
+            const auto start = static_cast<juce::int64>(startValue);
+            const auto end = static_cast<juce::int64>(endValue);
+            if (cycle <= 0 || cycle > lps::Pattern::maximumCycleLengthTicks
+                || start < 0 || end <= start || end > cycle)
+            {
+                return;
+            }
+            pattern.pattern.cycleLengthTicks = static_cast<lps::PatternTick>(cycle);
+            pattern.pattern.hitCount = static_cast<std::uint16_t>(hits->size());
+            for (int hitIndex = 0; hitIndex < hits->size(); ++hitIndex)
+            {
+                const auto* hit = hits->getReference(hitIndex).getDynamicObject();
+                if (hit == nullptr)
+                    return;
+                const auto& hitStartValue = hit->getProperty("startTick");
+                const auto& durationValue = hit->getProperty("durationTicks");
+                if (!(hitStartValue.isInt() || hitStartValue.isInt64())
+                    || !(durationValue.isInt() || durationValue.isInt64()))
+                    return;
+                const auto hitStart = static_cast<juce::int64>(hitStartValue);
+                const auto duration = static_cast<juce::int64>(durationValue);
+                if (hitStart < 0 || hitStart > std::numeric_limits<lps::PatternTick>::max()
+                    || duration <= 0
+                    || duration > std::numeric_limits<lps::PatternTick>::max())
+                    return;
+                pattern.pattern.hits[static_cast<std::size_t>(hitIndex)] = {
+                    static_cast<lps::PatternTick>(hitStart),
+                    static_cast<lps::PatternTick>(duration)};
+            }
+            if (!lps::patternIsValid(pattern.pattern))
+                return;
+            const auto offset = static_cast<juce::int64>(offsetValue);
+            if (offset < std::numeric_limits<std::int32_t>::min()
+                || offset > std::numeric_limits<std::int32_t>::max())
+                return;
+            pattern.patternOffsetTicks = static_cast<std::int32_t>(offset);
+            pattern.playbackStartTick = static_cast<lps::PatternTick>(start);
+            pattern.playbackEndTick = static_cast<lps::PatternTick>(end);
+        }
+        else
+        {
+            const auto hitMask = static_cast<std::uint32_t>(
+                static_cast<juce::int64>(object->getProperty("hitMask")));
+            const auto legacyStart = static_cast<std::uint16_t>(
+                static_cast<int>(object->getProperty("playbackStart")));
+            const auto legacyEnd = static_cast<std::uint16_t>(
+                static_cast<int>(object->getProperty("playbackEnd")));
+            if (legacyStart > legacyEnd || legacyEnd >= 32)
+                return;
+            const auto* catalogPattern = patternLibrary_.find(pattern.patternId);
+            lps::PatternTick cycle = catalogPattern != nullptr
+                ? catalogPattern->pattern.cycleLengthTicks
+                : lps::Pattern::legacyStepTicks;
+            cycle = std::max(cycle, static_cast<lps::PatternTick>(
+                (legacyEnd + 1u) * lps::Pattern::legacyStepTicks));
+            for (std::size_t step = 0; step < 32; ++step)
+            {
+                if ((hitMask & (std::uint32_t {1} << step)) == 0)
+                    continue;
+                pattern.pattern.hits[pattern.pattern.hitCount++] = {
+                    static_cast<lps::PatternTick>(step * lps::Pattern::legacyStepTicks),
+                    lps::Pattern::legacyStepTicks};
+                cycle = std::max(cycle, static_cast<lps::PatternTick>(
+                    (step + 1) * lps::Pattern::legacyStepTicks));
+            }
+            pattern.pattern.cycleLengthTicks = cycle;
+            pattern.patternOffsetTicks = static_cast<std::int32_t>(
+                static_cast<int>(object->getProperty("offset"))
+                * static_cast<int>(lps::Pattern::legacyStepTicks));
+            pattern.playbackStartTick = static_cast<lps::PatternTick>(
+                legacyStart * lps::Pattern::legacyStepTicks);
+            pattern.playbackEndTick = static_cast<lps::PatternTick>(
+                (legacyEnd + 1u) * lps::Pattern::legacyStepTicks);
+        }
         const auto velocityModulationId = lps::ModulationId {
             static_cast<std::uint64_t>(static_cast<juce::int64>(
                 object->getProperty("modulationId")))};
-        if (patternLibrary_.find(pattern.patternId) == nullptr
-            || modulationLibrary_.find(velocityModulationId) == nullptr
+        if (modulationLibrary_.find(velocityModulationId) == nullptr
             || !object->getProperty("muted").isBool()
             || (object->hasProperty("groupMask")
                 && (!(object->getProperty("groupMask").isInt()
@@ -1582,10 +1704,10 @@ bool LivePatternSequencerProcessor::playerResetToMasterPendingForUi(
         && runtimeGraph_->cycleCommandPending(playerIndex);
 }
 
-int LivePatternSequencerProcessor::currentStepForUi(std::size_t playerIndex) const noexcept
+int LivePatternSequencerProcessor::currentTickForUi(std::size_t playerIndex) const noexcept
 {
-    return playerIndex < currentSteps_.size()
-        ? currentSteps_[playerIndex]->load(std::memory_order_relaxed)
+    return playerIndex < currentTicks_.size()
+        ? currentTicks_[playerIndex]->load(std::memory_order_relaxed)
         : -1;
 }
 
@@ -1696,20 +1818,73 @@ int LivePatternSequencerProcessor::drumMidiChannelForUi() const noexcept
 
 std::size_t LivePatternSequencerProcessor::patternCountForUi() const noexcept
 {
-    return patternLibrary_.size();
+    std::size_t count = 0;
+    for (std::size_t index = 0; index < patternLibrary_.size(); ++index)
+    {
+        const auto* entry = patternLibrary_.recordAt(index);
+        if (entry != nullptr && !patternHiddenForUi(entry->id))
+            ++count;
+    }
+    return count;
+}
+
+std::optional<std::size_t>
+LivePatternSequencerProcessor::libraryPatternIndexForUi(
+    std::size_t patternIndex) const noexcept
+{
+    std::size_t visibleIndex = 0;
+    for (std::size_t libraryIndex = 0;
+         libraryIndex < patternLibrary_.size(); ++libraryIndex)
+    {
+        const auto* entry = patternLibrary_.recordAt(libraryIndex);
+        if (entry == nullptr || patternHiddenForUi(entry->id))
+            continue;
+        if (visibleIndex == patternIndex)
+            return libraryIndex;
+        ++visibleIndex;
+    }
+    return std::nullopt;
+}
+
+std::size_t LivePatternSequencerProcessor::uiPatternIndexForId(
+    lps::PatternId id) const noexcept
+{
+    std::size_t visibleIndex = 0;
+    for (std::size_t libraryIndex = 0;
+         libraryIndex < patternLibrary_.size(); ++libraryIndex)
+    {
+        const auto* entry = patternLibrary_.recordAt(libraryIndex);
+        if (entry == nullptr || patternHiddenForUi(entry->id))
+            continue;
+        if (entry->id == id)
+            return visibleIndex;
+        ++visibleIndex;
+    }
+    return 0;
+}
+
+bool LivePatternSequencerProcessor::patternHiddenForUi(
+    lps::PatternId id) const noexcept
+{
+    return std::find(hiddenPatternIds_.begin(), hiddenPatternIds_.end(), id)
+        != hiddenPatternIds_.end();
 }
 
 lps::Pattern LivePatternSequencerProcessor::patternAtForUi(
     std::size_t patternIndex) const noexcept
 {
-    const auto* entry = patternLibrary_.recordAt(patternIndex);
+    const auto libraryIndex = libraryPatternIndexForUi(patternIndex);
+    const auto* entry = libraryIndex
+        ? patternLibrary_.recordAt(*libraryIndex) : nullptr;
     return entry != nullptr ? entry->pattern : lps::Pattern {};
 }
 
 juce::String LivePatternSequencerProcessor::patternNameForUi(
     std::size_t patternIndex) const
 {
-    const auto* pattern = patternLibrary_.recordAt(patternIndex);
+    const auto libraryIndex = libraryPatternIndexForUi(patternIndex);
+    const auto* pattern = libraryIndex
+        ? patternLibrary_.recordAt(*libraryIndex) : nullptr;
     if (pattern == nullptr)
         return {};
     return pattern->name.empty()
@@ -1717,9 +1892,62 @@ juce::String LivePatternSequencerProcessor::patternNameForUi(
         : juce::String(pattern->name);
 }
 
+juce::String LivePatternSequencerProcessor::patternOriginForUi(
+    std::size_t patternIndex) const
+{
+    const auto libraryIndex = libraryPatternIndexForUi(patternIndex);
+    const auto* pattern = libraryIndex
+        ? patternLibrary_.recordAt(*libraryIndex) : nullptr;
+    if (pattern == nullptr)
+        return {};
+    if (*libraryIndex < lps::PatternLibrary::builtInCount)
+        return "Built-in";
+    return pattern->originVoiceName
+        ? juce::String(*pattern->originVoiceName) : juce::String {};
+}
+
 juce::String LivePatternSequencerProcessor::patternCatalogErrorForUi() const
 {
     return patternLibraryFileStore_.lastError();
+}
+
+bool LivePatternSequencerProcessor::deletePatternForUi(
+    std::size_t patternIndex)
+{
+    const auto libraryIndex = libraryPatternIndexForUi(patternIndex);
+    if (!libraryIndex
+        || *libraryIndex < lps::PatternLibrary::builtInCount)
+    {
+        return false;
+    }
+
+    const auto* entry = patternLibrary_.recordAt(*libraryIndex);
+    const auto* fallback = patternLibrary_.recordAt(0);
+    if (entry == nullptr || fallback == nullptr
+        || !patternLibraryFileStore_.deleteEntry(entry->id))
+    {
+        return false;
+    }
+
+    const auto deletedId = entry->id;
+    hiddenPatternIds_.push_back(deletedId);
+    for (std::size_t index = 0; index < players_.size(); ++index)
+    {
+        auto* player = patternPlayerAt(index);
+        if (player == nullptr)
+            continue;
+        const auto runtimeId = lps::PatternPlayerId {
+            static_cast<std::uint32_t>(index)};
+        const auto scheduled = runtimeGraph_->scheduledPatternSelection(runtimeId);
+        if (player->selectedPatternId() == deletedId
+            || player->activePatternId() == deletedId
+            || (scheduled && *scheduled == deletedId))
+        {
+            runtimeGraph_->cancelPatternSelection(runtimeId);
+            player->selectSavedPattern(fallback->id);
+        }
+    }
+    return true;
 }
 
 bool LivePatternSequencerProcessor::playerPatternModifiedForUi(
@@ -1736,7 +1964,8 @@ LivePatternSequencerProcessor::savePlayerPattern(std::size_t playerIndex)
     if (player == nullptr)
         return {};
 
-    return savePlayerPattern(playerIndex, player->patternForSave());
+    return savePlayerPatternInternal(
+        playerIndex, player->patternForSave(), true);
 }
 
 LivePatternSequencerProcessor::SavePatternResult
@@ -1744,10 +1973,17 @@ LivePatternSequencerProcessor::savePlayerPattern(
     std::size_t playerIndex,
     const lps::Pattern& candidatePattern)
 {
+    return savePlayerPatternInternal(playerIndex, candidatePattern, false);
+}
+
+LivePatternSequencerProcessor::SavePatternResult
+LivePatternSequencerProcessor::savePlayerPatternInternal(
+    std::size_t playerIndex,
+    const lps::Pattern& candidatePattern,
+    bool adoptCurrentDraft)
+{
     auto* player = patternPlayerAt(playerIndex);
-    if (player == nullptr
-        || candidatePattern.length == 0
-        || candidatePattern.length > lps::Pattern::maxLength)
+    if (player == nullptr || !lps::patternIsValid(candidatePattern))
     {
         return {};
     }
@@ -1756,28 +1992,52 @@ LivePatternSequencerProcessor::savePlayerPattern(
     {
         if (const auto* existing = patternLibrary_.findEquivalent(candidatePattern))
         {
-            const auto index = patternLibrary_.indexOf(existing->id);
-            if (!index)
-                return {};
+            if (patternHiddenForUi(existing->id))
+            {
+                auto restoredEntry = *existing;
+                if (!patternLibraryFileStore_.persistNewEntry(
+                        patternLibrary_, restoredEntry, hiddenPatternIds_)
+                    || restoredEntry.id != existing->id)
+                {
+                    return {};
+                }
+                hiddenPatternIds_.erase(
+                    std::remove(
+                        hiddenPatternIds_.begin(), hiddenPatternIds_.end(),
+                        existing->id),
+                    hiddenPatternIds_.end());
+            }
 
-            (void) runtimeGraph_->schedulePatternSelection(
-                lps::PatternPlayerId {
-                    static_cast<std::uint32_t>(playerIndex) },
-                existing->id,
-                1);
+            const auto runtimeId = lps::PatternPlayerId {
+                static_cast<std::uint32_t>(playerIndex) };
+            if (adoptCurrentDraft)
+            {
+                runtimeGraph_->cancelPatternSelection(runtimeId);
+                if (!player->adoptSavedDraft(existing->id))
+                    return {};
+            }
+            else if (!runtimeGraph_->schedulePatternSelection(
+                         runtimeId, existing->id, 1))
+            {
+                return {};
+            }
             return {
                 SavePatternStatus::selectedExisting,
-                *index,
+                uiPatternIndexForId(existing->id),
                 candidatePattern
             };
         }
 
+        const auto voiceIndex = playerVoiceIndexForUi(playerIndex);
+        const auto origin = voiceNameForUi(voiceIndex).toStdString();
         const auto insertion = patternLibrary_.addOrFind(
             candidatePattern,
-            [this](lps::PatternLibraryEntry& stagedEntry)
+            [this, origin](lps::PatternLibraryEntry& stagedEntry)
             {
+                if (!origin.empty())
+                    stagedEntry.originVoiceName = origin;
                 return patternLibraryFileStore_.persistNewEntry(
-                    patternLibrary_, stagedEntry);
+                    patternLibrary_, stagedEntry, hiddenPatternIds_);
             });
         if (insertion.entry == nullptr)
             return {};
@@ -1786,16 +2046,24 @@ LivePatternSequencerProcessor::savePlayerPattern(
         if (!index)
             return {};
 
-        (void) runtimeGraph_->schedulePatternSelection(
-            lps::PatternPlayerId {
-                static_cast<std::uint32_t>(playerIndex) },
-            insertion.entry->id,
-            1);
+        const auto runtimeId = lps::PatternPlayerId {
+            static_cast<std::uint32_t>(playerIndex) };
+        if (adoptCurrentDraft)
+        {
+            runtimeGraph_->cancelPatternSelection(runtimeId);
+            if (!player->adoptSavedDraft(insertion.entry->id))
+                return {};
+        }
+        else if (!runtimeGraph_->schedulePatternSelection(
+                     runtimeId, insertion.entry->id, 1))
+        {
+            return {};
+        }
         return {
             insertion.inserted
                 ? SavePatternStatus::savedNew
                 : SavePatternStatus::selectedExisting,
-            *index,
+            uiPatternIndexForId(insertion.entry->id),
             candidatePattern
         };
     }
@@ -1803,6 +2071,18 @@ LivePatternSequencerProcessor::savePlayerPattern(
     {
         return {};
     }
+}
+
+bool LivePatternSequencerProcessor::createNewPlayerPatternDraft(
+    std::size_t playerIndex) noexcept
+{
+    auto* player = patternPlayerAt(playerIndex);
+    if (player == nullptr)
+        return false;
+
+    lps::Pattern pattern;
+    pattern.cycleLengthTicks = 4 * lps::Pattern::ticksPerQuarterNote;
+    return player->installNewDraft(pattern);
 }
 
 lps::PatternPlayer* LivePatternSequencerProcessor::patternPlayerAt(std::size_t playerIndex) noexcept
@@ -1866,7 +2146,9 @@ bool LivePatternSequencerProcessor::schedulePatternForPlayer(
     std::size_t patternIndex,
     std::size_t barsFromNow) noexcept
 {
-    const auto* pattern = patternLibrary_.recordAt(patternIndex);
+    const auto libraryIndex = libraryPatternIndexForUi(patternIndex);
+    const auto* pattern = libraryIndex
+        ? patternLibrary_.recordAt(*libraryIndex) : nullptr;
     return playerIndex < players_.size() && pattern != nullptr
         && runtimeGraph_->schedulePatternSelection(
             lps::PatternPlayerId {
@@ -1884,8 +2166,8 @@ std::size_t LivePatternSequencerProcessor::selectedPatternForPlayer(
 
     const auto pending = runtimeGraph_->scheduledPatternSelection(
         lps::PatternPlayerId {static_cast<std::uint32_t>(playerIndex)});
-    return patternLibrary_.indexOf(
-        pending.value_or(player->selectedPatternId())).value_or(0);
+    return uiPatternIndexForId(
+        pending.value_or(player->selectedPatternId()));
 }
 
 bool LivePatternSequencerProcessor::playerPatternChangePendingForUi(
@@ -1902,9 +2184,23 @@ void LivePatternSequencerProcessor::offsetPlayerPatternLeft(std::size_t playerIn
     if (auto* player = patternPlayerAt(playerIndex)) player->offsetPatternLeft();
 }
 
+void LivePatternSequencerProcessor::offsetPlayerPatternLeft(
+    std::size_t playerIndex, lps::PatternTick amount) noexcept
+{
+    if (auto* player = patternPlayerAt(playerIndex))
+        player->offsetPatternLeft(amount);
+}
+
 void LivePatternSequencerProcessor::offsetPlayerPatternRight(std::size_t playerIndex) noexcept
 {
     if (auto* player = patternPlayerAt(playerIndex)) player->offsetPatternRight();
+}
+
+void LivePatternSequencerProcessor::offsetPlayerPatternRight(
+    std::size_t playerIndex, lps::PatternTick amount) noexcept
+{
+    if (auto* player = patternPlayerAt(playerIndex))
+        player->offsetPatternRight(amount);
 }
 
 int LivePatternSequencerProcessor::playerPatternOffset(std::size_t playerIndex) const noexcept
@@ -1954,6 +2250,54 @@ void LivePatternSequencerProcessor::togglePlayerStep(
 {
     if (auto* player = patternPlayerAt(playerIndex))
         player->toggleStep(step);
+}
+
+bool LivePatternSequencerProcessor::addPlayerHit(
+    std::size_t playerIndex, lps::PatternTick startTick,
+    lps::PatternTick durationTicks) noexcept
+{
+    auto* player = patternPlayerAt(playerIndex);
+    return player != nullptr && player->addHit(startTick, durationTicks);
+}
+
+bool LivePatternSequencerProcessor::removePlayerHit(
+    std::size_t playerIndex, lps::PatternTick startTick) noexcept
+{
+    auto* player = patternPlayerAt(playerIndex);
+    return player != nullptr && player->removeHit(startTick);
+}
+
+bool LivePatternSequencerProcessor::movePlayerHit(
+    std::size_t playerIndex, lps::PatternTick oldStartTick,
+    lps::PatternTick newStartTick) noexcept
+{
+    auto* player = patternPlayerAt(playerIndex);
+    return player != nullptr && player->moveHit(oldStartTick, newStartTick);
+}
+
+bool LivePatternSequencerProcessor::resizePlayerHit(
+    std::size_t playerIndex, lps::PatternTick startTick,
+    lps::PatternTick durationTicks) noexcept
+{
+    auto* player = patternPlayerAt(playerIndex);
+    return player != nullptr && player->resizeHit(startTick, durationTicks);
+}
+
+bool LivePatternSequencerProcessor::setPlayerCycleLength(
+    std::size_t playerIndex, lps::PatternTick cycleLengthTicks) noexcept
+{
+    auto* player = patternPlayerAt(playerIndex);
+    return player != nullptr && player->setCycleLength(cycleLengthTicks);
+}
+
+int LivePatternSequencerProcessor::hostTimeSignatureNumeratorForUi() const noexcept
+{
+    return hostTimeSignatureNumerator_.load(std::memory_order_relaxed);
+}
+
+int LivePatternSequencerProcessor::hostTimeSignatureDenominatorForUi() const noexcept
+{
+    return hostTimeSignatureDenominator_.load(std::memory_order_relaxed);
 }
 
 std::size_t LivePatternSequencerProcessor::modulationCountForUi() const noexcept
@@ -2381,7 +2725,9 @@ LivePatternSequencerProcessor::playerPatternScheduledAtBarOffsetForUi(
     const auto scheduled = runtimeGraph_->patternSelectionScheduledAtBarOffset(
         lps::PatternPlayerId {static_cast<std::uint32_t>(playerIndex)},
         barsFromNow);
-    return scheduled ? patternLibrary_.indexOf(*scheduled) : std::nullopt;
+    if (!scheduled || patternHiddenForUi(*scheduled))
+        return std::nullopt;
+    return uiPatternIndexForId(*scheduled);
 }
 
 std::size_t
@@ -3184,14 +3530,17 @@ void LivePatternSequencerProcessor::updateUiSnapshot() noexcept
     bool anyPlaying = false;
     float masterCycleProgress = 0.0f;
 
-    for (std::size_t index = 0; index < currentSteps_.size(); ++index)
+    for (std::size_t index = 0; index < currentTicks_.size(); ++index)
     {
         const auto* pattern = players_[index].patternModel;
         const auto patternSnapshot = pattern != nullptr
             ? pattern->patternPlaybackSnapshot()
             : lps::PatternPlaybackSnapshot {};
-        currentSteps_[index]->store(
-            patternSnapshot.currentStep, std::memory_order_relaxed);
+        currentTicks_[index]->store(
+            patternSnapshot.playing
+                ? static_cast<int>(patternSnapshot.currentTick)
+                : -1,
+            std::memory_order_relaxed);
         if (index == configuredMasterIndex())
             masterCycleProgress = patternSnapshot.cycleProgress;
         for (std::size_t laneIndex = 0;

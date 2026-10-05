@@ -35,8 +35,10 @@ void testSynthTwoPatternPlayersProduceIndependentNotes()
         {
             const auto playerIndex = processor.synthTwoPlayerIndexForUi(slot);
             const auto pattern = processor.patternForUi(playerIndex);
-            if (!pattern.isHit(0))
-                processor.togglePlayerStep(playerIndex, 0);
+            const bool startsAtZero = pattern.pattern.hitCount != 0
+                && pattern.pattern.hits[0].startTick == 0;
+            if (!startsAtZero)
+                CHECK(processor.addPlayerHit(playerIndex, 0, 240));
             CHECK(!processor.playerMutedForUi(playerIndex));
         }
 
@@ -115,6 +117,8 @@ void testSynthTwoPatternPlayersProduceIndependentNotes()
                 ++synthNoteOns;
             }
         }
+        if (synthNoteOns != 2)
+            std::cerr << "Restored Synth 2 note-ons: " << synthNoteOns << '\n';
         CHECK(synthNoteOns == 2);
     }
 
@@ -275,11 +279,20 @@ void testVolcaSamplePartsUseMidiChannelsOneThroughTen()
             CHECK(processor.playerNameForUi(playerIndex)
                 == "Sample " + juce::String(static_cast<int>(slot + 1)));
             const auto pattern = processor.patternForUi(playerIndex);
-            for (std::size_t step = 0; step < pattern.stepCount; ++step)
-                if (!pattern.isHit(static_cast<std::uint16_t>(step)))
-                    processor.togglePlayerStep(playerIndex, step);
+            for (lps::PatternTick tick = 0;
+                 tick < pattern.pattern.cycleLengthTicks;
+                 tick += lps::Pattern::legacyStepTicks)
+            {
+                const bool exists = std::any_of(
+                    pattern.pattern.hits.begin(),
+                    pattern.pattern.hits.begin() + pattern.pattern.hitCount,
+                    [tick](const auto& hit) { return hit.startTick == tick; });
+                if (!exists)
+                    CHECK(processor.addPlayerHit(
+                        playerIndex, tick, lps::Pattern::legacyStepTicks));
+            }
             processor.setPlayerPlaybackWindow(
-                playerIndex, 0, pattern.stepCount - 1);
+                playerIndex, 0, pattern.pattern.cycleLengthTicks);
         }
 
         processor.setRateAndBufferSizeDetails(48'000.0, 6'000);
@@ -388,13 +401,362 @@ void testVolcaSamplePartsUseMidiChannelsOneThroughTen()
             static_cast<int>(state.getSize())));
         CHECK(parsed.getDynamicObject() != nullptr);
         CHECK(static_cast<int>(
-            parsed.getDynamicObject()->getProperty("schemaVersion")) == 3);
+            parsed.getDynamicObject()->getProperty("schemaVersion")) == 4);
         const auto* lanes = parsed.getDynamicObject()
             ->getProperty("sampleParameterLanes").getArray();
         CHECK(lanes != nullptr);
         CHECK(lanes->size() == 120);
     }
 
+    CHECK(directory.deleteRecursively());
+}
+
+void testLegacyProcessorPatternStateMigratesToTicks()
+{
+    auto directory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getNonexistentChildFile(
+            "live-pattern-sequencer-state-migration-test", {}, false);
+    CHECK(directory.createDirectory());
+    const auto catalog = directory.getChildFile("patterns.json");
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        juce::MemoryBlock state;
+        processor.getStateInformation(state);
+        auto parsed = juce::JSON::parse(juce::String::fromUTF8(
+            static_cast<const char*>(state.getData()),
+            static_cast<int>(state.getSize())));
+        auto* root = parsed.getDynamicObject();
+        CHECK(root != nullptr);
+        root->setProperty("schemaVersion", 3);
+        auto* players = root->getProperty("players").getArray();
+        CHECK(players != nullptr);
+        for (auto& serialized : *players)
+        {
+            auto* player = serialized.getDynamicObject();
+            CHECK(player != nullptr);
+            player->removeProperty("cycleLengthTicks");
+            player->removeProperty("patternHits");
+            player->removeProperty("offsetTicks");
+            player->removeProperty("playbackStartTick");
+            player->removeProperty("playbackEndTick");
+            player->setProperty("hitMask", 5);
+            player->setProperty("offset", 1);
+            player->setProperty("playbackStart", 0);
+            player->setProperty("playbackEnd", 3);
+        }
+        const auto legacy = juce::JSON::toString(parsed, true);
+        processor.setStateInformation(
+            legacy.toRawUTF8(), static_cast<int>(legacy.getNumBytesAsUTF8()));
+
+        const auto migrated = processor.patternForUi(0);
+        CHECK(migrated.pattern.hitCount == 2);
+        CHECK(migrated.pattern.hits[0].startTick == 0);
+        CHECK(migrated.pattern.hits[1].startTick == 480);
+        CHECK(migrated.pattern.hits[0].durationTicks == 240);
+        CHECK(migrated.offsetTicks == 240);
+        CHECK(migrated.playbackStartTick == 0);
+        CHECK(migrated.playbackEndTick == 960);
+    }
+    CHECK(directory.deleteRecursively());
+}
+
+void testLegacyPatternCatalogIsLeftUntouchedAndRejected()
+{
+    auto directory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getNonexistentChildFile(
+            "live-pattern-sequencer-old-catalog-test", {}, false);
+    CHECK(directory.createDirectory());
+    const auto catalog = directory.getChildFile("patterns.json");
+    const juce::String legacy =
+        "{\"format\":\"live-pattern-sequencer-pattern-library\","
+        "\"schemaVersion\":1,\"patterns\":[{\"id\":1,\"steps\":\"x---\"}]}";
+    CHECK(catalog.replaceWithText(legacy));
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        CHECK(processor.patternCountForUi() == lps::PatternLibrary::builtInCount);
+        CHECK(processor.patternCatalogErrorForUi().isNotEmpty());
+        CHECK(catalog.loadFileAsString() == legacy);
+    }
+    CHECK(directory.deleteRecursively());
+}
+
+void testNamedLegacyDefaultsMigrateToNoneAndKeepSavedPatterns()
+{
+    auto directory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getNonexistentChildFile(
+            "live-pattern-sequencer-default-migration-test", {}, false);
+    CHECK(directory.createDirectory());
+    const auto catalog = directory.getChildFile("patterns.json");
+    const juce::String oldCatalog = R"json({
+        "format": "live-pattern-sequencer-pattern-library",
+        "schemaVersion": 3,
+        "patterns": [
+            {"id": 1, "name": "Basic Kick", "cycleLengthTicks": 960,
+             "hits": [{"startTick": 0, "durationTicks": 240}]},
+            {"id": 11, "name": "Saved", "originVoiceName": "Snare",
+             "cycleLengthTicks": 960,
+             "hits": [{"startTick": 480, "durationTicks": 240}]}
+        ]
+    })json";
+    CHECK(catalog.replaceWithText(oldCatalog));
+
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        CHECK(processor.patternCatalogErrorForUi().isEmpty());
+        CHECK(processor.patternCountForUi() == 2);
+        CHECK(processor.patternNameForUi(0) == "None");
+        CHECK(processor.patternAtForUi(0).hitCount == 0);
+        CHECK(processor.patternAtForUi(0).cycleLengthTicks
+            == 8 * lps::Pattern::ticksPerQuarterNote);
+        CHECK(processor.patternNameForUi(1) == "Saved");
+        CHECK(processor.patternOriginForUi(1) == "Snare");
+    }
+
+    const auto migrated = juce::JSON::parse(catalog.loadFileAsString());
+    const auto* root = migrated.getDynamicObject();
+    CHECK(root != nullptr);
+    const auto* patterns = root->getProperty("patterns").getArray();
+    CHECK(patterns != nullptr);
+    CHECK(patterns->size() == 2);
+    CHECK(patterns->getReference(0).getDynamicObject()->getProperty("name")
+        == "None");
+    CHECK(directory.deleteRecursively());
+}
+
+void testEventPatternCatalogRoundTripsExactTicks()
+{
+    auto directory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getNonexistentChildFile(
+            "live-pattern-sequencer-event-catalog-test", {}, false);
+    CHECK(directory.createDirectory());
+    const auto catalog = directory.getChildFile("patterns.json");
+    std::size_t savedIndex = 0;
+    lps::Pattern expected;
+    expected.cycleLengthTicks = 1'337;
+    expected.hitCount = 3;
+    expected.hits[0] = {1, 17};
+    expected.hits[1] = {31, 2'880};
+    expected.hits[2] = {1'336, 1};
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        const auto saved = processor.savePlayerPattern(0, expected);
+        CHECK(saved.status
+            == LivePatternSequencerProcessor::SavePatternStatus::savedNew);
+        savedIndex = saved.patternIndex;
+        CHECK(lps::patternsEqual(processor.patternAtForUi(savedIndex), expected));
+    }
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        CHECK(processor.patternCatalogErrorForUi().isEmpty());
+        CHECK(savedIndex < processor.patternCountForUi());
+        CHECK(lps::patternsEqual(processor.patternAtForUi(savedIndex), expected));
+        const auto parsed = juce::JSON::parse(catalog.loadFileAsString());
+        CHECK(parsed.getDynamicObject() != nullptr);
+        CHECK(static_cast<int>(parsed.getDynamicObject()->getProperty(
+            "schemaVersion")) == 3);
+    }
+    CHECK(directory.deleteRecursively());
+}
+
+void testSavedPatternsCanBeDeletedAndFallBackToNone()
+{
+    auto directory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getNonexistentChildFile(
+            "live-pattern-sequencer-delete-pattern-test", {}, false);
+    CHECK(directory.createDirectory());
+    const auto catalog = directory.getChildFile("patterns.json");
+
+    lps::Pattern deletedPattern;
+    deletedPattern.cycleLengthTicks = 1'920;
+    deletedPattern.hitCount = 1;
+    deletedPattern.hits[0] = {480, 240};
+
+    lps::Pattern retainedPattern;
+    retainedPattern.cycleLengthTicks = 1'920;
+    retainedPattern.hitCount = 2;
+    retainedPattern.hits[0] = {0, 480};
+    retainedPattern.hits[1] = {960, 480};
+
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        CHECK(!processor.deletePatternForUi(0));
+
+        const auto saved = processor.savePlayerPattern(0, deletedPattern);
+        CHECK(saved.status
+            == LivePatternSequencerProcessor::SavePatternStatus::savedNew);
+        CHECK(processor.patternCountForUi() == 2);
+        CHECK(processor.selectedPatternForPlayer(0) == saved.patternIndex);
+        CHECK(processor.deletePatternForUi(saved.patternIndex));
+        CHECK(processor.patternCountForUi() == 1);
+        CHECK(processor.selectedPatternForPlayer(0) == 0);
+
+        const auto restored = processor.savePlayerPattern(0, deletedPattern);
+        CHECK(restored.status
+            == LivePatternSequencerProcessor::SavePatternStatus::selectedExisting);
+        CHECK(processor.patternCountForUi() == 2);
+        CHECK(lps::patternsEqual(
+            processor.patternAtForUi(restored.patternIndex), deletedPattern));
+        CHECK(processor.deletePatternForUi(restored.patternIndex));
+
+        const auto retained = processor.savePlayerPattern(0, retainedPattern);
+        CHECK(retained.status
+            == LivePatternSequencerProcessor::SavePatternStatus::savedNew);
+        CHECK(processor.patternCountForUi() == 2);
+    }
+
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        CHECK(processor.patternCatalogErrorForUi().isEmpty());
+        CHECK(processor.patternCountForUi() == 2);
+        CHECK(processor.patternNameForUi(0) == "None");
+        CHECK(lps::patternsEqual(processor.patternAtForUi(1), retainedPattern));
+    }
+    CHECK(directory.deleteRecursively());
+}
+
+void testPatternOriginMetadataAndSchemaTwoCompatibility()
+{
+    auto directory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getNonexistentChildFile(
+            "live-pattern-sequencer-origin-catalog-test", {}, false);
+    CHECK(directory.createDirectory());
+    const auto catalog = directory.getChildFile("patterns.json");
+    std::size_t savedIndex = 0;
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        lps::Pattern pattern;
+        pattern.cycleLengthTicks = 1'337;
+        pattern.hitCount = 1;
+        pattern.hits[0] = {17, 31};
+        const auto saved = processor.savePlayerPattern(0, pattern);
+        CHECK(saved.status
+            == LivePatternSequencerProcessor::SavePatternStatus::savedNew);
+        savedIndex = saved.patternIndex;
+        CHECK(processor.patternOriginForUi(savedIndex) == "BD1");
+
+        const auto duplicate = processor.savePlayerPattern(11, pattern);
+        CHECK(duplicate.status
+            == LivePatternSequencerProcessor::SavePatternStatus::selectedExisting);
+        CHECK(duplicate.patternIndex == savedIndex);
+        CHECK(processor.patternOriginForUi(savedIndex) == "BD1");
+    }
+
+    auto parsed = juce::JSON::parse(catalog.loadFileAsString());
+    auto* root = parsed.getDynamicObject();
+    CHECK(root != nullptr);
+    root->setProperty("schemaVersion", 2);
+    auto* patterns = root->getProperty("patterns").getArray();
+    CHECK(patterns != nullptr);
+    for (auto& value : *patterns)
+        if (auto* entry = value.getDynamicObject())
+            entry->removeProperty("originVoiceName");
+    CHECK(catalog.replaceWithText(juce::JSON::toString(parsed)));
+
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        CHECK(processor.patternCatalogErrorForUi().isEmpty());
+        CHECK(savedIndex < processor.patternCountForUi());
+        CHECK(processor.patternOriginForUi(savedIndex).isEmpty());
+    }
+    CHECK(directory.deleteRecursively());
+}
+
+void testCreateNewPatternDraftDoesNotPublishOrRetargetModulation()
+{
+    auto directory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getNonexistentChildFile(
+            "live-pattern-sequencer-new-draft-test", {}, false);
+    CHECK(directory.createDirectory());
+    const auto catalog = directory.getChildFile("patterns.json");
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        const auto patternCount = processor.patternCountForUi();
+        const auto selectedPattern = processor.selectedPatternForPlayer(0);
+        const auto pitch = processor.selectedModulationForPlayer(
+            0, LivePatternSequencerProcessor::ModulationLane::pitch);
+        const auto velocity = processor.selectedModulationForPlayer(
+            0, LivePatternSequencerProcessor::ModulationLane::velocity);
+        const auto gate = processor.selectedModulationForPlayer(
+            0, LivePatternSequencerProcessor::ModulationLane::gate);
+
+        CHECK(processor.createNewPlayerPatternDraft(0));
+        const auto draft = processor.patternForUi(0);
+        CHECK(draft.pattern.cycleLengthTicks
+            == 4 * lps::Pattern::ticksPerQuarterNote);
+        CHECK(draft.pattern.hitCount == 0);
+        CHECK(draft.offsetTicks == 0);
+        CHECK(draft.playbackStartTick == 0);
+        CHECK(draft.playbackEndTick
+            == 4 * lps::Pattern::ticksPerQuarterNote);
+        CHECK(processor.playerPlaybackSpeed(0) == 1);
+        CHECK(processor.playerPatternModifiedForUi(0));
+        CHECK(processor.patternCountForUi() == patternCount);
+        CHECK(processor.selectedPatternForPlayer(0) == selectedPattern);
+        CHECK(processor.selectedModulationForPlayer(
+            0, LivePatternSequencerProcessor::ModulationLane::pitch) == pitch);
+        CHECK(processor.selectedModulationForPlayer(
+            0, LivePatternSequencerProcessor::ModulationLane::velocity) == velocity);
+        CHECK(processor.selectedModulationForPlayer(
+            0, LivePatternSequencerProcessor::ModulationLane::gate) == gate);
+
+        CHECK(processor.addPlayerHit(0, 480, 240));
+        CHECK(processor.addPlayerHit(0, 3'360, 240));
+        processor.offsetPlayerPatternRight(0, 240);
+        processor.setPlayerPlaybackWindow(0, 120, 3'000);
+        processor.setPlayerPlaybackSpeed(0, 2);
+        const auto beforeSave = processor.patternForUi(0);
+        const auto saved = processor.savePlayerPattern(0);
+        CHECK(saved.status
+            == LivePatternSequencerProcessor::SavePatternStatus::savedNew);
+        CHECK(!processor.playerPatternChangePendingForUi(0));
+        CHECK(!processor.playerPatternModifiedForUi(0));
+        CHECK(processor.selectedPatternForPlayer(0) == saved.patternIndex);
+        const auto afterSave = processor.patternForUi(0);
+        CHECK(afterSave.pattern.cycleLengthTicks == 3'000);
+        CHECK(afterSave.pattern.hitCount + 1 == beforeSave.pattern.hitCount);
+        CHECK(afterSave.pattern.hits[0].startTick == 720);
+        CHECK(lps::patternsEqual(
+            processor.patternAtForUi(saved.patternIndex), afterSave.pattern));
+        CHECK(beforeSave.offsetTicks == 240);
+        CHECK(afterSave.offsetTicks == 0);
+        CHECK(afterSave.playbackStartTick == beforeSave.playbackStartTick);
+        CHECK(afterSave.playbackEndTick == beforeSave.playbackEndTick);
+        CHECK(processor.playerPlaybackSpeed(0) == 2);
+    }
+    CHECK(directory.deleteRecursively());
+}
+
+void testEventPatternProcessorStateRoundTripsExactTicks()
+{
+    auto directory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getNonexistentChildFile(
+            "live-pattern-sequencer-event-state-test", {}, false);
+    CHECK(directory.createDirectory());
+    const auto catalog = directory.getChildFile("patterns.json");
+    {
+        LivePatternSequencerProcessor processor(catalog);
+        CHECK(processor.addPlayerHit(0, 0, 240));
+        CHECK(processor.addPlayerHit(0, 31, 17));
+        CHECK(processor.resizePlayerHit(0, 0, 2'880));
+        processor.offsetPlayerPatternRight(0, 1);
+        processor.setPlayerPlaybackWindow(0, 30, 900);
+
+        juce::MemoryBlock state;
+        processor.getStateInformation(state);
+        CHECK(processor.removePlayerHit(0, 31));
+        processor.offsetPlayerPatternRight(0, 100);
+        processor.setPlayerPlaybackWindow(0, 0, 240);
+        processor.setStateInformation(
+            state.getData(), static_cast<int>(state.getSize()));
+
+        const auto restored = processor.patternForUi(0);
+        CHECK(restored.pattern.hitCount == 2);
+        CHECK((restored.pattern.hits[0] == lps::PatternHit {0, 2'880}));
+        CHECK((restored.pattern.hits[1] == lps::PatternHit {31, 17}));
+        CHECK(restored.offsetTicks == 1);
+        CHECK(restored.playbackStartTick == 30);
+        CHECK(restored.playbackEndTick == 900);
+    }
     CHECK(directory.deleteRecursively());
 }
 } // namespace
@@ -404,6 +766,14 @@ int main()
     testSynthTwoPatternPlayersProduceIndependentNotes();
     testPitchEditingUsesADraftAndPreservesTheLibraryRecord();
     testVolcaSamplePartsUseMidiChannelsOneThroughTen();
+    testLegacyProcessorPatternStateMigratesToTicks();
+    testLegacyPatternCatalogIsLeftUntouchedAndRejected();
+    testNamedLegacyDefaultsMigrateToNoneAndKeepSavedPatterns();
+    testEventPatternCatalogRoundTripsExactTicks();
+    testSavedPatternsCanBeDeletedAndFallBackToNone();
+    testPatternOriginMetadataAndSchemaTwoCompatibility();
+    testCreateNewPatternDraftDoesNotPublishOrRetargetModulation();
+    testEventPatternProcessorStateRoundTripsExactTicks();
     std::cout << "PluginProcessor tests passed\n";
     return EXIT_SUCCESS;
 }

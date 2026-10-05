@@ -21,6 +21,22 @@ constexpr lps::VoiceParameterId pitchId {0};
 constexpr lps::VoiceParameterId intensityId {1};
 constexpr lps::VoiceParameterId gateId {2};
 
+lps::PatternId addFourStepPattern(lps::PatternLibrary& library)
+{
+    lps::Pattern pattern;
+    pattern.cycleLengthTicks = lps::Pattern::ticksPerQuarterNote;
+    for (lps::PatternTick tick = 0;
+         tick < pattern.cycleLengthTicks;
+         tick += lps::Pattern::legacyStepTicks)
+    {
+        pattern.hits[pattern.hitCount++] = {
+            tick, lps::Pattern::legacyStepTicks};
+    }
+    const auto result = library.addOrFind("Four Step Test", pattern);
+    CHECK(result.entry != nullptr);
+    return result.entry->id;
+}
+
 class CapturingRenderer final : public lps::IOutputRenderer
 {
 public:
@@ -43,8 +59,15 @@ public:
 void testNewModulationValuesAreSampledBeforeHit()
 {
     lps::PatternLibrary patterns;
+    lps::Pattern triggerPattern;
+    triggerPattern.cycleLengthTicks = lps::Pattern::ticksPerQuarterNote;
+    triggerPattern.hits[triggerPattern.hitCount++] = {
+        0, lps::Pattern::legacyStepTicks};
+    const auto triggerEntry = patterns.addOrFind("Trigger", triggerPattern);
+    CHECK(triggerEntry.entry != nullptr);
     lps::ModulationLibrary modulations;
     lps::PatternPlayer pattern(patterns);
+    pattern.selectPattern(triggerEntry.entry->id);
     pattern.setRuntimeId(1);
 
     lps::ModulationPlayer pitch(modulations, lps::ModulationPlayerId {1});
@@ -172,6 +195,10 @@ void testMultiplePatternPlayersShareVoiceWithScopedPitchAndSuppression()
     lps::PatternPlayer secondPattern(patterns);
     firstPattern.setRuntimeId(1);
     secondPattern.setRuntimeId(2);
+    CHECK(firstPattern.setCycleLength(lps::Pattern::ticksPerQuarterNote));
+    CHECK(secondPattern.setCycleLength(lps::Pattern::ticksPerQuarterNote));
+    firstPattern.toggleStep(0);
+    secondPattern.toggleStep(0);
 
     std::array<std::unique_ptr<lps::ModulationPlayer>, 6> modPlayers;
     for (std::size_t index = 0; index < modPlayers.size(); ++index)
@@ -253,13 +280,34 @@ void testMultiplePatternPlayersShareVoiceWithScopedPitchAndSuppression()
     CHECK(foundFirst);
     CHECK(foundSecond);
 
+    // Suppression is a same-timestamp logical-hit decision. A long note from
+    // the suppressor does not suppress a later hit merely because it is still
+    // sounding.
+    CHECK(firstPattern.resizeHit(0, 2'880));
+    secondPattern.setPatternOffsetTicks(240);
+    CHECK(graph.process(
+        {1.0, 1.5, 120.0, 48'000.0, 24'000, true, true}, output));
+    bool foundLaterSecond = false;
+    for (const auto& resolved : output)
+    {
+        if (resolved.event.type == lps::SemanticEventType::triggerStart
+            && resolved.triggerSource == lps::PatternPlayerId {2}
+            && std::abs(resolved.event.ppqPosition - 1.25) < 1.0e-12)
+        {
+            foundLaterSecond = true;
+            CHECK(resolved.eligible);
+        }
+    }
+    CHECK(foundLaterSecond);
+
     graph.setSuppression({1}, {2}, false);
+    secondPattern.setPatternOffsetTicks(0);
     graph.setPatternPlayerMuted({1}, true);
     CHECK(graph.patternPlayerMuted({1}));
     CHECK(!graph.patternPlayerMuted({2}));
     CHECK(!graph.voiceMuted({1}));
     CHECK(graph.process(
-        {1.0, 1.25, 120.0, 48'000.0, 12'000, true, true}, output));
+        {2.0, 2.25, 120.0, 48'000.0, 12'000, true, true}, output));
     foundFirst = false;
     foundSecond = false;
     for (const auto& resolved : output)
@@ -288,6 +336,7 @@ void testPatternPlayerMuteSchedulerKeepsSharedVoiceIndependent()
     lps::PatternPlayer second(patterns);
     first.setRuntimeId(0);
     second.setRuntimeId(1);
+    CHECK(first.setCycleLength(lps::Pattern::ticksPerQuarterNote));
     lps::Voice sharedVoice(lps::VoiceId {0});
 
     lps::RuntimeGraph graph;
@@ -321,13 +370,14 @@ void testPatternPlayerMuteSchedulerKeepsSharedVoiceIndependent()
 void testArmedResetRestartsPatternAndModulationAtMasterRestBoundary()
 {
     lps::PatternLibrary patterns;
+    const auto fourStepPattern = addFourStepPattern(patterns);
     lps::ModulationLibrary modulations;
     lps::PatternPlayer master(patterns);
     lps::PatternPlayer follower(patterns);
     master.setRuntimeId(0);
     follower.setRuntimeId(1);
-    master.toggleStep(0); // The cycle boundary must not depend on a hit.
-    follower.selectPattern(lps::PatternId {2});
+    CHECK(master.setCycleLength(lps::Pattern::ticksPerQuarterNote));
+    follower.selectPattern(fourStepPattern);
 
     lps::ModulationPlayer modulation(
         modulations, lps::ModulationPlayerId {3});
@@ -361,17 +411,19 @@ void testArmedResetRestartsPatternAndModulationAtMasterRestBoundary()
     CHECK(graph.process(
         {0.75, 1.25, 120.0, 48'000.0, 24'000, true, false}, output));
     CHECK(!graph.cycleCommandPending(1));
-    CHECK(follower.patternPlaybackSnapshot().currentStep == 0);
+    CHECK(follower.patternPlaybackSnapshot().currentTick
+        < lps::Pattern::legacyStepTicks);
     CHECK(modulation.status().currentStep == 0);
 }
 
 void testArmedHitResetUsesFirstValueOnTheTriggeringHit()
 {
     lps::PatternLibrary patterns;
+    const auto fourStepPattern = addFourStepPattern(patterns);
     lps::ModulationLibrary modulations;
     lps::PatternPlayer source(patterns);
     source.setRuntimeId(1);
-    source.selectPattern(lps::PatternId {2});
+    source.selectPattern(fourStepPattern);
 
     lps::ModulationPlayer modulation(
         modulations, lps::ModulationPlayerId {3});
@@ -412,7 +464,7 @@ void testArmedClockResetUsesMasterCycleBoundaryWithoutAHit()
     lps::ModulationLibrary modulations;
     lps::PatternPlayer master(patterns);
     master.setRuntimeId(0);
-    master.toggleStep(0); // The master loop now contains no hits.
+    CHECK(master.setCycleLength(lps::Pattern::ticksPerQuarterNote));
     master.setPlaybackWindow(0, 2);
 
     lps::ModulationPlayer modulation(
@@ -465,6 +517,7 @@ void testBarSchedulerDefersMuteToMasterCycleAndBoundsTheHorizon()
     lps::PatternLibrary patterns;
     lps::PatternPlayer master(patterns);
     master.setRuntimeId(0);
+    CHECK(master.setCycleLength(lps::Pattern::ticksPerQuarterNote));
     lps::Voice voice(lps::VoiceId {0});
 
     lps::RuntimeGraph graph;
@@ -530,6 +583,7 @@ void testBarSchedulerDoesNotApplyAtStartOfFirstBar()
     lps::PatternLibrary patterns;
     lps::PatternPlayer master(patterns);
     master.setRuntimeId(0);
+    CHECK(master.setCycleLength(lps::Pattern::ticksPerQuarterNote));
     lps::Voice voice(lps::VoiceId {0});
 
     lps::RuntimeGraph graph;
@@ -558,10 +612,12 @@ void testBarSchedulerDoesNotApplyAtStartOfFirstBar()
 void testBarSchedulerSupportsIndependentFutureChanges()
 {
     lps::PatternLibrary patterns;
+    const auto scheduledPattern = addFourStepPattern(patterns);
     lps::PatternPlayer master(patterns);
     lps::PatternPlayer follower(patterns);
     master.setRuntimeId(0);
     follower.setRuntimeId(1);
+    CHECK(master.setCycleLength(lps::Pattern::ticksPerQuarterNote));
     master.setTransitionPolicy({
         lps::PatternTransitionPolicyType::explicitBoundary, {}});
     follower.setTransitionPolicy({
@@ -579,11 +635,11 @@ void testBarSchedulerSupportsIndependentFutureChanges()
     lps::ResolvedVoiceEventBuffer output;
     CHECK(graph.process(
         {0.0, 0.5, 120.0, 48'000.0, 24'000, true, true}, output));
-    CHECK(graph.schedulePatternSelection({1}, lps::PatternId {2}, 2));
+    CHECK(graph.schedulePatternSelection({1}, scheduledPattern, 2));
     CHECK(graph.scheduleVoiceMute({1}, true, 2));
     CHECK(graph.scheduleVoiceMute({1}, false, 4));
     CHECK(graph.patternSelectionScheduledAtBarOffset({1}, 2)
-        == std::optional<lps::PatternId> {lps::PatternId {2}});
+        == std::optional<lps::PatternId> {scheduledPattern});
     CHECK(!graph.patternSelectionScheduledAtBarOffset({1}, 1).has_value());
     CHECK(graph.scheduledChangeCountAtBarOffset(2) == 2);
     CHECK(graph.scheduledChangeCountAtBarOffset(4) == 1);
@@ -596,7 +652,7 @@ void testBarSchedulerSupportsIndependentFutureChanges()
 
     CHECK(graph.process(
         {1.1, 2.1, 120.0, 48'000.0, 48'000, true, false}, output));
-    CHECK(follower.activePatternId() == lps::PatternId {2});
+    CHECK(follower.activePatternId() == scheduledPattern);
     CHECK(!graph.patternSelectionScheduledAtBarOffset({1}, 1).has_value());
     CHECK(graph.voiceMuted({1}));
     CHECK(graph.scheduledVoiceMuteBarsRemaining({1}) == 2);
@@ -610,8 +666,10 @@ void testBarSchedulerSupportsIndependentFutureChanges()
 void testScheduledMasterPatternChangeCountsOneBoundary()
 {
     lps::PatternLibrary patterns;
+    const auto scheduledPattern = addFourStepPattern(patterns);
     lps::PatternPlayer master(patterns);
     master.setRuntimeId(0);
+    CHECK(master.setCycleLength(lps::Pattern::ticksPerQuarterNote));
     master.setTransitionPolicy({
         lps::PatternTransitionPolicyType::explicitBoundary, {}});
 
@@ -624,10 +682,10 @@ void testScheduledMasterPatternChangeCountsOneBoundary()
     lps::ResolvedVoiceEventBuffer output;
     CHECK(graph.process(
         {0.0, 0.5, 120.0, 48'000.0, 24'000, true, true}, output));
-    CHECK(graph.schedulePatternSelection({0}, lps::PatternId {2}, 1));
+    CHECK(graph.schedulePatternSelection({0}, scheduledPattern, 1));
     CHECK(graph.process(
         {0.5, 1.1, 120.0, 48'000.0, 28'800, true, false}, output));
-    CHECK(master.activePatternId() == lps::PatternId {2});
+    CHECK(master.activePatternId() == scheduledPattern);
     CHECK(graph.currentBar() == 2);
 }
 

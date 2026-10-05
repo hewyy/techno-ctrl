@@ -6,6 +6,10 @@ This document scopes the refactor described in *Sequencer Core Architecture
 Requirements*. It is an implementation handoff, not a description of the
 current code.
 
+> Historical note: the fixed-step pattern details in this handoff were
+> superseded by the event-based timing implementation. See
+> `core-architecture.md` for the current model.
+
 When this handoff conflicts with the existing architecture documentation or
 the earlier architecture audit, use this handoff. The explicit decisions made
 after review also override the source requirements where noted, especially the
@@ -76,8 +80,8 @@ the current behavior covered by the passing test suite:
 
 - half-open PPQ processing intervals;
 - sample-accurate event placement;
-- 32-step pattern drafts, offsets, inclusive playback windows, and the current
-  three playback speeds;
+- pattern drafts, offsets, playback windows, and the current three playback
+  speeds (the later event-timing design replaces the fixed-step details);
 - requested-versus-active pattern selection and cycle-quantized activation;
 - deterministic same-frame output ordering;
 - independent runtime state for players that reference the same library record;
@@ -371,8 +375,9 @@ On a valid trigger, the voice:
 1. samples its current Pitch, Velocity, and Gate values;
 2. creates a voice-scoped trigger identity;
 3. emits a resolved `triggerStart` at the hit timestamp;
-4. schedules the matching `triggerEnd` at
-   `hitPpq + gateRatio * nominalStepLengthPpq`.
+4. schedules the matching `triggerEnd` from the hit's base duration and Gate
+   articulation multiplier (the current implementation also scales duration by
+   pattern playback speed).
 
 A Gate value of zero produces no audible resolved trigger. For a positive gate,
 ensure the resolved end is at least one sample after the start so timestamp

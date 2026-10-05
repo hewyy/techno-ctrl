@@ -147,7 +147,7 @@ struct ResolvedVoiceEvent
 class ResolvedVoiceEventBuffer
 {
 public:
-    static constexpr std::size_t capacity = 512;
+    static constexpr std::size_t capacity = 4096;
     void clear() noexcept { size_ = 0; overflowed_ = false; }
     [[nodiscard]] bool push(ResolvedVoiceEvent event) noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
@@ -175,9 +175,9 @@ public:
     static constexpr std::size_t maximumArmedCommands = 2048;
     static constexpr std::size_t maximumScheduledBars = 8;
     static constexpr std::size_t maximumScheduledChanges = 128;
-    static constexpr std::size_t maximumWorkSignals = 1024;
+    static constexpr std::size_t maximumWorkSignals = 16384;
     static constexpr std::size_t maximumOutputEndpoints = 8;
-    static constexpr std::size_t maximumRoutedEventsPerEndpoint = 1024;
+    static constexpr std::size_t maximumRoutedEventsPerEndpoint = 8192;
     static_assert(maximumPatternPlayers <= 32 && maximumVoices <= 32);
     static_assert(PatternLibrary::maxEntryCount <= 0x1ffu);
 
@@ -228,6 +228,7 @@ public:
         PatternPlayerId player,
         PatternId pattern,
         std::size_t barsFromNow = 1) noexcept;
+    void cancelPatternSelection(PatternPlayerId player) noexcept;
     [[nodiscard]] std::optional<bool> scheduledVoiceMute(
         VoiceId voice) const noexcept;
     [[nodiscard]] std::optional<bool> scheduledPatternPlayerMute(

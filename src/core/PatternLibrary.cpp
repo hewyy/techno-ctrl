@@ -1,35 +1,57 @@
 #include "core/PatternLibrary.h"
 
 #include <algorithm>
-#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace lps
 {
-namespace
+bool patternIsValid(const Pattern& pattern) noexcept
 {
-// One character is one player step: 'x' is a hit and '-' is a rest.
-Pattern makePattern(std::string_view steps) noexcept
+    if (pattern.cycleLengthTicks == 0
+        || pattern.cycleLengthTicks > Pattern::maximumCycleLengthTicks
+        || pattern.hitCount > Pattern::maximumHitCount)
+    {
+        return false;
+    }
+
+    PatternTick previousStart = 0;
+    for (std::size_t index = 0; index < pattern.hitCount; ++index)
+    {
+        const auto& hit = pattern.hits[index];
+        if (hit.startTick >= pattern.cycleLengthTicks
+            || hit.durationTicks == 0
+            || (index != 0 && hit.startTick <= previousStart))
+        {
+            return false;
+        }
+        previousStart = hit.startTick;
+    }
+    return true;
+}
+
+Pattern normalizedPattern(Pattern pattern) noexcept
 {
-    Pattern pattern;
-    pattern.length = std::min(steps.size(), Pattern::maxLength);
-
-    for (std::size_t step = 0; step < pattern.length; ++step)
-        pattern.hits[step] = steps[step] == 'x';
-
+    if (pattern.hitCount <= Pattern::maximumHitCount)
+    {
+        std::fill(
+            pattern.hits.begin() + static_cast<std::ptrdiff_t>(pattern.hitCount),
+            pattern.hits.end(),
+            PatternHit {});
+    }
     return pattern;
 }
-} // namespace
 
 bool patternsEqual(const Pattern& left, const Pattern& right) noexcept
 {
-    if (left.length != right.length || left.length > Pattern::maxLength)
+    if (left.cycleLengthTicks != right.cycleLengthTicks
+        || left.hitCount != right.hitCount
+        || left.hitCount > Pattern::maximumHitCount)
         return false;
 
-    for (std::size_t step = 0; step < left.length; ++step)
+    for (std::size_t index = 0; index < left.hitCount; ++index)
     {
-        if (left.hits[step] != right.hits[step])
+        if (!(left.hits[index] == right.hits[index]))
             return false;
     }
 
@@ -38,16 +60,9 @@ bool patternsEqual(const Pattern& left, const Pattern& right) noexcept
 
 PatternLibrary::PatternLibrary()
 {
-    entries_[0] = {PatternId {1}, "Basic Kick", makePattern("x---")};
-    entries_[1] = {PatternId {2}, "All Steps", makePattern("xxxx")};
-    entries_[2] = {PatternId {3}, "Backbeat", makePattern("----x-------x---")};
-    entries_[3] = {PatternId {4}, "Offbeat Hats", makePattern("--x---x-")};
-    entries_[4] = {PatternId {5}, "Tresillo", makePattern("x--x--x-")};
-    entries_[5] = {PatternId {6}, "3-Step Pulse", makePattern("x--")};
-    entries_[6] = {PatternId {7}, "5-Step Pulse", makePattern("x----")};
-    entries_[7] = {PatternId {8}, "7-Step Pulse", makePattern("x------")};
-    entries_[8] = {PatternId {9}, "9-Step Pulse", makePattern("x--------")};
-    entries_[9] = {PatternId {10}, "Euclidean 5/12", makePattern("x-x--x-x--x-")};
+    Pattern none;
+    none.cycleLengthTicks = 8 * Pattern::ticksPerQuarterNote;
+    entries_[0] = {PatternId {1}, "None", none};
 
     publishedEntryCount_.store(builtInCount, std::memory_order_release);
 }
@@ -108,8 +123,7 @@ bool PatternLibrary::replaceEntriesForStartup(
         const auto& candidate = entries[index];
         if (!candidate.id.isValid()
             || candidate.id.value() > maxEntryCount
-            || candidate.pattern.length == 0
-            || candidate.pattern.length > Pattern::maxLength)
+            || !patternIsValid(candidate.pattern))
         {
             return false;
         }
@@ -127,10 +141,7 @@ bool PatternLibrary::replaceEntriesForStartup(
     for (std::size_t index = 0; index < entries.size(); ++index)
     {
         entries_[index] = entries[index];
-        auto& pattern = entries_[index].pattern;
-        std::fill(pattern.hits.begin() + static_cast<std::ptrdiff_t>(pattern.length),
-                  pattern.hits.end(),
-                  false);
+        entries_[index].pattern = normalizedPattern(entries_[index].pattern);
     }
 
     for (std::size_t index = entries.size(); index < entries_.size(); ++index)
@@ -159,23 +170,19 @@ PatternLibraryInsertResult PatternLibrary::addOrFind(std::string name,
     if (const auto* existing = findEquivalent(pattern))
         return {existing, false};
 
-    if (pattern.length == 0 || pattern.length > Pattern::maxLength)
+    if (!patternIsValid(pattern))
         return {};
 
     const auto insertionIndex = publishedEntryCount_.load(std::memory_order_acquire);
     if (insertionIndex >= entries_.size())
         return {};
 
-    auto normalizedPattern = pattern;
-    std::fill(normalizedPattern.hits.begin()
-                  + static_cast<std::ptrdiff_t>(normalizedPattern.length),
-              normalizedPattern.hits.end(),
-              false);
+    auto normalized = normalizedPattern(pattern);
 
     auto& entry = entries_[insertionIndex];
     entry.id = nextAvailableId();
     entry.name = std::move(name);
-    entry.pattern = normalizedPattern;
+    entry.pattern = normalized;
 
     try
     {
@@ -194,18 +201,14 @@ PatternLibraryInsertResult PatternLibrary::addOrFind(std::string name,
     if (!entry.id.isValid()
         || entry.id.value() > maxEntryCount
         || find(entry.id) != nullptr
-        || entry.pattern.length == 0
-        || entry.pattern.length > Pattern::maxLength
+        || !patternIsValid(entry.pattern)
         || findEquivalent(entry.pattern) != nullptr)
     {
         entry = {};
         return {};
     }
 
-    std::fill(entry.pattern.hits.begin()
-                  + static_cast<std::ptrdiff_t>(entry.pattern.length),
-              entry.pattern.hits.end(),
-              false);
+    entry.pattern = normalizedPattern(entry.pattern);
 
     publishedEntryCount_.store(insertionIndex + 1, std::memory_order_release);
     return {&entry, true};

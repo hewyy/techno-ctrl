@@ -12,7 +12,7 @@ This project is a deliberately narrow end-to-end proof:
 - Independent C++ pattern players drive a configurable number of drum voices.
 - Ten built-in patterns cover basic drum figures and odd-length 3/5/7/9-step pulses.
 - The drum voices emit fixed notes on MIDI channel 11; Synth 1 and Synth 2 emit on channels 12 and 13. Velocity is driven by an independently selected modulation.
-- The UI edits a 32-step working copy for each player, marks changes to its draft, loop range, or offset, and can save the active loop into a persistent per-user library. A library pattern's stored length sets the player's initial playback end without limiting the editable grid.
+- The UI edits fixed-capacity timed-hit patterns on a zoomable musical timeline. Hit starts and durations use an exact 960-tick quarter-note timebase; snap is an editing aid and never changes existing events.
 - Each player also has an editable 1–10 step velocity modulation shown as rotary knobs. It advances only when the pattern produces a hit, loops independently of the hit pattern, and has its own amber playhead. Modulations can be selected and saved without changing any hit pattern.
 - Each voice has a MUTE control that silences its note hits while its sequence and visible playhead continue advancing.
 - One statically configured voice is the master (BD1 by default). Each other voice can queue a one-shot Reset that restarts its active loop at the next start of the master's active loop.
@@ -53,12 +53,12 @@ for component APIs, timing and threading contracts, safety mechanisms, examples,
 and a checklist for replacing JUCE or the VST3 wrapper.
 
 `PatternLibrary` and `VelocityModulationLibrary` own separate immutable, append-only
-catalog entries; each `PatternPlayer`
-copies the selected hits into its own unsaved 32-step draft before playback or editing. Saving
-crops and rebases the selected loop, including any pattern offset. Exact content duplicates
-select the existing entry. New content is assigned a stable ID and added to the shared per-user
-JSON catalog without requiring a name. Edits outside the brackets are marked as draft
-changes but are excluded from the saved pattern. The saved or matching library entry follows
+catalog entries. Each `PatternPlayer` copies the selected timed hits and independent cycle
+length into its own fixed-capacity draft before playback or editing. Saving captures the full
+draft; per-player offset and playback window remain session state rather than being baked into
+reusable catalog data. Exact content duplicates select the existing entry. New content is
+assigned a stable ID and added to the shared per-user JSON catalog without requiring a name.
+The saved or matching library entry follows
 the same timing as other pattern selections: while playing, follower voices wait for the next
 start of the master voice's loop, and the master waits for its own loop start. While stopped,
 selections apply immediately. Activation reloads canonical content and discards excluded edits.
@@ -101,21 +101,30 @@ Each entry stores a contiguous `values` array containing 1–10 integers from 0 
 }
 ```
 
-The versioned JSON is human-readable. Each entry has a stable numeric `id` and a `steps` string
-in which `x` is a hit and `-` is a rest. Existing named entries retain their optional `name`:
+The versioned JSON is human-readable. Each entry has a stable numeric `id`, an independent
+cycle length, and an ordered array of exact tick positions and durations:
 
 ```json
 {
   "format": "live-pattern-sequencer-pattern-library",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "patterns": [
-    { "id": 11, "steps": "x---x---" }
+    {
+      "id": 11,
+      "cycleLengthTicks": 1920,
+      "hits": [
+        { "startTick": 0, "durationTicks": 240 },
+        { "startTick": 960, "durationTicks": 480 }
+      ]
+    }
   ]
 }
 ```
 
 Edit the catalog only while the plugin is not running. It accepts 1–256 unique patterns,
-each 1–32 steps long. If an existing catalog is malformed or uses an unsupported schema, the
+each up to 64 quarter notes and 256 hits. Schema-1 Boolean-step catalogs are not migrated;
+the hardcoded built-ins are recreated in the event format. If an existing catalog is malformed
+or uses an unsupported schema, the
 plugin leaves it untouched, starts with its default library, and refuses new disk-backed saves
 until the file is corrected or moved aside and the plugin is reopened. The editor displays the
 catalog path and recovery action when this happens.

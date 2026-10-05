@@ -118,7 +118,7 @@ public:
     [[nodiscard]] bool resetPlayerToMaster(std::size_t playerIndex) noexcept;
     [[nodiscard]] bool playerResetToMasterPendingForUi(
         std::size_t playerIndex) const noexcept;
-    [[nodiscard]] int currentStepForUi(std::size_t playerIndex = 0) const noexcept;
+    [[nodiscard]] int currentTickForUi(std::size_t playerIndex = 0) const noexcept;
     [[nodiscard]] int currentModulationStepForUi(
         std::size_t playerIndex,
         ModulationLane lane) const noexcept;
@@ -145,13 +145,18 @@ public:
     [[nodiscard]] lps::Pattern patternAtForUi(
         std::size_t patternIndex) const noexcept;
     [[nodiscard]] juce::String patternNameForUi(std::size_t patternIndex) const;
+    [[nodiscard]] juce::String patternOriginForUi(
+        std::size_t patternIndex) const;
     [[nodiscard]] juce::String patternCatalogErrorForUi() const;
+    [[nodiscard]] bool deletePatternForUi(std::size_t patternIndex);
     [[nodiscard]] bool playerPatternModifiedForUi(
         std::size_t playerIndex) const noexcept;
     [[nodiscard]] SavePatternResult savePlayerPattern(std::size_t playerIndex);
     [[nodiscard]] SavePatternResult savePlayerPattern(
         std::size_t playerIndex,
         const lps::Pattern& candidatePattern);
+    [[nodiscard]] bool createNewPlayerPatternDraft(
+        std::size_t playerIndex) noexcept;
     void selectPatternForPlayer(std::size_t playerIndex, std::size_t patternIndex) noexcept;
     [[nodiscard]] bool schedulePatternForPlayer(
         std::size_t playerIndex,
@@ -172,6 +177,25 @@ public:
     [[nodiscard]] std::size_t playerPlaybackStart(std::size_t playerIndex) const noexcept;
     [[nodiscard]] std::size_t playerPlaybackEnd(std::size_t playerIndex) const noexcept;
     void togglePlayerStep(std::size_t playerIndex, std::size_t step) noexcept;
+    [[nodiscard]] bool addPlayerHit(
+        std::size_t playerIndex, lps::PatternTick startTick,
+        lps::PatternTick durationTicks) noexcept;
+    [[nodiscard]] bool removePlayerHit(
+        std::size_t playerIndex, lps::PatternTick startTick) noexcept;
+    [[nodiscard]] bool movePlayerHit(
+        std::size_t playerIndex, lps::PatternTick oldStartTick,
+        lps::PatternTick newStartTick) noexcept;
+    [[nodiscard]] bool resizePlayerHit(
+        std::size_t playerIndex, lps::PatternTick startTick,
+        lps::PatternTick durationTicks) noexcept;
+    [[nodiscard]] bool setPlayerCycleLength(
+        std::size_t playerIndex, lps::PatternTick cycleLengthTicks) noexcept;
+    void offsetPlayerPatternLeft(
+        std::size_t playerIndex, lps::PatternTick amount) noexcept;
+    void offsetPlayerPatternRight(
+        std::size_t playerIndex, lps::PatternTick amount) noexcept;
+    [[nodiscard]] int hostTimeSignatureNumeratorForUi() const noexcept;
+    [[nodiscard]] int hostTimeSignatureDenominatorForUi() const noexcept;
 
     [[nodiscard]] std::size_t modulationCountForUi() const noexcept;
     [[nodiscard]] lps::Modulation modulationAtForUi(
@@ -380,6 +404,11 @@ public:
         std::size_t length) noexcept;
 
 private:
+    [[nodiscard]] SavePatternResult savePlayerPatternInternal(
+        std::size_t playerIndex,
+        const lps::Pattern& candidatePattern,
+        bool adoptCurrentDraft);
+
     // This is intentionally a policy switch so a future configuration menu
     // can expose immediate selection without changing the graph topology.
     static constexpr bool waitForCycleBeforeSelection = true;
@@ -472,12 +501,18 @@ private:
     [[nodiscard]] std::size_t sampleLaneResetGroup(
         std::size_t laneIndex,
         std::size_t sourceIndex) const noexcept;
+    [[nodiscard]] std::optional<std::size_t> libraryPatternIndexForUi(
+        std::size_t patternIndex) const noexcept;
+    [[nodiscard]] std::size_t uiPatternIndexForId(
+        lps::PatternId id) const noexcept;
+    [[nodiscard]] bool patternHiddenForUi(lps::PatternId id) const noexcept;
 
     // The library must outlive every player because players keep a read-only
     // reference to its immutable, append-only entries.
     lps::PatternLibrary patternLibrary_;
     lps::ModulationLibrary modulationLibrary_;
     PatternLibraryFileStore patternLibraryFileStore_;
+    std::vector<lps::PatternId> hiddenPatternIds_;
     ModulationLibraryFileStore modulationLibraryFileStore_;
     std::vector<PlayerBundle> players_;
     std::vector<lps::PitchEditContext> pitchEditContexts_;
@@ -498,7 +533,7 @@ private:
     double internalPpqPosition_ = 0.0;
     double lastKnownTempoBpm_ = 120.0;
 
-    std::vector<std::unique_ptr<std::atomic<int>>> currentSteps_;
+    std::vector<std::unique_ptr<std::atomic<int>>> currentTicks_;
     std::vector<std::unique_ptr<std::atomic<int>>>
         currentModulationSteps_;
     std::vector<std::unique_ptr<std::atomic<bool>>>
@@ -521,6 +556,8 @@ private:
     std::atomic<bool> internalTransportRequested_ { false };
     std::atomic<bool> internalTransportPlaying_ { false };
     std::atomic<bool> hostTransportPlaying_ { false };
+    std::atomic<int> hostTimeSignatureNumerator_ {4};
+    std::atomic<int> hostTimeSignatureDenominator_ {4};
     std::atomic<float> currentBarProgress_ { 0.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LivePatternSequencerProcessor)

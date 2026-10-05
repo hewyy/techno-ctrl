@@ -32,16 +32,20 @@ records are immutable and retain their addresses for the library lifetime. A
 single control thread may append a record after persistence succeeds; realtime
 readers never allocate or lock.
 
-`Pattern` contains only a hit sequence and length. `Modulation` contains only a
-fixed sequence of exact unsigned 16-bit `NormalizedValue` values and a length.
+`Pattern` contains an independent cycle length and up to 256 chronologically
+ordered timed hits. Every hit stores integer start and duration values at 960
+ticks per quarter note. `Modulation` contains only a fixed sequence of exact
+unsigned 16-bit `NormalizedValue` values and a length.
 The same record can be selected by multiple players without sharing cursor
 state.
 
 `PatternPlayer` owns rhythm playback state:
 
 - selected and active Pattern IDs;
-- the editable 32-step draft, offset, inclusive window, and playback speed;
-- clock- or hit-based advance, continuous or one-shot playback, and cursor;
+- the editable fixed-capacity event draft, tick offset, half-open tick playback
+  window, and playback speed;
+- clock- or legacy-240-tick-slice hit-based advance, continuous or one-shot
+  playback, and cursor;
 - local, immediate, or external-cycle pattern transition policy;
 - hit and cycle-boundary signal generation.
 
@@ -64,8 +68,8 @@ voice-scoped trigger ID, and owns the matching end.
 
 Player-to-graph traffic uses `PlayerSignal`, not `SequencerEvent`:
 
-- `patternHit` carries PatternPlayer identity, PPQ, hit identity, and nominal
-  step duration;
+- `patternHit` carries PatternPlayer identity, PPQ, hit identity, and base
+  pattern duration;
 - `patternCycleBoundary` is control-only and is emitted even if step zero is a
   rest;
 - `modulationValue` carries ModulationPlayer identity, PPQ, exact normalized
@@ -129,10 +133,11 @@ pattern hit or cycle boundary; they are not permanent source special cases.
 ## Voice trigger lifetime
 
 A trigger is dropped and diagnosed if any required parameter is missing. Gate
-zero produces no audible resolved trigger. A positive gate ends at:
+is an articulation multiplier; zero produces no audible resolved trigger. A
+positive gate ends at:
 
 ```text
-hit PPQ + gate ratio * triggering PatternPlayer nominal step duration
+hit PPQ + gate ratio * speed-scaled stored hit duration
 ```
 
 The minimum positive gate is one sample in PPQ. A Voice keeps one active trigger
@@ -175,6 +180,20 @@ The UI may edit library-backed player drafts through their atomic snapshot APIs.
 Graph topology and fixed player runtime settings move through graph snapshots.
 Registry changes still require stopping and reconstructing the processor.
 
+Pattern drafts use atomic packed hit records plus a revision. Control-thread
+writers publish a complete fixed-capacity record under an odd revision. The
+audio thread attempts one coherent read at a block boundary and otherwise keeps
+its previous snapshot; it never spins or waits. Pattern events are already
+ordered in the draft, and tick offset rotation is traversed as two sorted
+segments, so playback does not rebuild or sort pattern data.
+
+The pattern editor draws note bars on a fixed 16-quarter-note-beat timeline
+shared by every player. Snap choices include 1/16, 1/32, 1/64, 1/128, triplets,
+and one-tick editing; changing snap adds grid lines without resizing the musical
+timeline or altering existing hits. Arrow nudges move a selected hit by one
+tick, and duration has an exact numeric tick control. Host time signature
+affects bar-line display only; storage remains 960 ticks per quarter note.
+
 ## Default plug-in composition
 
 The plug-in constructs ten drum players, one Synth 1 player, and three Synth 2
@@ -210,12 +229,26 @@ clock-modulation resets. Hit-driven modulation resets use their selected Pattern
 as the source. Host start and discontinuity reset the runtime at the block
 start. Host stop resets physical outputs.
 
-Host state writes `live-pattern-sequencer-graph-state` schema version 2 and
-continues to read version 1. It
+Host state writes `live-pattern-sequencer-graph-state` schema version 4 and
+continues to migrate versions 1 through 3 from Boolean hit masks and step-based
+offset/windows. It
 persists Pattern and Modulation references and drafts plus mute and suppression
 configuration, Synth 2 parameter lanes, advance modes, and hit-source choices.
 Transient cursors, queued work, and active triggers are not serialized.
 Unsupported formats or versions are rejected.
+
+The pattern catalog uses schema version 2 with `cycleLengthTicks` and a `hits`
+array of `startTick`/`durationTicks` objects. Schema-1 on-disk pattern catalogs
+are intentionally not migrated and are not readable by the new version; they
+are left untouched. The ten hardcoded patterns are recreated at 240-tick
+spacing with 240-tick base durations. New catalogs are not readable by older
+application versions.
+
+Pattern cycles are limited to 64 quarter notes and 256 hits. Signal, work,
+semantic-event, and routed-event buffers remain fixed-capacity. Overflow is
+diagnosed and fails the processing block so the wrapper resets logical and
+physical outputs. Ties, legato, pitch bend, MPE, and multiple same-tick hits in
+one pattern remain deferred.
 
 ## Source map
 
