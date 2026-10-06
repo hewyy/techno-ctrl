@@ -954,6 +954,8 @@ private:
 class SynthModulationSlider final : public juce::Slider
 {
 public:
+    std::function<void()> onBeginEdit;
+
     void setPitchDisplay(bool enabled) noexcept
     {
         pitchDisplay_ = enabled;
@@ -973,6 +975,8 @@ public:
 
     void mouseDown(const juce::MouseEvent& event) override
     {
+        if (onBeginEdit)
+            onBeginEdit();
         editTracker_.beginGesture(juce::roundToInt(getValue()));
         juce::Slider::mouseDown(event);
     }
@@ -1105,6 +1109,7 @@ public:
                     selectedPatternSlot_ = selectedSamplePart_;
                 }
                 updateSectionVisibility();
+                activateMidiContext();
                 resized();
                 repaint();
             };
@@ -1171,6 +1176,15 @@ public:
         updateSectionVisibility();
         resized();
         repaint();
+    }
+
+    void activateMidiContext()
+    {
+        if (kind_ == Kind::synthTwo)
+            (void) processor_.setMidiSynthOverviewContext();
+        else
+            (void) processor_.setMidiSampleOverviewContext(
+                selectedSamplePart_);
     }
 
     void paint(juce::Graphics& graphics) override
@@ -2230,7 +2244,11 @@ public:
         {
             modulationMenu_.setTooltip(
                 "Select or save this modulation with a rendered preview");
-            modulationMenu_.onClick = [this] { showModulationMenu(); };
+            modulationMenu_.onClick = [this]
+            {
+                publishMidiStepContext(firstVisibleStep_);
+                showModulationMenu();
+            };
             addAndMakeVisible(modulationMenu_);
 
             advanceOn_.addItem("CLOCK", 1);
@@ -2301,6 +2319,7 @@ public:
             {
                 firstVisibleStep_ = firstVisibleStep_ >= visibleStepCount
                     ? firstVisibleStep_ - visibleStepCount : 0;
+                publishMidiStepContext(firstVisibleStep_);
                 resized();
                 refresh();
             };
@@ -2309,6 +2328,7 @@ public:
                 const auto modulation = laneModulation();
                 if (firstVisibleStep_ + visibleStepCount < modulation.length)
                     firstVisibleStep_ += visibleStepCount;
+                publishMidiStepContext(firstVisibleStep_);
                 resized();
                 refresh();
             };
@@ -2318,6 +2338,10 @@ public:
             for (std::size_t step = 0; step < values_.size(); ++step)
             {
                 auto& slider = values_[step];
+                slider.onBeginEdit = [this, step]
+                {
+                    publishMidiStepContext(step);
+                };
                 slider.setSliderStyle(juce::Slider::LinearBarVertical);
                 slider.setRange(
                     0.0,
@@ -2544,6 +2568,54 @@ public:
         }
 
     private:
+        void publishMidiStepContext(std::size_t step) noexcept
+        {
+            constexpr std::size_t stepsPerBank = 10;
+            if (kind_ == Kind::synthTwo)
+            {
+                if (laneIndex_
+                    < LivePatternSequencerProcessor::synthTwoPatternCount)
+                {
+                    (void) processor_.setMidiParameterStepsContext(
+                        LivePatternSequencerProcessor::patternMidiPageProfile,
+                        LivePatternSequencerProcessor::patternMidiSubject(
+                            pitchPlayerIndex()),
+                        1, step / stepsPerBank);
+                }
+                else
+                {
+                    (void) processor_.setMidiParameterStepsContext(
+                        LivePatternSequencerProcessor::synthMidiPageProfile,
+                        LivePatternSequencerProcessor::synthTwoMidiSubject(),
+                        laneIndex_
+                            - LivePatternSequencerProcessor::synthTwoPatternCount
+                            + 1,
+                        step / stepsPerBank);
+                }
+                return;
+            }
+            if (laneIndex_ < LivePatternSequencerProcessor::samplePartCount)
+            {
+                (void) processor_.setMidiParameterStepsContext(
+                    LivePatternSequencerProcessor::patternMidiPageProfile,
+                    LivePatternSequencerProcessor::patternMidiSubject(
+                        pitchPlayerIndex()),
+                    1, step / stepsPerBank);
+            }
+            else
+            {
+                constexpr std::size_t sampleParameterCount = 12;
+                (void) processor_.setMidiParameterStepsContext(
+                    LivePatternSequencerProcessor::sampleMidiPageProfile,
+                    LivePatternSequencerProcessor::sampleMidiSubject(
+                        info_.patternSlot),
+                    (laneIndex_
+                        - LivePatternSequencerProcessor::samplePartCount)
+                        % sampleParameterCount + 1,
+                    step / stepsPerBank);
+            }
+        }
+
         [[nodiscard]] lps::Modulation laneModulation() const noexcept
         {
             return kind_ == Kind::synthTwo
@@ -2758,6 +2830,292 @@ public:
     juce::ComboBox partSelector_;
     std::size_t selectedSamplePart_ = 0;
     std::size_t selectedPatternSlot_ = 0;
+};
+
+class LivePatternSequencerEditor::MixerPageComponent final
+    : public juce::Component
+{
+public:
+    explicit MixerPageComponent(LivePatternSequencerProcessor& processor)
+        : processor_(processor)
+    {
+        setOpaque(true);
+        pageSelector_.addItem("TRACKS", tracksPageId);
+        pageSelector_.addItem("FXS", effectsPageId);
+        pageSelector_.setTooltip("Choose the Bluebox mixer parameter page");
+        pageSelector_.onChange = [this]
+        {
+            updatePageVisibility();
+            resized();
+            repaint();
+        };
+        pageSelector_.setSelectedId(tracksPageId, juce::dontSendNotification);
+        addAndMakeVisible(pageSelector_);
+
+        for (std::size_t parameter = 0;
+             parameter < parameterLabels_.size();
+             ++parameter)
+        {
+            auto& label = parameterLabels_[parameter];
+            label.setText(
+                "PARAMETER " + juce::String(static_cast<int>(parameter + 1)),
+                juce::dontSendNotification);
+            label.setJustificationType(juce::Justification::centredLeft);
+            label.setFont(juce::Font(
+                juce::FontOptions(10.5f, juce::Font::bold)));
+            addAndMakeVisible(label);
+        }
+
+        for (std::size_t track = 0; track < trackLabels_.size(); ++track)
+        {
+            auto& label = trackLabels_[track];
+            label.setText(
+                "TRACK " + juce::String(static_cast<int>(track + 1)),
+                juce::dontSendNotification);
+            label.setJustificationType(juce::Justification::centred);
+            label.setFont(juce::Font(
+                juce::FontOptions(11.0f, juce::Font::bold)));
+            addAndMakeVisible(label);
+
+            for (std::size_t parameter = 0;
+                 parameter < LivePatternSequencerProcessor::
+                     mixerTrackParameterCount;
+                 ++parameter)
+            {
+                const auto index = track
+                    * LivePatternSequencerProcessor::mixerTrackParameterCount
+                    + parameter;
+                auto slider = std::make_unique<juce::Slider>(
+                    juce::Slider::LinearBar,
+                    juce::Slider::TextBoxRight);
+                slider->setRange(0.0, 127.0, 1.0);
+                slider->setNumDecimalPlacesToDisplay(0);
+                slider->setDoubleClickReturnValue(true, 0.0);
+                slider->setTooltip(
+                    "Track " + juce::String(static_cast<int>(track + 1))
+                    + ", Parameter "
+                    + juce::String(static_cast<int>(parameter + 1))
+                    + " (placeholder 0-127 value)");
+                slider->setColour(
+                    juce::Slider::backgroundColourId,
+                    juce::Colour(inactive));
+                slider->setColour(
+                    juce::Slider::trackColourId,
+                    juce::Colour(uiBlue));
+                slider->setColour(
+                    juce::Slider::thumbColourId,
+                    juce::Colour(uiYellow));
+                slider->setValue(
+                    processor_.mixerTrackParameterValueForUi(track, parameter),
+                    juce::dontSendNotification);
+                slider->onValueChange = [this, track, parameter, index]
+                {
+                    if (parameterValues_[index] != nullptr)
+                    {
+                        (void) processor_.setMixerTrackParameterValue(
+                            track,
+                            parameter,
+                            juce::roundToInt(
+                                parameterValues_[index]->getValue()));
+                    }
+                };
+                addAndMakeVisible(*slider);
+                parameterValues_[index] = std::move(slider);
+            }
+        }
+        updatePageVisibility();
+    }
+
+    [[nodiscard]] int preferredHeight() const noexcept
+    {
+        return selectorHeight + tableHeaderHeight
+            + static_cast<int>(
+                LivePatternSequencerProcessor::mixerTrackParameterCount)
+                * parameterRowHeight
+            + bottomPadding;
+    }
+
+    void refresh()
+    {
+        if (!showingTracks())
+            return;
+        for (std::size_t track = 0;
+             track < LivePatternSequencerProcessor::mixerTrackCount;
+             ++track)
+        {
+            for (std::size_t parameter = 0;
+                 parameter < LivePatternSequencerProcessor::
+                     mixerTrackParameterCount;
+                 ++parameter)
+            {
+                const auto index = track
+                    * LivePatternSequencerProcessor::mixerTrackParameterCount
+                    + parameter;
+                parameterValues_[index]->setValue(
+                    processor_.mixerTrackParameterValueForUi(track, parameter),
+                    juce::dontSendNotification);
+            }
+        }
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        graphics.fillAll(juce::Colour(background));
+        if (!showingTracks())
+        {
+            graphics.setColour(juce::Colour(uiYellow));
+            graphics.setFont(juce::Font(
+                juce::FontOptions(16.0f, juce::Font::bold)));
+            graphics.drawText(
+                "FXS",
+                16,
+                selectorHeight + 28,
+                getWidth() - 32,
+                28,
+                juce::Justification::centred);
+            graphics.setColour(juce::Colour(secondaryText));
+            graphics.setFont(juce::Font(juce::FontOptions(13.0f)));
+            graphics.drawText(
+                "FX parameter definitions will be added here.",
+                16,
+                selectorHeight + 60,
+                getWidth() - 32,
+                26,
+                juce::Justification::centred);
+            return;
+        }
+
+        const int tableTop = selectorHeight;
+        graphics.setColour(juce::Colour(panel));
+        graphics.fillRect(
+            sidePadding,
+            tableTop,
+            getWidth() - sidePadding * 2,
+            tableHeaderHeight);
+        graphics.setColour(juce::Colour(border));
+        graphics.drawRect(
+            sidePadding,
+            tableTop,
+            getWidth() - sidePadding * 2,
+            tableHeaderHeight
+                + static_cast<int>(
+                    LivePatternSequencerProcessor::mixerTrackParameterCount)
+                    * parameterRowHeight);
+
+        for (std::size_t parameter = 0;
+             parameter
+                < LivePatternSequencerProcessor::mixerTrackParameterCount;
+             ++parameter)
+        {
+            const int y = tableTop + tableHeaderHeight
+                + static_cast<int>(parameter) * parameterRowHeight;
+            graphics.setColour(juce::Colour(
+                parameter % 2 == 0 ? panel : background).withAlpha(0.58f));
+            graphics.fillRect(
+                sidePadding,
+                y,
+                getWidth() - sidePadding * 2,
+                parameterRowHeight);
+            graphics.setColour(juce::Colour(border));
+            graphics.drawHorizontalLine(
+                y,
+                static_cast<float>(sidePadding),
+                static_cast<float>(getWidth() - sidePadding));
+        }
+    }
+
+    void resized() override
+    {
+        pageSelector_.setBounds(
+            sidePadding,
+            topPadding,
+            std::min(320, getWidth() - sidePadding * 2),
+            selectorControlHeight);
+
+        const int tableTop = selectorHeight;
+        const int availableWidth = std::max(1, getWidth() - sidePadding * 2);
+        const int trackColumnWidth = std::max(
+            1,
+            (availableWidth - parameterLabelWidth)
+                / static_cast<int>(
+                    LivePatternSequencerProcessor::mixerTrackCount));
+        for (std::size_t parameter = 0;
+             parameter < parameterLabels_.size();
+             ++parameter)
+        {
+            parameterLabels_[parameter].setBounds(
+                sidePadding + 10,
+                tableTop + tableHeaderHeight
+                    + static_cast<int>(parameter) * parameterRowHeight,
+                parameterLabelWidth - 14,
+                parameterRowHeight);
+        }
+        for (std::size_t track = 0; track < trackLabels_.size(); ++track)
+        {
+            trackLabels_[track].setBounds(
+                sidePadding + parameterLabelWidth
+                    + static_cast<int>(track) * trackColumnWidth,
+                tableTop,
+                trackColumnWidth,
+                tableHeaderHeight);
+            for (std::size_t parameter = 0;
+                 parameter < LivePatternSequencerProcessor::
+                     mixerTrackParameterCount;
+                 ++parameter)
+            {
+                const auto index = track
+                    * LivePatternSequencerProcessor::mixerTrackParameterCount
+                    + parameter;
+                parameterValues_[index]->setBounds(
+                    sidePadding + parameterLabelWidth
+                        + static_cast<int>(track) * trackColumnWidth + 4,
+                    tableTop + tableHeaderHeight
+                        + static_cast<int>(parameter) * parameterRowHeight + 7,
+                    std::max(1, trackColumnWidth - 8),
+                    parameterRowHeight - 14);
+            }
+        }
+    }
+
+private:
+    [[nodiscard]] bool showingTracks() const noexcept
+    {
+        return pageSelector_.getSelectedId() != effectsPageId;
+    }
+
+    void updatePageVisibility()
+    {
+        const bool visible = showingTracks();
+        for (auto& label : parameterLabels_)
+            label.setVisible(visible);
+        for (auto& label : trackLabels_)
+            label.setVisible(visible);
+        for (auto& value : parameterValues_)
+            value->setVisible(visible);
+    }
+
+    static constexpr int tracksPageId = 1;
+    static constexpr int effectsPageId = 2;
+    static constexpr int topPadding = 8;
+    static constexpr int sidePadding = 12;
+    static constexpr int selectorControlHeight = 32;
+    static constexpr int selectorHeight = 52;
+    static constexpr int tableHeaderHeight = 34;
+    static constexpr int parameterRowHeight = 50;
+    static constexpr int parameterLabelWidth = 116;
+    static constexpr int bottomPadding = 16;
+
+    LivePatternSequencerProcessor& processor_;
+    juce::ComboBox pageSelector_;
+    std::array<juce::Label,
+        LivePatternSequencerProcessor::mixerTrackParameterCount>
+        parameterLabels_;
+    std::array<juce::Label,
+        LivePatternSequencerProcessor::mixerTrackCount> trackLabels_;
+    std::array<std::unique_ptr<juce::Slider>,
+        LivePatternSequencerProcessor::mixerTrackCount
+            * LivePatternSequencerProcessor::mixerTrackParameterCount>
+        parameterValues_;
 };
 
 class LivePatternSequencerEditor::PatternEditorComponent final
@@ -4206,6 +4564,7 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
         processor_, SynthPageComponent::Kind::synthTwo);
     samplePage_ = std::make_unique<SynthPageComponent>(
         processor_, SynthPageComponent::Kind::sample);
+    mixerPage_ = std::make_unique<MixerPageComponent>(processor_);
     synthViewport_.setViewedComponent(synthPage_.get(), false);
     synthViewport_.setScrollBarsShown(true, true);
     synthViewport_.setScrollOnDragMode(juce::Viewport::ScrollOnDragMode::all);
@@ -4384,17 +4743,45 @@ LivePatternSequencerEditor::LivePatternSequencerEditor(
     voicesPageButton_.setClickingTogglesState(false);
     synthTwoPageButton_.setClickingTogglesState(false);
     samplePageButton_.setClickingTogglesState(false);
+    mixerPageButton_.setClickingTogglesState(false);
     voicesPageButton_.setTooltip("Open the all-voices sequencer page");
     synthTwoPageButton_.setTooltip("Open the focused Synth 2 page");
     samplePageButton_.setTooltip("Open the focused Volca Sample page");
+    mixerPageButton_.setTooltip("Open the Bluebox mixer device profile");
     backButton_.setTooltip("Return to the All Voices page");
-    voicesPageButton_.onClick = [this] { showPage(MainPage::allVoices); };
-    synthTwoPageButton_.onClick = [this] { showPage(MainPage::synthTwo); };
-    samplePageButton_.onClick = [this] { showPage(MainPage::sample); };
-    backButton_.onClick = [this] { showPage(MainPage::allVoices); };
+    voicesPageButton_.onClick = [this]
+    {
+        (void) processor_.setMidiPatternOverviewContext(firstVisiblePlayer_);
+        showPage(MainPage::allVoices);
+    };
+    synthTwoPageButton_.onClick = [this]
+    {
+        if (synthPage_ != nullptr)
+            synthPage_->activateMidiContext();
+        showPage(MainPage::synthTwo);
+    };
+    samplePageButton_.onClick = [this]
+    {
+        if (samplePage_ != nullptr)
+            samplePage_->activateMidiContext();
+        showPage(MainPage::sample);
+    };
+    mixerPageButton_.onClick = [this]
+    {
+        // Mixer controller targets will be published when the placeholder
+        // parameters receive their final Bluebox definitions.
+        (void) processor_.setMidiEditingContext({});
+        showPage(MainPage::mixer);
+    };
+    backButton_.onClick = [this]
+    {
+        (void) processor_.setMidiPatternOverviewContext(firstVisiblePlayer_);
+        showPage(MainPage::allVoices);
+    };
     addAndMakeVisible(voicesPageButton_);
     addAndMakeVisible(synthTwoPageButton_);
     addAndMakeVisible(samplePageButton_);
+    addAndMakeVisible(mixerPageButton_);
     addAndMakeVisible(backButton_);
     addAndMakeVisible(controlPane_);
     addChildComponent(modulationBlockLayer_);
@@ -4445,6 +4832,7 @@ void LivePatternSequencerEditor::resized()
     voicesPageButton_.setBounds(tabs.removeFromLeft(126).reduced(2));
     synthTwoPageButton_.setBounds(tabs.removeFromLeft(126).reduced(2));
     samplePageButton_.setBounds(tabs.removeFromLeft(126).reduced(2));
+    mixerPageButton_.setBounds(tabs.removeFromLeft(126).reduced(2));
     bounds.removeFromTop(sectionGap);
 
     if (visiblePage_ != MainPage::allVoices)
@@ -4462,18 +4850,22 @@ void LivePatternSequencerEditor::resized()
         suppressionButton_.setBounds(
             utility.removeFromLeft(utilitySize).reduced(1));
         synthViewport_.setBounds(bounds);
-        juce::Component* page = visiblePage_ == MainPage::sample
-            ? static_cast<juce::Component*>(samplePage_.get())
-            : visiblePage_ == MainPage::patternEditor
-                ? static_cast<juce::Component*>(patternEditorPage_.get())
-                : static_cast<juce::Component*>(synthPage_.get());
+        juce::Component* page = synthPage_.get();
+        if (visiblePage_ == MainPage::sample)
+            page = samplePage_.get();
+        else if (visiblePage_ == MainPage::mixer)
+            page = mixerPage_.get();
+        else if (visiblePage_ == MainPage::patternEditor)
+            page = patternEditorPage_.get();
         if (page != nullptr)
         {
-            const int height = visiblePage_ == MainPage::patternEditor
-                ? std::max(360, synthViewport_.getMaximumVisibleHeight())
-                : visiblePage_ == MainPage::sample
-                    ? samplePage_->preferredHeight()
-                    : synthPage_->preferredHeight();
+            int height = synthPage_->preferredHeight();
+            if (visiblePage_ == MainPage::sample)
+                height = samplePage_->preferredHeight();
+            else if (visiblePage_ == MainPage::mixer)
+                height = mixerPage_->preferredHeight();
+            else if (visiblePage_ == MainPage::patternEditor)
+                height = std::max(360, synthViewport_.getMaximumVisibleHeight());
             page->setSize(
                 std::max(1380, synthViewport_.getMaximumVisibleWidth()), height);
         }
@@ -4556,14 +4948,18 @@ void LivePatternSequencerEditor::showPage(MainPage page)
         page == MainPage::synthTwo, juce::dontSendNotification);
     samplePageButton_.setToggleState(
         page == MainPage::sample, juce::dontSendNotification);
+    mixerPageButton_.setToggleState(
+        page == MainPage::mixer, juce::dontSendNotification);
     backButton_.setVisible(page != MainPage::allVoices);
     if (focused)
     {
-        juce::Component* component = page == MainPage::sample
-            ? static_cast<juce::Component*>(samplePage_.get())
-            : page == MainPage::patternEditor
-                ? static_cast<juce::Component*>(patternEditorPage_.get())
-                : static_cast<juce::Component*>(synthPage_.get());
+        juce::Component* component = synthPage_.get();
+        if (page == MainPage::sample)
+            component = samplePage_.get();
+        else if (page == MainPage::mixer)
+            component = mixerPage_.get();
+        else if (page == MainPage::patternEditor)
+            component = patternEditorPage_.get();
         synthViewport_.setViewedComponent(component, false);
     }
     synthViewport_.setVisible(focused);
@@ -4589,6 +4985,7 @@ void LivePatternSequencerEditor::openPatternEditor(std::size_t playerIndex)
     patternEditorPlayer_ = playerIndex;
     patternEditorPage_ = std::make_unique<PatternEditorComponent>(
         *this, playerIndex);
+    (void) processor_.setMidiPatternOverviewContext(playerIndex);
     openModulationPlayer_ = playerIndex;
     modulationEditorAnchor_ = nullptr;
     refreshSelectedControls(true);
@@ -4604,7 +5001,10 @@ void LivePatternSequencerEditor::openVoiceProfile(std::size_t playerIndex)
         if (processor_.synthTwoPlayerIndexForUi(slot) == playerIndex)
         {
             if (synthPage_ != nullptr)
+            {
                 synthPage_->selectProfileSlot(slot);
+                synthPage_->activateMidiContext();
+            }
             showPage(MainPage::synthTwo);
             return;
         }
@@ -4617,7 +5017,10 @@ void LivePatternSequencerEditor::openVoiceProfile(std::size_t playerIndex)
         if (processor_.samplePlayerIndexForUi(part) == playerIndex)
         {
             if (samplePage_ != nullptr)
+            {
                 samplePage_->selectProfileSlot(part);
+                samplePage_->activateMidiContext();
+            }
             showPage(MainPage::sample);
             return;
         }
@@ -5018,6 +5421,8 @@ void LivePatternSequencerEditor::timerCallback()
         synthPage_->refresh();
     else if (visiblePage_ == MainPage::sample && samplePage_ != nullptr)
         samplePage_->refresh();
+    else if (visiblePage_ == MainPage::mixer && mixerPage_ != nullptr)
+        mixerPage_->refresh();
     else if (visiblePage_ == MainPage::patternEditor
         && patternEditorPage_ != nullptr)
         patternEditorPage_->refresh();
@@ -5482,6 +5887,7 @@ void LivePatternSequencerEditor::pageVoices(int direction)
 
     viewport_.setViewPosition(
         0, static_cast<int>(firstVisiblePlayer_) * playerStride());
+    (void) processor_.setMidiPatternOverviewContext(firstVisiblePlayer_);
     updatePageButtons();
     positionModulationEditor();
 }

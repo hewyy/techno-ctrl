@@ -1,481 +1,325 @@
-# MIDI Controller Mapping Requirements
+# MIDI Control Mapping Requirements
 
-## Implementation prompt
+## Goal
 
-Design and implement a general MIDI controller-mapping layer, then expose one
-initial mapping target:
+Build a MIDI input and mapping layer that separates physical controller input
+from sequencer behavior.
 
-```text
-Synth 2 -> Pattern 1 -> Pitch modulation -> Step 1
-```
-
-The initial control source is an endless rotary encoder that transmits relative
-MIDI CC messages. The MIDI channel and CC number must be learned from incoming
-MIDI; neither may be hardcoded.
-
-The mapping architecture must allow absolute knobs, additional parameters, and
-button-driven actions such as Play, Pause, Mute, and Reset to be added later
-without replacing the mapping model. Do not implement those future controls in
-this work.
-
-Preserve the realtime-safe architecture. Incoming host MIDI is presented to the
-plug-in on the audio thread, but the audio thread must not allocate, lock, spin,
-wait, serialize state, touch UI objects, or perform unbounded work.
-
-Before changing code:
-
-1. Inspect the current plug-in MIDI declarations, `processBlock`, Synth 2 pitch
-   accessors, modulation draft editing, state persistence, editor refresh path,
-   and processor tests.
-2. Produce a concise implementation plan identifying the audio-thread and
-   non-audio-thread responsibilities.
-3. Confirm the relative CC encoding used by the target controller, or support an
-   explicit user-selectable encoding from the required set below.
-4. Account for the uncommitted PatternPlayer and processor work already present
-   in the worktree. Do not overwrite or reformat unrelated changes.
-
-## 1. Initial feature scope
-
-The first release must allow the user to:
-
-1. Open the focused Synth 2 page.
-2. Start MIDI Learn for Pattern 1, Pitch modulation, Step 1.
-3. Turn an endless rotary encoder.
-4. Capture the encoder's MIDI channel and CC number.
-5. Turn clockwise to raise the stored pitch.
-6. Turn counterclockwise to lower the stored pitch.
-7. Relearn or clear the mapping.
-8. Save the host project and restore the mapping later.
-
-The learned controller edits the existing pitch modulation draft. It must behave
-like an edit made with the existing on-screen pitch control; it is not a separate
-live pitch offset or performance override.
-
-Only this destination is exposed for learning in the initial UI:
+Turning a knob does not directly control a parameter. It produces a MIDI input
+event. The mapping layer interprets that event using configuration and current
+context, then emits zero or more semantic actions.
 
 ```text
-Synth 2 pattern slot: 0 (displayed as Pattern 1)
-Modulation lane:      Pitch
-Modulation step:      0 (displayed as Step 1)
+Endless encoder movement
+        |
+        v
+REAPER MIDI input
+        |
+        v
+detect and decode control event
+        |
+        v
+evaluate mappings and context
+        |
+        v
+emit zero or more semantic actions
+        |
+        v
+registered sequencer targets
 ```
 
-Other Synth 2 patterns, modulation steps, and parameters must remain unchanged.
+This separation must eventually allow one control event to update a parameter,
+invoke a UI action, or change several parameters. The MVP implements only one
+knob-to-parameter route.
 
-## 2. Separation from the sequencer core
+## MVP
 
-MIDI controller mapping belongs outside the sequencer core.
+The MVP must:
 
-The core must not know about:
+- Receive MIDI from REAPER.
+- Detect endless-encoder Control Change messages from the initial controller.
+- Identify an encoder source by MIDI channel and CC number.
+- Decode the configured INC/DEC format into a logical signed movement.
+- Match the event against a versioned JSON mapping configuration.
+- Resolve one stable sequencer parameter target.
+- Apply the movement through the parameter's existing editing API.
+- Persist the mapping configuration with plug-in state.
+- Work during playback and when the editor is closed.
 
-- MIDI channels or CC numbers.
-- MIDI Learn state.
-- Controller manufacturers or models.
-- Relative encoder protocols.
-- UI component identities.
-- Persisted controller assignments.
-
-Use a controller-mapping layer with a thin JUCE MIDI adapter in the plug-in
-layer. The mapping layer may invoke processor-level target adapters, which in
-turn use the existing pitch-editing API and sequencer models.
-
-Do not modify PatternPlayer timing or runtime graph topology to implement this
-feature.
-
-## 3. Stable control targets
-
-A mapping destination must use a stable semantic identifier rather than a
-current `players_` vector index, raw pointer, or UI component address.
-
-The initial target is conceptually:
+The initial proof mapping is:
 
 ```text
-synth2.pattern1.pitch.step1
+MIDI channel 15 / CC20 endless encoder
+  -> Synth 2 -> Pattern 1 -> Pitch -> Step 1
 ```
 
-The exact stored spelling may differ, but it must be versioned, stable across
-sessions, and independent of runtime container ordering. At dispatch time, the
-processor resolves it through the existing Synth 2 pattern/lane accessors.
+The initial JSON configuration uses MIDI channel 15 and CC20. These remain
+configuration values rather than hardcoded behavior in the mapping engine.
+JSON MIDI channels use the human-facing one-based range `1..16`.
 
-The general target description must be capable of expressing:
+For this target, `+1` performs one normal pitch-edit increment and `-1`
+performs one decrement. The existing chromatic or scale-aware pitch rules are
+authoritative. Only Synth 2 Pattern 1 Pitch Step 1 may change.
 
-- A stable identifier.
-- A user-facing name.
-- A target category.
-- Its accepted input shape.
-- Its execution policy.
+Names such as `knob-a` are configuration metadata for people and future device
+profiles. The MIDI wire identity is message type, channel, and CC number.
 
-The only enabled target category in this work is a relative continuous
-parameter edit. The model must remain extensible to these future categories:
+## Architecture
 
-- Absolute continuous parameter.
-- Trigger action.
-- Toggle action.
-- Press/release gate action.
-- Realtime or quantized command.
+Use four distinct stages.
 
-Do not implement future action targets as placeholders that alter behavior.
-They only need to be representable without redesigning the initial mapping
-record.
+### 1. MIDI input adapter
 
-## 4. MIDI source and mapping model
+The JUCE/plug-in adapter reads incoming MIDI and produces a compact control
+event containing:
 
-Each persisted mapping must contain at least:
-
-- Enabled state.
-- MIDI message kind.
+- Message type.
 - MIDI channel.
-- CC number.
-- Value interpretation/encoder protocol.
-- Stable target identifier.
+- Control number.
+- Raw value.
+- Sample position or event order.
 
-Initial validation limits are:
+This stage knows nothing about sequencer parameters or UI controls.
 
-```text
-MIDI channel: 1 through 16
-CC number:    0 through 127
-```
+### 2. Value decoder
 
-MIDI Learn captures an exact channel and CC number. Omni-channel mappings are
-not required initially, but the representation must not make them impossible to
-add later.
+The decoder converts the raw device message into a device-independent value.
+For the MVP, the output is a signed logical increment such as `-1` or `+1`.
 
-Use a fixed-capacity or immutable published runtime mapping table. Runtime MIDI
-matching must not search strings, allocate, or traverse dynamically growing
-containers. Resolve stable identifiers to compact runtime handles before a
-mapping becomes active on the audio thread.
-
-Choose a named mapping-capacity limit of at least 32 assignments. Only one
-target is exposed initially, but the realtime path must remain bounded when ten
-or more controls are moving together in future releases.
-
-## 5. Relative encoder decoding
-
-The controller protocol is part of the mapping. Do not assume that every CC
-value is an absolute position and do not infer a protocol continuously while a
-mapping is active.
-
-Support an explicit relative mode matching the target hardware. Prefer
-supporting these common modes if the controller has not yet been fixed:
-
-### 1/127 mode
+The MVP value mode is named `inc-dec`; it must not be represented as a generic
+`relative` Boolean. Its wire decoding is:
 
 ```text
-CC value 1   -> delta +1
-CC value 127 -> delta -1
+CC value 1   -> logical increment +1
+CC value 127 -> logical increment -1
+all other values -> ignored
 ```
 
-Values not defined by this mode must be ignored safely.
+The decoder must preserve the distinction between the raw MIDI byte and the
+logical signed movement supplied to the mapping resolver.
 
-### Two's-complement mode
+The model must allow future decoders for absolute knobs and other relative
+encoder formats without changing the mapping or target APIs. Absolute input is
+not implemented in the MVP.
 
-Decode the CC byte into a signed relative delta according to the controller's
-documented two's-complement convention. Preserve accelerated magnitudes rather
-than reducing every event to its sign.
+### 3. Mapping resolver
 
-### Binary-offset/signed mode
-
-Decode values around the protocol's neutral point into signed relative deltas.
-The exact neutral value and direction must be explicit and covered by tests; do
-not guess them from the control's recent movement.
-
-If only one protocol is implemented in the initial change, it must be named
-explicitly in the mapping data and documentation. It must not be represented as
-a generic `relative` Boolean.
-
-The decoder output presented to the target layer is a signed logical delta. The
-pitch target must not understand raw MIDI encoding.
-
-Reserve a distinct value-interpretation type for future absolute 7-bit CC
-input. Absolute knob behavior, pickup, and soft takeover are out of scope.
-
-## 6. Pitch-edit semantics
-
-Each positive logical delta advances the target pitch by one editing increment.
-Each negative logical delta moves it down by one editing increment.
-
-Pitch edits must reuse the existing pitch behavior:
-
-- Chromatic mode moves by semitone.
-- Scale-aware mode moves to the next or previous permitted scale note.
-- A magnitude greater than one applies that many editing increments.
-- Pitch remains bounded to MIDI notes 0 through 127.
-- Further movement at a boundary leaves the boundary value unchanged.
-- The selected modulation-library record remains immutable; the mapping edits
-  the player's draft.
-- The normal modified/unsaved indicator must update.
-- If the pitch lane is locked against editing, controller input must not modify
-  it.
-
-The target is always Pattern 1 Pitch Step 1 for this implementation. It must not
-follow the currently playing modulation step and must not move to another step
-as playback advances.
-
-## 7. MIDI Learn behavior
-
-The initial pitch control must expose these actions:
-
-- MIDI Learn Encoder.
-- Relearn, when a mapping already exists.
-- Clear MIDI Mapping.
-- Select or display the active relative encoder mode.
-
-While Learn is armed:
-
-1. The next eligible incoming CC captures its channel and controller number.
-2. Non-CC MIDI messages do not complete learning.
-3. The learned source replaces any previous mapping for this target.
-4. Learning ends after a successful capture or explicit cancellation.
-5. The editor shows the captured channel, CC number, and encoder mode.
-
-MIDI Learn state is transient and must not be restored as armed when a project
-is reopened.
-
-Learning may require UI notification, but the audio thread must only publish a
-small fixed-size capture result. It must not modify menus, labels, or persistent
-state directly.
-
-## 8. Realtime event flow
-
-Incoming MIDI supplied to `processBlock` must be handled in one bounded pass.
-
-The audio-thread path is limited to:
-
-1. Recognizing eligible MIDI CC messages.
-2. Performing constant-time or bounded mapping lookup.
-3. Decoding the configured relative format.
-4. Accumulating the signed delta in a fixed-capacity mailbox.
-5. Publishing a fixed-size Learn capture when Learn is armed.
-6. Applying the defined input-consumption policy.
-
-The audio thread must not:
-
-- Allocate or free memory.
-- Acquire a mutex.
-- Spin or wait for a revision writer.
-- Serialize or parse JSON.
-- Call editor or UI component methods.
-- Perform file I/O.
-- Log once per controller event.
-- Rebuild or publish runtime graph topology.
-- Invoke any existing draft-writing path that can spin against a concurrent
-  writer.
-
-Relative movement must be coalesced with a bounded signed accumulator:
+The resolver receives a decoded control event plus a read-only snapshot of the
+current mapping context. It evaluates the JSON configuration and emits zero or
+more target commands.
 
 ```text
-pendingDelta += decodedDelta
+resolve(controlEvent, context) -> targetCommands[]
 ```
 
-The accumulator must use defined saturation or overflow handling. It must not
-wrap. A burst of messages therefore becomes one bounded target update rather
-than filling an unbounded queue.
+The resolver must not contain synth-specific logic. It matches source and
+conditions, applies route transforms, and identifies semantic targets.
 
-A processor-owned non-audio-thread dispatcher drains pending controller edits
-and invokes the existing pitch-edit behavior. It must:
+The MVP accepts exactly one route per enabled mapping and requires an empty
+`when` object. Non-empty conditions and additional routes are rejected as
+unsupported in version 1. The data types must still permit those features to be
+added later without changing this pipeline.
 
-- Continue operating when the editor is closed.
-- Avoid depending on a particular editor instance.
-- Coalesce repaint or notification work.
-- Remain safe during processor destruction and state restoration.
-- Define what happens if input arrives faster than dispatch; the latest bounded
-  accumulated movement must remain valid.
+### 4. Target registry and dispatcher
 
-The implementation may use the application's message thread or another
-processor-owned control path, but it must not create an unbounded thread or one
-thread per mapping.
+Targets are registered under stable semantic IDs. A resolved command contains
+a compact runtime target handle and logical value, never a raw pointer, UI
+component address, or container index.
 
-## 9. MIDI input and output behavior
+The dispatcher invokes the target's existing editing behavior. Target-specific
+rules—including clamping, quantization, pitch scale rules, edit locks, draft
+ownership, and modified-state tracking—remain owned by the target adapter.
 
-Enable host MIDI input for the plug-in and report that the processor accepts
-MIDI.
+A future UI target must represent a semantic action such as
+`ui.focusNextPattern`, not a direct call to a UI component. No UI targets are
+implemented in the MVP.
 
-The initial routing policy is:
+## JSON configuration
 
-- A learned CC used by the mapping is consumed.
-- It is not copied into generated MIDI output.
-- Unmapped incoming MIDI is discarded, preserving the plug-in's existing role
-  as a MIDI/CV sequence generator rather than adding MIDI-through behavior.
-- Existing generated note, CC, and CV output remains unchanged.
+The editable configuration is a versioned JSON document. Once loaded, it is
+validated, resolved into a runtime table, and embedded in plug-in state so a
+REAPER project remains portable. The processor must expose a non-realtime
+`replaceMappingConfiguration(jsonText)`-style API for loading the document.
+File import/export and a full mapping-management UI may be added later.
 
-Do not clear incoming MIDI before it has been inspected. After input handling,
-ensure the outgoing buffer cannot retain consumed controller messages.
+A new plug-in instance starts with the example mapping below as its bundled
+default configuration. Calling the replacement API with a valid document
+atomically replaces that configuration. A syntactically valid version 1
+document may install its valid mappings while disabling invalid entries. If the
+JSON is malformed or its top-level version is unsupported, the API returns an
+error and leaves the current configuration active.
 
-MIDI pass-through and configurable filtering are separate future features.
+Example:
 
-## 10. Persistence and compatibility
+```json
+{
+  "version": 1,
+  "mappings": [
+    {
+      "id": "mvp-controller-knob-a",
+      "enabled": true,
+      "source": {
+        "controlId": "knob-a",
+        "type": "cc",
+        "channel": 15,
+        "control": 20,
+        "valueMode": "inc-dec"
+      },
+      "when": {},
+      "routes": [
+        {
+          "target": "synth.2.pattern.1.pitch.step.1",
+          "operation": "increment",
+          "scale": 1
+        }
+      ]
+    }
+  ]
+}
+```
 
-Persist controller mappings with the plug-in state. Evolve the current state
-schema compatibly; older state versions must load with no controller mapping.
+`when` is intentionally present but must be empty in version 1. It reserves the
+correct location for future context conditions such as held notes, modifier
+state, active sequencer page, mode, or bank.
 
-Persist at least:
+Version 1 accepts MIDI channels `1..16`, CC numbers `0..127`, `type: "cc"`,
+`valueMode: "inc-dec"`, `operation: "increment"`, and a nonzero integer
+`scale` in `-127..127`. Mapping IDs must be unique. Only one enabled mapping may
+own a given `(type, channel, control)` source in the MVP.
 
-- Mapping enabled state.
-- MIDI channel.
-- CC number.
-- Named encoder protocol.
-- Stable target identifier.
+Unknown fields are ignored for forward compatibility. Missing required fields,
+invalid ranges, unsupported values, duplicate IDs, conflicting sources, and
+unknown targets disable the affected mapping. All entries participating in a
+duplicate-ID or source conflict are disabled. Invalid mappings must not prevent
+other valid mappings or the rest of the plug-in state from loading.
 
-Do not persist:
+## Future context and fan-out
 
-- Armed Learn state.
-- Pending encoder deltas.
-- Pending UI notifications.
-- Runtime target handles.
-
-On restoration:
-
-- Validate every field before activating a mapping.
-- Resolve the stable target identifier through the target registry.
-- Ignore unknown future target identifiers safely.
-- Reject unsupported encoder modes without rejecting the rest of the plug-in
-  state.
-- Do not partially activate a malformed mapping.
-
-State restoration and mapping publication must not race the audio thread or
-expose a partially updated mapping.
-
-## 11. UI requirements
-
-Limit the initial UI change to the existing control for Synth 2 Pattern 1 Pitch
-Step 1.
-
-The UI must make these states distinguishable:
-
-- No mapping.
-- Waiting for MIDI Learn input.
-- Learned and active.
-- Learned but unsupported/invalid after state restoration, if surfaced rather
-  than discarded.
-
-Display enough information to diagnose the assignment, for example:
+The architecture must support, without redesign:
 
 ```text
-MIDI Ch 1 / CC 21 / Relative 1-127
+Knob A + default context -> cutoff
+Knob A + Shift held      -> decay
+Knob B + default context -> pitch and velocity
 ```
 
-Do not add a global mapping-management page in this work. Do not add Learn
-controls to every parameter yet.
+Context is structured state, not one optional Boolean flag. Future context may
+include Boolean modifiers, held MIDI notes, enumerated modes, active sequencer
+pages, and numeric banks. All matching routes may emit commands, allowing one
+control event to change multiple registered targets.
 
-The existing pitch display, scale editing, modulation selection, save behavior,
-and modified-state indication must continue to work.
+These context behaviors and multi-target mappings are not implemented in the
+MVP, but the event, JSON, resolver, and runtime-table types must not assume one
+global flag or exactly one route.
 
-## 12. Conflict and failure policy
+## Parameter boundary
 
-For the initial implementation:
+Mappings may target only parameters or semantic actions registered by this
+sequencer. They do not directly address REAPER parameters or external devices.
 
-- One source maps to at most one active target.
-- The initial target has at most one active source.
-- Relearning atomically replaces the old assignment.
-- Clearing atomically disables the assignment.
-- Invalid MIDI channels, CC numbers, target identifiers, or encoder modes are
-  rejected.
-- Unsupported incoming messages are ignored.
-- Saturated pending deltas fail safely without integer wrap.
-- A missing or shortened modulation step causes the edit to be ignored safely.
-- Controller input received during state restoration must observe either the old
-  complete mapping or the new complete mapping, never partial state.
+If the sequencer later controls an external device, that capability must first
+be represented as a registered sequencer target. The MIDI mapping layer still
+routes to that target and remains unaware of the external device.
 
-## 13. Tests
+## Realtime safety
 
-Add focused tests for the generic mapping layer and processor integration.
+Incoming MIDI is inspected once in `processBlock`. The audio-thread path must
+be fixed-capacity, bounded, allocation-free, lock-free, and non-blocking. It
+must not parse JSON, resolve strings, serialize state, access UI objects, log
+per event, perform file I/O, or wait for another thread.
 
-### Decoder and mapping tests
+JSON validation and stable-ID resolution occur outside the audio thread. A
+complete immutable or fixed-capacity runtime mapping table is then published
+atomically.
 
-- MIDI Learn captures the correct channel and CC number.
-- Non-CC messages do not complete learning.
-- The configured relative protocol produces correct positive and negative
-  deltas.
-- Accelerated relative values preserve their magnitude where supported.
-- Invalid values are ignored or rejected according to the selected protocol.
-- Mapping lookup distinguishes MIDI channels and CC numbers.
-- Relearn replaces the prior mapping.
-- Clear disables the mapping.
-- Delta accumulation saturates and never wraps.
+Unsafe target edits must be accumulated in a bounded mailbox and applied by a
+processor-owned non-audio-thread dispatcher. Accumulated increments must
+saturate rather than wrap, and overload must never create an unbounded queue.
+Movements for the same runtime target may be coalesced as a saturating signed
+sum; the dispatcher applies the resulting magnitude as normal editing
+increments. This intentionally represents net movement since the last drain.
 
-### Pitch integration tests
+The runtime design must reserve capacity for at least 32 mappings and 8 routes
+per mapping even though the MVP activates only one route.
 
-- Clockwise movement raises Synth 2 Pattern 1 Pitch Step 1.
-- Counterclockwise movement lowers it.
-- A multi-increment delta applies multiple edits.
-- Chromatic mode moves by semitone.
-- Scale-aware mode moves through permitted scale notes.
-- Notes remain clamped to 0 through 127.
-- Pattern 2, Pattern 3, and other modulation steps do not change.
-- A locked pitch lane does not change.
-- The selected library record is not mutated.
-- The draft reports unsaved changes after a successful controller edit.
-- The mapping operates while playback is running.
-- The mapping operates while the editor is closed.
+## MIDI routing
 
-### MIDI-buffer and persistence tests
+- A MIDI message matching an enabled mapping source is consumed, including a
+  matching CC whose value the configured decoder ignores.
+- Unmapped MIDI follows the plug-in's existing input policy.
+- Existing generated MIDI output remains unchanged.
+- Incoming MIDI is inspected before the plug-in prepares generated output.
+- MIDI pass-through is outside the MVP.
 
-- The learned incoming CC does not appear in outgoing MIDI.
-- Unmapped incoming MIDI follows the defined discard policy.
-- Existing generated MIDI output remains correct.
-- A saved mapping restores with the correct source, protocol, and target.
-- Older plug-in state loads with no active mapping.
-- Malformed or unknown mappings do not prevent the remaining state from loading.
+## Feedback extension point
 
-### Realtime verification
+Controller LED feedback is not implemented in the MVP. No feedback interface,
+JSON field, MIDI output, or device-specific feedback behavior is required.
 
-- The input path performs no heap allocation.
-- The input path takes no locks and performs no waits or spins.
-- Dense controller input remains bounded.
-- Ten simultaneously active mappings are supported by the internal runtime path,
-  even though only one target is exposed by the initial UI.
+A future BCR32 profile can observe resulting parameter values and active
+context, convert them to absolute values, and route them through REAPER to the
+controller. Adding feedback must not change control-event detection, mapping
+resolution, or target dispatch.
+
+## Persistence
+
+Persist the validated versioned JSON configuration with plug-in state. Do not
+persist runtime handles, pending events, or pending increments. Restoring older
+state with no mapping configuration produces no active mapping; it does not
+silently install the bundled default used by a new plug-in instance.
+
+During state restoration, malformed JSON or an unsupported mapping version
+also produces no active mapping without preventing the remaining plug-in state
+from loading.
+
+State restoration must publish either the old complete runtime table or the new
+complete table; the audio thread must never observe a partially restored
+mapping.
+
+## Tests
+
+Add focused tests covering:
+
+- Detection of the configured channel and CC number.
+- Rejection of other channels, CC numbers, and message types.
+- CC value `1` decoding to `+1` and CC value `127` decoding to `-1`.
+- Other CC values being ignored by the `inc-dec` decoder.
+- JSON parsing, validation, versioning, and state restoration.
+- Failed live replacement leaving the previous configuration active.
+- Duplicate IDs and conflicting sources being disabled.
+- Non-empty conditions and multiple routes being rejected in version 1.
+- Stable target-ID resolution before runtime publication.
+- `+1` and `-1` applying one existing pitch-edit increment in the corresponding
+  direction and changing only Synth 2 Pattern 1 Pitch Step 1.
+- Existing pitch clamping, scale, locking, draft, and modified-state behavior.
+- Operation during playback and with the editor closed.
+- Consumed controller input not leaking into generated MIDI.
+- Saturating, bounded behavior under dense input.
+- Coalesced input applying bounded net movement without integer wrap.
+- No allocation, locks, waits, JSON work, or string lookup on the audio thread.
+- Runtime data types accepting multiple routes and structured conditions even
+  though those behaviors are not active in the MVP.
 
 Run the complete existing test suite in addition to the new tests.
 
-## 14. Explicitly out of scope
+## Out of scope
 
-Do not include any of the following in this implementation:
+- Context evaluation and modifier behavior.
+- Multiple active routes from one control.
+- UI-action targets.
+- Absolute encoders, pickup, and soft takeover.
+- Controller LED feedback.
+- Direct control of REAPER or external-device parameters.
+- MIDI pass-through.
+- 14-bit CC, NRPN, and RPN.
+- A global mapping-management UI.
+- Changes to sequencer timing or runtime graph topology.
 
-- Absolute knob control.
-- Pickup or soft takeover.
-- Learn controls for additional parameters or modulation steps.
-- MIDI-controlled Play, Pause, Mute, Reset, or pattern selection.
-- Incoming MIDI pass-through.
-- Multiple controllers for one target.
-- One controller driving multiple targets.
-- 14-bit CC, NRPN, or RPN.
-- MIDI feedback to rings, LEDs, or motorized controls.
-- Per-controller acceleration curves or sensitivity settings.
-- Fine/coarse modifier buttons.
-- Live pitch override, hold, or drift-back behavior.
-- Recording controller gestures into a modulation pattern.
-- Controller templates or a global mapping-management screen.
-- Changes to PatternPlayer timing, pattern storage, or runtime graph topology.
+## Completion criteria
 
-## 15. Completion criteria
-
-The work is complete when:
-
-- The plug-in accepts host-routed MIDI input.
-- Synth 2 Pattern 1 Pitch Step 1 can learn a relative MIDI CC source.
-- No MIDI channel or CC number is hardcoded.
-- The encoder mode is explicit and persisted.
-- Clockwise and counterclockwise movement produce correct pitch edits.
-- Existing scale-aware rules, locking, draft ownership, and modified-state
-  behavior are preserved.
-- The mapping works during playback and with the editor closed.
-- The mapping survives save and restore.
-- Learned input is not leaked to MIDI output.
-- The audio-thread work is fixed-capacity, bounded, allocation-free, lock-free,
-  and non-spinning.
-- The mapping and target models can add absolute controls and button actions
-  without a state-format or architecture replacement.
-- Existing and new tests pass.
-
-## 16. Required hardware detail before final integration
-
-Record the target controller's model and the raw values produced by:
-
-```text
-one slow clockwise detent
-one slow counterclockwise detent
-several fast clockwise turns
-several fast counterclockwise turns
-```
-
-Use those observations or the manufacturer's MIDI documentation to select and
-test the initial relative protocol. Do not ship a guessed encoder convention.
+The MVP is complete when an endless-encoder event from the initial controller
+is detected, decoded, matched through the JSON mapping layer, and applied to
+the configured Synth 2 pitch parameter while preserving existing editing
+rules. The implementation must remain realtime-safe, survive save and restore,
+and leave clear extension points for context, fan-out, UI actions, absolute
+controllers, device profiles, and feedback.

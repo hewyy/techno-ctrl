@@ -1,5 +1,6 @@
 #include "plugin/PluginProcessor.h"
 #include "plugin/PluginEditor.h"
+#include "plugin/MidiInputAdapter.h"
 #include "core/Logger.h"
 
 #include <algorithm>
@@ -9,9 +10,19 @@
 #include <cstdlib>
 #include <limits>
 #include <string>
+#include <thread>
 
 namespace
 {
+static_assert(std::atomic<std::uint8_t>::is_always_lock_free,
+    "Realtime mapping publication requires lock-free byte atomics");
+static_assert(std::atomic<unsigned int>::is_always_lock_free,
+    "Realtime mapping publication requires a lock-free reader counter");
+static_assert(std::atomic<bool>::is_always_lock_free,
+    "Realtime controller context requires lock-free Boolean atomics");
+static_assert(std::atomic<int>::is_always_lock_free,
+    "Realtime controller context requires lock-free integer atomics");
+
 constexpr int drumMidiChannel = 11;
 constexpr int synthOneMidiChannel = 12;
 constexpr int synthTwoMidiChannel = 13;
@@ -22,6 +33,7 @@ constexpr std::size_t firstSamplePlayerIndex =
 
 struct SynthParameterDefinition
 {
+    const char* stableKey;
     const char* section;
     const char* name;
     std::uint8_t midiCc;
@@ -34,40 +46,40 @@ struct SynthParameterDefinition
 // data, rather than new parameter types: every row is a 7-bit continuous
 // Voice parameter whose renderer route determines the outgoing MIDI CC.
 constexpr std::array synthTwoParameters {
-    SynthParameterDefinition {"VCO", "Portamento", 5, 0},
-    SynthParameterDefinition {"General", "Expression", 11, 127},
-    SynthParameterDefinition {"General", "Voice", 40, 0},
-    SynthParameterDefinition {"General", "Octave", 41, 44},
-    SynthParameterDefinition {"VCO", "Detune", 42, 64},
-    SynthParameterDefinition {"VCO", "VCO EG depth", 43, 64},
-    SynthParameterDefinition {"VCF", "Cutoff", 44, 127},
-    SynthParameterDefinition {"VCF", "VCF EG intensity", 45, 64},
-    SynthParameterDefinition {"LFO", "Rate", 46, 64},
-    SynthParameterDefinition {"LFO", "Pitch intensity", 47, 0},
-    SynthParameterDefinition {"LFO", "Cutoff intensity", 48, 0},
-    SynthParameterDefinition {"EG", "Attack", 49, 0},
-    SynthParameterDefinition {"EG", "Decay/release", 50, 64},
-    SynthParameterDefinition {"EG", "Sustain", 51, 127},
-    SynthParameterDefinition {"Delay", "Delay time", 52, 0},
-    SynthParameterDefinition {"Delay", "Delay feedback", 53, 0}
+    SynthParameterDefinition {"portamento", "VCO", "Portamento", 5, 0},
+    SynthParameterDefinition {"expression", "General", "Expression", 11, 127},
+    SynthParameterDefinition {"voice", "General", "Voice", 40, 0},
+    SynthParameterDefinition {"octave", "General", "Octave", 41, 44},
+    SynthParameterDefinition {"detune", "VCO", "Detune", 42, 64},
+    SynthParameterDefinition {"vco-eg-depth", "VCO", "VCO EG depth", 43, 64},
+    SynthParameterDefinition {"cutoff", "VCF", "Cutoff", 44, 127},
+    SynthParameterDefinition {"vcf-eg-intensity", "VCF", "VCF EG intensity", 45, 64},
+    SynthParameterDefinition {"lfo-rate", "LFO", "Rate", 46, 64},
+    SynthParameterDefinition {"lfo-pitch-intensity", "LFO", "Pitch intensity", 47, 0},
+    SynthParameterDefinition {"lfo-cutoff-intensity", "LFO", "Cutoff intensity", 48, 0},
+    SynthParameterDefinition {"attack", "EG", "Attack", 49, 0},
+    SynthParameterDefinition {"decay-release", "EG", "Decay/release", 50, 64},
+    SynthParameterDefinition {"sustain", "EG", "Sustain", 51, 127},
+    SynthParameterDefinition {"delay-time", "Delay", "Delay time", 52, 0},
+    SynthParameterDefinition {"delay-feedback", "Delay", "Delay feedback", 53, 0}
 };
 
 // Korg volca sample MIDI implementation. Each of the ten parts listens on
 // its matching MIDI channel. Sample selection is one logical 0...199
 // parameter rendered as CC 3 (hundreds) followed by CC 35 (remainder).
 constexpr std::array sampleParameters {
-    SynthParameterDefinition {"Sample", "Current sample", 3, 0, 35, 199},
-    SynthParameterDefinition {"Sample", "Level", 7, 127},
-    SynthParameterDefinition {"Sample", "Pan", 10, 64},
-    SynthParameterDefinition {"Sample", "Start point", 40, 0},
-    SynthParameterDefinition {"Sample", "Length", 41, 127},
-    SynthParameterDefinition {"Sample", "Hi cut", 42, 127},
-    SynthParameterDefinition {"Sample", "Speed", 43, 64},
-    SynthParameterDefinition {"Sample", "Pitch EG intensity", 44, 64},
-    SynthParameterDefinition {"Sample", "Pitch EG attack", 45, 0},
-    SynthParameterDefinition {"Sample", "Pitch EG decay", 46, 64},
-    SynthParameterDefinition {"Sample", "Amp EG attack", 47, 0},
-    SynthParameterDefinition {"Sample", "Amp EG decay", 48, 64}
+    SynthParameterDefinition {"sample", "Sample", "Current sample", 3, 0, 35, 199},
+    SynthParameterDefinition {"level", "Sample", "Level", 7, 127},
+    SynthParameterDefinition {"pan", "Sample", "Pan", 10, 64},
+    SynthParameterDefinition {"start", "Sample", "Start point", 40, 0},
+    SynthParameterDefinition {"length", "Sample", "Length", 41, 127},
+    SynthParameterDefinition {"hi-cut", "Sample", "Hi cut", 42, 127},
+    SynthParameterDefinition {"speed", "Sample", "Speed", 43, 64},
+    SynthParameterDefinition {"pitch-eg-intensity", "Sample", "Pitch EG intensity", 44, 64},
+    SynthParameterDefinition {"pitch-eg-attack", "Sample", "Pitch EG attack", 45, 0},
+    SynthParameterDefinition {"pitch-eg-decay", "Sample", "Pitch EG decay", 46, 64},
+    SynthParameterDefinition {"amp-eg-attack", "Sample", "Amp EG attack", 47, 0},
+    SynthParameterDefinition {"amp-eg-decay", "Sample", "Amp EG decay", 48, 64}
 };
 
 struct VoiceDefinition
@@ -141,6 +153,18 @@ lps::Modulation constantModulation(float value) noexcept
     modulation.length = 1;
     modulation.values[0] = lps::NormalizedValue::fromFloat(value);
     return modulation;
+}
+
+bool readStateInteger(const juce::var& value, int& result) noexcept
+{
+    if (!value.isInt() && !value.isInt64())
+        return false;
+    const auto number = static_cast<juce::int64>(value);
+    if (number < std::numeric_limits<int>::min()
+        || number > std::numeric_limits<int>::max())
+        return false;
+    result = static_cast<int>(number);
+    return true;
 }
 }
 
@@ -811,11 +835,677 @@ LivePatternSequencerProcessor::LivePatternSequencerProcessor(
         jassert(configured);
         (void) configured;
     }
+
+    buildMidiTargetCatalogue();
+    midiEditingContext_ = {
+        patternMidiPageProfile,
+        lps::MidiPageKind::parameterOverview,
+        patternMidiSubject(synthTwoPlayerIndexForUi(0)),
+        1,
+        0,
+        true
+    };
+    publishMidiPageBindings(buildMidiPageBindings(midiEditingContext_));
+    const auto mappingResult = replaceMappingConfiguration(
+        lps::bundledMidiMappingConfiguration());
+    jassert(mappingResult.wasOk());
+    (void) mappingResult;
+    startTimerHz(60);
+}
+
+LivePatternSequencerProcessor::~LivePatternSequencerProcessor()
+{
+    stopTimer();
 }
 
 const juce::String LivePatternSequencerProcessor::getName() const
 {
     return JucePlugin_Name;
+}
+
+void LivePatternSequencerProcessor::buildMidiTargetCatalogue()
+{
+    midiTargetCount_ = 0;
+    midiTargetRegistry_.clear();
+    const auto append = [this](MidiTargetDescriptor descriptor)
+    {
+        if (midiTargetCount_ >= midiTargets_.size())
+            return lps::MidiTargetHandle {};
+        const auto handle = lps::MidiTargetHandle {
+            static_cast<std::uint16_t>(midiTargetCount_)};
+        midiTargets_[midiTargetCount_++] = descriptor;
+        return handle;
+    };
+    constexpr std::array<const char*, modulationLaneCount> laneKeys {
+        "velocity", "pitch", "gate"
+    };
+    for (std::size_t player = 0; player < players_.size(); ++player)
+    {
+        for (std::size_t lane = 0; lane < modulationLaneCount; ++lane)
+        {
+            for (std::size_t step = 0; step < lps::Modulation::maxLength; ++step)
+            {
+                const auto handle = append({
+                    MidiTargetKind::playerModulationStep,
+                    static_cast<std::uint16_t>(player),
+                    static_cast<std::uint16_t>(lane),
+                    static_cast<std::uint16_t>(step)
+                });
+                if (!handle.valid())
+                    continue;
+                const auto generic = "player."
+                    + juce::String(static_cast<int>(player + 1)) + "."
+                    + laneKeys[lane] + ".step."
+                    + juce::String(static_cast<int>(step + 1));
+                (void) midiTargetRegistry_.registerTarget(generic, handle);
+                if (player >= synthTwoVoiceIndex
+                    && player < synthTwoVoiceIndex + synthTwoPatternCount)
+                {
+                    const auto legacy = "synth.2.pattern."
+                        + juce::String(static_cast<int>(
+                            player - synthTwoVoiceIndex + 1)) + "."
+                        + laneKeys[lane] + ".step."
+                        + juce::String(static_cast<int>(step + 1));
+                    (void) midiTargetRegistry_.registerTarget(legacy, handle);
+                }
+            }
+        }
+    }
+    for (std::size_t parameter = 0;
+         parameter < synthTwoParameters.size(); ++parameter)
+    {
+        for (std::size_t step = 0; step < lps::Modulation::maxLength; ++step)
+        {
+            const auto handle = append({
+                MidiTargetKind::synthParameterStep,
+                static_cast<std::uint16_t>(parameter), 0,
+                static_cast<std::uint16_t>(step)
+            });
+            if (handle.valid())
+                (void) midiTargetRegistry_.registerTarget(
+                    "synth.2.parameter."
+                        + juce::String(synthTwoParameters[parameter].stableKey)
+                        + ".step."
+                        + juce::String(static_cast<int>(step + 1)),
+                    handle);
+        }
+    }
+    for (std::size_t part = 0; part < samplePartCount; ++part)
+    {
+        for (std::size_t parameter = 0;
+             parameter < sampleParameters.size(); ++parameter)
+        {
+            for (std::size_t step = 0;
+                 step < lps::Modulation::maxLength; ++step)
+            {
+                const auto handle = append({
+                    MidiTargetKind::sampleParameterStep,
+                    static_cast<std::uint16_t>(part),
+                    static_cast<std::uint16_t>(parameter),
+                    static_cast<std::uint16_t>(step)
+                });
+                if (handle.valid())
+                    (void) midiTargetRegistry_.registerTarget(
+                        "sample.part."
+                            + juce::String(static_cast<int>(part + 1))
+                            + ".parameter."
+                            + juce::String(
+                                sampleParameters[parameter].stableKey)
+                            + ".step."
+                            + juce::String(static_cast<int>(step + 1)),
+                        handle);
+            }
+        }
+    }
+    jassert(midiTargetCount_ <= lps::maximumMidiTargetCount);
+}
+
+lps::MidiTargetHandle LivePatternSequencerProcessor::findMidiTarget(
+    std::uint8_t kind,
+    std::size_t owner,
+    std::size_t parameter,
+    std::size_t step) const noexcept
+{
+    for (std::size_t index = 0; index < midiTargetCount_; ++index)
+    {
+        const auto& target = midiTargets_[index];
+        if (static_cast<std::uint8_t>(target.kind) == kind
+            && target.owner == owner
+            && target.parameter == parameter
+            && target.step == step)
+            return {static_cast<std::uint16_t>(index)};
+    }
+    return {};
+}
+
+lps::MidiPageBindingSnapshot
+LivePatternSequencerProcessor::buildMidiPageBindings(
+    const lps::MidiEditingContext& context) const noexcept
+{
+    lps::MidiPageBindingSnapshot snapshot;
+    snapshot.profile = context.profile;
+    snapshot.pageKind = context.pageKind;
+    if (!context.valid)
+        return snapshot;
+
+    constexpr std::size_t stepsPerBank = 10;
+    const auto bind = [&snapshot](
+        std::size_t controlSlot, lps::MidiTargetHandle target)
+    {
+        if (controlSlot >= snapshot.controlTargets.size() || !target.valid())
+            return false;
+        auto& destination = snapshot.controlTargets[controlSlot];
+        if (destination.valid() && destination != target)
+        {
+            destination = {};
+            return false;
+        }
+        destination = target;
+        return true;
+    };
+
+    std::size_t parameterCount = 0;
+    std::size_t owner = 0;
+    if (context.profile == patternMidiPageProfile)
+    {
+        owner = players_.size();
+        for (std::size_t candidate = 0;
+             candidate < players_.size(); ++candidate)
+        {
+            if (patternMidiSubject(candidate) == context.subject)
+            {
+                owner = candidate;
+                break;
+            }
+        }
+        if (owner == players_.size())
+            return snapshot;
+        parameterCount = modulationLaneCount;
+    }
+    else if (context.profile == synthMidiPageProfile)
+    {
+        if (context.subject != synthTwoMidiSubject())
+            return snapshot;
+        parameterCount = synthTwoParameters.size();
+    }
+    else if (context.profile == sampleMidiPageProfile)
+    {
+        owner = samplePartCount;
+        for (std::size_t candidate = 0;
+             candidate < samplePartCount; ++candidate)
+        {
+            if (sampleMidiSubject(candidate) == context.subject)
+            {
+                owner = candidate;
+                break;
+            }
+        }
+        if (owner == samplePartCount)
+            return snapshot;
+        parameterCount = sampleParameters.size();
+    }
+    else
+    {
+        return snapshot;
+    }
+
+    const auto targetFor = [this, &context, owner](
+        std::size_t parameterSlot, std::size_t step)
+    {
+        if (context.profile == patternMidiPageProfile)
+        {
+            // Pattern page order is Pitch, Velocity, Gate, independent of the
+            // internal ModulationLane enum order.
+            constexpr std::array<ModulationLane, 3> lanes {
+                ModulationLane::pitch,
+                ModulationLane::velocity,
+                ModulationLane::gate
+            };
+            if (parameterSlot >= lanes.size())
+                return lps::MidiTargetHandle {};
+            return findMidiTarget(
+                static_cast<std::uint8_t>(
+                    MidiTargetKind::playerModulationStep),
+                owner,
+                static_cast<std::size_t>(lanes[parameterSlot]),
+                step);
+        }
+        if (context.profile == synthMidiPageProfile)
+            return findMidiTarget(
+                static_cast<std::uint8_t>(
+                    MidiTargetKind::synthParameterStep),
+                parameterSlot, 0, step);
+        return findMidiTarget(
+            static_cast<std::uint8_t>(
+                MidiTargetKind::sampleParameterStep),
+            owner, parameterSlot, step);
+    };
+    const auto modulationLength = [this, &context, owner](
+        std::size_t parameterSlot)
+    {
+        if (context.profile == patternMidiPageProfile)
+        {
+            constexpr std::array<ModulationLane, 3> lanes {
+                ModulationLane::pitch,
+                ModulationLane::velocity,
+                ModulationLane::gate
+            };
+            return parameterSlot < lanes.size()
+                ? static_cast<std::size_t>(
+                    modulationForUi(owner, lanes[parameterSlot]).length)
+                : std::size_t {0};
+        }
+        if (context.profile == synthMidiPageProfile)
+            return static_cast<std::size_t>(synthLaneModulationForUi(
+                synthTwoPatternCount + parameterSlot).length);
+        return static_cast<std::size_t>(sampleLaneModulationForUi(
+            samplePartCount + owner * sampleParameters.size()
+                + parameterSlot).length);
+    };
+
+    bool bindingValid = true;
+    if (context.pageKind == lps::MidiPageKind::parameterOverview)
+    {
+        for (std::size_t parameter = 0;
+             parameter < parameterCount
+                && parameter < lps::maximumMidiControlSlots;
+             ++parameter)
+        {
+            if (modulationLength(parameter) != 0)
+                bindingValid = bind(
+                    parameter, targetFor(parameter, 0)) && bindingValid;
+        }
+    }
+    else
+    {
+        if (context.selectedParameterSlot == 0
+            || context.selectedParameterSlot > parameterCount)
+            return snapshot;
+        const auto parameter =
+            static_cast<std::size_t>(context.selectedParameterSlot - 1);
+        const auto length = modulationLength(parameter);
+        const auto firstStep = static_cast<std::size_t>(context.stepBank)
+            * stepsPerBank;
+        if (firstStep >= lps::Modulation::maxLength)
+            return snapshot;
+        for (std::size_t position = 0; position < stepsPerBank; ++position)
+        {
+            const auto step = firstStep + position;
+            if (step < length)
+                bindingValid = bind(
+                    position, targetFor(parameter, step)) && bindingValid;
+        }
+    }
+    snapshot.valid = bindingValid;
+    return snapshot;
+}
+
+void LivePatternSequencerProcessor::publishMidiPageBindings(
+    const lps::MidiPageBindingSnapshot& source) noexcept
+{
+    while (midiMappingReaders_.load(std::memory_order_seq_cst) != 0)
+        std::this_thread::yield();
+    auto snapshot = source;
+    snapshot.generation = ++midiPageBindingGeneration_;
+    const auto active = activeMidiPageBinding_.load(std::memory_order_relaxed);
+    const auto inactive = static_cast<std::uint8_t>(active == 0 ? 1 : 0);
+    midiPageBindings_[inactive] = snapshot;
+    activeMidiPageBinding_.store(inactive, std::memory_order_release);
+}
+
+lps::MidiEditingContext
+LivePatternSequencerProcessor::midiEditingContext() const noexcept
+{
+    const std::lock_guard<std::mutex> lock {midiEditingContextMutex_};
+    return midiEditingContext_;
+}
+
+bool LivePatternSequencerProcessor::setMidiEditingContext(
+    const lps::MidiEditingContext& context) noexcept
+{
+    const std::lock_guard<std::mutex> lock {midiEditingContextMutex_};
+    midiEditingContext_ = context;
+    const auto snapshot = buildMidiPageBindings(context);
+    publishMidiPageBindings(snapshot);
+    return snapshot.valid;
+}
+
+bool LivePatternSequencerProcessor::setMidiPatternOverviewContext(
+    std::size_t playerIndex) noexcept
+{
+    return setMidiEditingContext({
+        patternMidiPageProfile,
+        lps::MidiPageKind::parameterOverview,
+        patternMidiSubject(playerIndex), 1, 0, true});
+}
+
+bool LivePatternSequencerProcessor::setMidiSynthOverviewContext() noexcept
+{
+    return setMidiEditingContext({
+        synthMidiPageProfile,
+        lps::MidiPageKind::parameterOverview,
+        synthTwoMidiSubject(), 1, 0, true});
+}
+
+bool LivePatternSequencerProcessor::setMidiSampleOverviewContext(
+    std::size_t partIndex) noexcept
+{
+    return setMidiEditingContext({
+        sampleMidiPageProfile,
+        lps::MidiPageKind::parameterOverview,
+        sampleMidiSubject(partIndex), 1, 0, true});
+}
+
+bool LivePatternSequencerProcessor::setMidiParameterStepsContext(
+    lps::MidiPageProfileId profile,
+    lps::MidiSubjectId subject,
+    std::size_t parameterSlot,
+    std::size_t stepBank) noexcept
+{
+    if (parameterSlot > std::numeric_limits<std::uint16_t>::max()
+        || stepBank > std::numeric_limits<std::uint16_t>::max())
+        return false;
+    return setMidiEditingContext({
+        profile, lps::MidiPageKind::parameterSteps, subject,
+        static_cast<std::uint16_t>(parameterSlot),
+        static_cast<std::uint16_t>(stepBank), true});
+}
+
+bool LivePatternSequencerProcessor::setMidiControllerModifier(
+    const juce::String& name,
+    bool active) noexcept
+{
+    const std::lock_guard<std::mutex> lock {midiMappingConfigurationMutex_};
+    const auto index = midiModifierNames_.indexOf(name);
+    if (index < 0 || index >= static_cast<int>(midiModifierStates_.size()))
+        return false;
+    midiModifierStates_[static_cast<std::size_t>(index)].store(
+        active, std::memory_order_release);
+    return true;
+}
+
+bool LivePatternSequencerProcessor::setMidiControllerBank(int bank) noexcept
+{
+    if (bank < 0 || bank > 127)
+        return false;
+    midiControllerBank_.store(bank, std::memory_order_release);
+    return true;
+}
+
+lps::MidiPageBindingSnapshot
+LivePatternSequencerProcessor::midiPageBindingSnapshotForTests() const noexcept
+{
+    const auto index = activeMidiPageBinding_.load(std::memory_order_acquire);
+    return midiPageBindings_[index];
+}
+
+std::size_t
+LivePatternSequencerProcessor::midiTargetCountForTests() const noexcept
+{
+    return midiTargetCount_;
+}
+
+std::vector<lps::MidiPageBindingDiagnostic>
+LivePatternSequencerProcessor::midiPageBindingDiagnostics() const
+{
+    const std::lock_guard<std::mutex> lock {midiEditingContextMutex_};
+    const auto& context = midiEditingContext_;
+    const auto diagnostic = [&context](
+        const char* code, const char* message)
+    {
+        return std::vector<lps::MidiPageBindingDiagnostic> {{
+            code, lps::MidiDiagnosticSeverity::error,
+            context.profile, message
+        }};
+    };
+    if (!context.valid)
+        return diagnostic(
+            "invalid-editing-context", "Editing context is not valid");
+
+    std::size_t parameterCount = 0;
+    bool subjectKnown = false;
+    if (context.profile == patternMidiPageProfile)
+    {
+        parameterCount = modulationLaneCount;
+        for (std::size_t player = 0; player < players_.size(); ++player)
+            subjectKnown = subjectKnown
+                || patternMidiSubject(player) == context.subject;
+    }
+    else if (context.profile == synthMidiPageProfile)
+    {
+        parameterCount = synthTwoParameters.size();
+        subjectKnown = context.subject == synthTwoMidiSubject();
+    }
+    else if (context.profile == sampleMidiPageProfile)
+    {
+        parameterCount = sampleParameters.size();
+        for (std::size_t part = 0; part < samplePartCount; ++part)
+            subjectKnown = subjectKnown
+                || sampleMidiSubject(part) == context.subject;
+    }
+    else
+    {
+        return diagnostic(
+            "unknown-page-profile", "Editing context names an unknown page profile");
+    }
+    if (!subjectKnown)
+        return diagnostic(
+            "unknown-subject", "Editing context names an unknown subject");
+    if (context.pageKind != lps::MidiPageKind::parameterOverview
+        && context.pageKind != lps::MidiPageKind::parameterSteps)
+        return diagnostic(
+            "invalid-page-kind", "Editing context has an invalid page kind");
+    if (context.pageKind == lps::MidiPageKind::parameterSteps)
+    {
+        if (context.selectedParameterSlot == 0
+            || context.selectedParameterSlot > parameterCount)
+            return diagnostic(
+                "invalid-parameter-slot",
+                "Editing context has an invalid parameter slot");
+        if (static_cast<std::size_t>(context.stepBank) * 10
+            >= lps::Modulation::maxLength)
+            return diagnostic(
+                "invalid-step-bank", "Editing context has an invalid step bank");
+    }
+    const auto index = activeMidiPageBinding_.load(std::memory_order_acquire);
+    if (!midiPageBindings_[index].valid)
+        return diagnostic(
+            "conflicting-page-slot-binding",
+            "Page binding could not establish single-owner control slots");
+    return {};
+}
+
+juce::Result LivePatternSequencerProcessor::replaceMappingConfiguration(
+    const juce::String& jsonText)
+{
+    lps::ParsedMidiMappingConfiguration parsed;
+    const auto result = lps::parseMidiMappingConfiguration(
+        jsonText, midiTargetRegistry_, parsed);
+    if (result.failed())
+    {
+        const std::lock_guard<std::mutex> lock {
+            midiMappingConfigurationMutex_ };
+        midiMappingDiagnostics_ = std::move(parsed.diagnostics);
+        return result;
+    }
+
+    const std::lock_guard<std::mutex> lock {
+        midiMappingConfigurationMutex_ };
+    std::array<bool, 16> preservedModifiers {};
+    for (int index = 0; index < parsed.modifierNames.size(); ++index)
+    {
+        const auto previous = midiModifierNames_.indexOf(
+            parsed.modifierNames[index]);
+        if (previous >= 0
+            && previous < static_cast<int>(midiModifierStates_.size()))
+            preservedModifiers[static_cast<std::size_t>(index)] =
+                midiModifierStates_[static_cast<std::size_t>(previous)].load(
+                    std::memory_order_acquire);
+    }
+    publishMidiMappingTable(parsed.runtimeTable);
+    midiMappingConfigurationJson_ = jsonText;
+    midiMappingDiagnostics_ = std::move(parsed.diagnostics);
+    midiModifierNames_ = parsed.modifierNames;
+    for (std::size_t index = 0; index < midiModifierStates_.size(); ++index)
+        midiModifierStates_[index].store(
+            preservedModifiers[index], std::memory_order_release);
+    activeMidiMappingCount_.store(
+        parsed.activeMappingCount, std::memory_order_release);
+    return juce::Result::ok();
+}
+
+juce::String LivePatternSequencerProcessor::mappingConfiguration() const
+{
+    const std::lock_guard<std::mutex> lock {
+        midiMappingConfigurationMutex_ };
+    return midiMappingConfigurationJson_;
+}
+
+std::size_t LivePatternSequencerProcessor::activeMappingCount() const noexcept
+{
+    return activeMidiMappingCount_.load(std::memory_order_acquire);
+}
+
+std::vector<lps::MidiMappingDiagnostic>
+LivePatternSequencerProcessor::mappingDiagnostics() const
+{
+    const std::lock_guard<std::mutex> lock {
+        midiMappingConfigurationMutex_ };
+    return midiMappingDiagnostics_;
+}
+
+void LivePatternSequencerProcessor::publishMidiMappingTable(
+    const lps::RuntimeMidiMappingTable& table) noexcept
+{
+    while (midiMappingReaders_.load(std::memory_order_seq_cst) != 0)
+        std::this_thread::yield();
+
+    const auto active = activeMidiMappingTable_.load(
+        std::memory_order_relaxed);
+    const auto inactive = static_cast<std::uint8_t>(active == 0 ? 1 : 0);
+    midiMappingTables_[inactive] = table;
+    activeMidiMappingTable_.store(inactive, std::memory_order_release);
+}
+
+void LivePatternSequencerProcessor::restoreMappingConfiguration(
+    const juce::var& value)
+{
+    auto configuration = value.isString()
+        ? value.toString()
+        : lps::emptyMidiMappingConfiguration();
+    lps::ParsedMidiMappingConfiguration parsed;
+    auto result = lps::parseMidiMappingConfiguration(
+        configuration, midiTargetRegistry_, parsed);
+    if (result.failed())
+    {
+        auto failureDiagnostics = std::move(parsed.diagnostics);
+        configuration = lps::emptyMidiMappingConfiguration();
+        result = lps::parseMidiMappingConfiguration(
+            configuration, midiTargetRegistry_, parsed);
+        parsed.diagnostics = std::move(failureDiagnostics);
+    }
+    jassert(result.wasOk());
+
+    const std::lock_guard<std::mutex> lock {
+        midiMappingConfigurationMutex_ };
+    publishMidiMappingTable(parsed.runtimeTable);
+    midiMappingConfigurationJson_ = configuration;
+    midiMappingDiagnostics_ = std::move(parsed.diagnostics);
+    midiModifierNames_ = parsed.modifierNames;
+    for (auto& modifier : midiModifierStates_)
+        modifier.store(false, std::memory_order_release);
+    activeMidiMappingCount_.store(
+        parsed.activeMappingCount, std::memory_order_release);
+    midiTargetMailbox_.clear();
+}
+
+void LivePatternSequencerProcessor::dispatchPendingMidiMappingEdits() noexcept
+{
+    midiTargetMailbox_.drainDirty(
+        [this](lps::MidiTargetHandle target, int movement)
+        {
+            dispatchMidiTarget(target, movement);
+        });
+}
+
+void LivePatternSequencerProcessor::dispatchMidiTarget(
+    lps::MidiTargetHandle handle,
+    int movement) noexcept
+{
+    if (!handle.valid() || handle.value >= midiTargetCount_ || movement == 0)
+        return;
+    const auto& target = midiTargets_[handle.value];
+    const auto direction = movement < 0 ? -1 : 1;
+    for (int remaining = std::abs(movement); remaining > 0; --remaining)
+    {
+        if (target.kind == MidiTargetKind::playerModulationStep)
+        {
+            const auto lane = static_cast<ModulationLane>(target.parameter);
+            if (lane == ModulationLane::pitch)
+            {
+                editPlayerPitch(target.owner, target.step, direction);
+                continue;
+            }
+            if (playerModulationLockedForUi(target.owner, lane))
+                break;
+            const auto modulation = modulationForUi(target.owner, lane);
+            if (target.step >= modulation.length)
+                break;
+            const auto current = static_cast<int>(
+                modulation.values[target.step].raw / 257u);
+            const auto next = std::clamp(current + direction, 0, 255);
+            if (next == current)
+                break;
+            setPlayerModulationValue(
+                target.owner, lane, target.step,
+                static_cast<std::uint8_t>(next));
+            continue;
+        }
+
+        lps::ModulationPlayer* player = nullptr;
+        int maximum = 127;
+        if (target.kind == MidiTargetKind::synthParameterStep)
+        {
+            if (target.owner >= synthTwoParameters.size())
+                break;
+            player = synthLanePlayerAt(synthTwoPatternCount + target.owner);
+            maximum = synthTwoParameters[target.owner].maximumValue;
+        }
+        else
+        {
+            if (target.owner >= samplePartCount
+                || target.parameter >= sampleParameters.size())
+                break;
+            const auto lane = samplePartCount
+                + static_cast<std::size_t>(target.owner)
+                    * sampleParameters.size()
+                + target.parameter;
+            player = sampleLanePlayerAt(lane);
+            maximum = sampleParameters[target.parameter].maximumValue;
+        }
+        if (player == nullptr)
+            break;
+        const auto modulation = player->modulationForUi();
+        if (target.step >= modulation.length)
+            break;
+        const auto current = std::clamp(
+            static_cast<int>(std::lround(
+                modulation.values[target.step].toFloat()
+                    * static_cast<float>(maximum))),
+            0, maximum);
+        const auto next = std::clamp(current + direction, 0, maximum);
+        if (next == current)
+            break;
+        player->setValue(
+            target.step,
+            lps::NormalizedValue::fromFloat(
+                static_cast<float>(next) / static_cast<float>(maximum)));
+    }
+}
+
+void LivePatternSequencerProcessor::timerCallback()
+{
+    dispatchPendingMidiMappingEdits();
 }
 
 bool LivePatternSequencerProcessor::isBusesLayoutSupported(
@@ -865,6 +1555,55 @@ void LivePatternSequencerProcessor::processBlock(
 {
     juce::ScopedNoDenormals noDenormals;
     audio.clear();
+
+    midiMappingReaders_.fetch_add(1, std::memory_order_seq_cst);
+    const auto mappingTableIndex = activeMidiMappingTable_.load(
+        std::memory_order_acquire);
+    const auto& mappingTable = midiMappingTables_[mappingTableIndex];
+    const auto pageBindingIndex = activeMidiPageBinding_.load(
+        std::memory_order_acquire);
+    const auto& pageBindings = midiPageBindings_[pageBindingIndex];
+    lps::MidiMappingContext mappingContext;
+    for (std::size_t index = 0; index < mappingContext.modifiers.size(); ++index)
+        mappingContext.modifiers[index] = midiModifierStates_[index].load(
+            std::memory_order_acquire);
+    mappingContext.heldNotes = midiHeldNotes_;
+    mappingContext.bank = midiControllerBank_.load(std::memory_order_acquire);
+    std::uint32_t inputEventOrder = 0;
+    for (const auto metadata : midi)
+    {
+        const auto event = lps::MidiInputAdapter::adapt(
+            metadata.getMessage(),
+            metadata.samplePosition,
+            inputEventOrder++);
+        if (event.type == lps::MidiControlMessageType::noteOn
+            && event.control < mappingContext.heldNotes.size())
+        {
+            mappingContext.heldNotes[event.control] = true;
+            midiHeldNotes_[event.control] = true;
+        }
+        else if (event.type == lps::MidiControlMessageType::noteOff
+            && event.control < mappingContext.heldNotes.size())
+        {
+            mappingContext.heldNotes[event.control] = false;
+            midiHeldNotes_[event.control] = false;
+        }
+        const auto resolution = lps::resolveMidiControlEvent(
+            event, mappingContext, mappingTable, pageBindings);
+        for (std::size_t commandIndex = 0;
+             commandIndex < resolution.targetCommands.count;
+             ++commandIndex)
+        {
+            const auto& command = resolution.targetCommands.commands[commandIndex];
+            if (command.operation == lps::MidiRouteOperation::increment)
+                midiTargetMailbox_.accumulate(command.target, command.value);
+        }
+    }
+    midiMappingReaders_.fetch_sub(1, std::memory_order_seq_cst);
+
+    // Incoming MIDI is control input only. The plug-in does not implement
+    // pass-through; generated sequencer output is added after this clear.
+    midi.clear();
 
     lps::TimelineBlock block;
     block.sampleRate = getSampleRate();
@@ -998,7 +1737,23 @@ void LivePatternSequencerProcessor::getStateInformation(
 {
     auto root = juce::DynamicObject::Ptr(new juce::DynamicObject());
     root->setProperty("format", "live-pattern-sequencer-graph-state");
-    root->setProperty("schemaVersion", 4);
+    root->setProperty("schemaVersion", 6);
+    root->setProperty("midiMappingConfiguration", mappingConfiguration());
+    const auto editingContext = midiEditingContext();
+    auto midiContext = juce::DynamicObject::Ptr(new juce::DynamicObject());
+    midiContext->setProperty(
+        "profile", static_cast<int>(editingContext.profile.value));
+    midiContext->setProperty(
+        "pageKind", static_cast<int>(editingContext.pageKind));
+    midiContext->setProperty(
+        "subject", static_cast<int>(editingContext.subject.value));
+    midiContext->setProperty(
+        "selectedParameterSlot",
+        static_cast<int>(editingContext.selectedParameterSlot));
+    midiContext->setProperty(
+        "stepBank", static_cast<int>(editingContext.stepBank));
+    midiContext->setProperty("valid", editingContext.valid);
+    root->setProperty("midiEditingContext", juce::var(midiContext.get()));
 
     juce::Array<juce::var> serializedPlayers;
     for (std::size_t index = 0; index < players_.size(); ++index)
@@ -1146,6 +1901,20 @@ void LivePatternSequencerProcessor::getStateInformation(
     }
     root->setProperty("sampleParameterLanes", serializedSampleLanes);
 
+    juce::Array<juce::var> serializedMixerTracks;
+    for (std::size_t track = 0; track < mixerTrackCount; ++track)
+    {
+        juce::Array<juce::var> values;
+        for (std::size_t parameter = 0;
+             parameter < mixerTrackParameterCount;
+             ++parameter)
+        {
+            values.add(mixerTrackParameterValueForUi(track, parameter));
+        }
+        serializedMixerTracks.add(values);
+    }
+    root->setProperty("mixerTrackParameterValues", serializedMixerTracks);
+
     juce::Array<juce::var> suppressions;
     for (std::size_t from = 0; from < players_.size(); ++from)
         for (std::size_t to = 0; to < players_.size(); ++to)
@@ -1176,8 +1945,51 @@ void LivePatternSequencerProcessor::setStateInformation(
     if (root == nullptr
         || root->getProperty("format").toString()
             != "live-pattern-sequencer-graph-state"
-        || schemaVersion < 1 || schemaVersion > 4)
+        || schemaVersion < 1 || schemaVersion > 6)
         return;
+
+    lps::MidiEditingContext restoredMidiContext;
+    if (schemaVersion >= 6)
+    {
+        const auto* context = root->getProperty("midiEditingContext")
+            .getDynamicObject();
+        int profile = 0;
+        int pageKind = -1;
+        int subject = 0;
+        int parameterSlot = 0;
+        int stepBank = 0;
+        if (context != nullptr
+            && context->getProperty("valid").isBool()
+            && readStateInteger(context->getProperty("profile"), profile)
+            && readStateInteger(context->getProperty("pageKind"), pageKind)
+            && readStateInteger(context->getProperty("subject"), subject)
+            && readStateInteger(
+                context->getProperty("selectedParameterSlot"), parameterSlot)
+            && readStateInteger(context->getProperty("stepBank"), stepBank)
+            && profile >= 0 && subject >= 0
+            && pageKind >= static_cast<int>(
+                lps::MidiPageKind::parameterOverview)
+            && pageKind <= static_cast<int>(
+                lps::MidiPageKind::parameterSteps)
+            && parameterSlot >= 0
+            && parameterSlot <= std::numeric_limits<std::uint16_t>::max()
+            && stepBank >= 0
+            && stepBank <= std::numeric_limits<std::uint16_t>::max())
+        {
+            restoredMidiContext = {
+                {static_cast<std::uint32_t>(profile)},
+                static_cast<lps::MidiPageKind>(pageKind),
+                {static_cast<std::uint32_t>(subject)},
+                static_cast<std::uint16_t>(parameterSlot),
+                static_cast<std::uint16_t>(stepBank),
+                static_cast<bool>(context->getProperty("valid"))
+            };
+        }
+    }
+    (void) setMidiEditingContext(restoredMidiContext);
+
+    restoreMappingConfiguration(
+        root->getProperty("midiMappingConfiguration"));
 
     const auto* serializedPlayers = root->getProperty("players").getArray();
     if (serializedPlayers == nullptr
@@ -1645,6 +2457,51 @@ void LivePatternSequencerProcessor::setStateInformation(
         }
     }
 
+    if (const auto* serializedMixerTracks = root->getProperty(
+            "mixerTrackParameterValues").getArray())
+    {
+        std::array<std::uint8_t,
+            mixerTrackCount * mixerTrackParameterCount> restoredValues {};
+        bool valid = serializedMixerTracks->size()
+            == static_cast<int>(mixerTrackCount);
+        for (int track = 0;
+             valid && track < serializedMixerTracks->size();
+             ++track)
+        {
+            const auto* values = serializedMixerTracks->getReference(track)
+                .getArray();
+            valid = values != nullptr
+                && values->size()
+                    == static_cast<int>(mixerTrackParameterCount);
+            for (int parameter = 0;
+                 valid && parameter < values->size();
+                 ++parameter)
+            {
+                int value = 0;
+                valid = readStateInteger(
+                        values->getReference(parameter), value)
+                    && value >= 0 && value <= 127;
+                if (valid)
+                {
+                    restoredValues[static_cast<std::size_t>(track)
+                            * mixerTrackParameterCount
+                        + static_cast<std::size_t>(parameter)] =
+                        static_cast<std::uint8_t>(value);
+                }
+            }
+        }
+        if (valid)
+        {
+            for (std::size_t index = 0;
+                 index < restoredValues.size();
+                 ++index)
+            {
+                mixerTrackParameterValues_[index].store(
+                    restoredValues[index], std::memory_order_relaxed);
+            }
+        }
+    }
+
     for (std::size_t from = 0; from < players_.size(); ++from)
         for (std::size_t to = 0; to < players_.size(); ++to)
             if (from != to)
@@ -1665,6 +2522,10 @@ void LivePatternSequencerProcessor::setStateInformation(
                         static_cast<std::size_t>(from),
                         static_cast<std::size_t>(to), true);
             }
+
+    // Modulation lengths are part of the restored model, so rebuild the
+    // complete page snapshot only after those lengths and selections exist.
+    (void) setMidiEditingContext(restoredMidiContext);
 }
 
 std::size_t LivePatternSequencerProcessor::playerCountForUi() const noexcept
@@ -3523,6 +4384,36 @@ void LivePatternSequencerProcessor::setSampleLaneLength(
     }
     if (auto* player = sampleLanePlayerAt(laneIndex))
         player->setLength(length);
+}
+
+int LivePatternSequencerProcessor::mixerTrackParameterValueForUi(
+    std::size_t trackIndex,
+    std::size_t parameterIndex) const noexcept
+{
+    if (trackIndex >= mixerTrackCount
+        || parameterIndex >= mixerTrackParameterCount)
+    {
+        return 0;
+    }
+    const auto index = trackIndex * mixerTrackParameterCount + parameterIndex;
+    return mixerTrackParameterValues_[index].load(std::memory_order_relaxed);
+}
+
+bool LivePatternSequencerProcessor::setMixerTrackParameterValue(
+    std::size_t trackIndex,
+    std::size_t parameterIndex,
+    int value) noexcept
+{
+    if (trackIndex >= mixerTrackCount
+        || parameterIndex >= mixerTrackParameterCount)
+    {
+        return false;
+    }
+    const auto index = trackIndex * mixerTrackParameterCount + parameterIndex;
+    mixerTrackParameterValues_[index].store(
+        static_cast<std::uint8_t>(std::clamp(value, 0, 127)),
+        std::memory_order_relaxed);
+    return true;
 }
 
 void LivePatternSequencerProcessor::updateUiSnapshot() noexcept

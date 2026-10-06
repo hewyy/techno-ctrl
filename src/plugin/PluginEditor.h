@@ -118,6 +118,7 @@ private:
     };
 
     class SynthPageComponent;
+    class MixerPageComponent;
     class PatternEditorComponent;
 
     class UtilityButton final : public juce::TextButton
@@ -253,7 +254,7 @@ private:
     [[nodiscard]] std::size_t pageSize() const noexcept;
     void pageVoices(int direction);
     void updatePageButtons();
-    enum class MainPage { allVoices, synthTwo, sample, patternEditor };
+    enum class MainPage { allVoices, synthTwo, sample, mixer, patternEditor };
     void showPage(MainPage page);
     void openVoiceProfile(std::size_t playerIndex);
     void openPatternEditor(std::size_t playerIndex);
@@ -279,6 +280,7 @@ private:
     juce::Viewport synthViewport_;
     std::unique_ptr<SynthPageComponent> synthPage_;
     std::unique_ptr<SynthPageComponent> samplePage_;
+    std::unique_ptr<MixerPageComponent> mixerPage_;
     std::unique_ptr<PatternEditorComponent> patternEditorPage_;
     ControlPaneComponent controlPane_;
     BarSchedulerComponent barScheduler_;
@@ -292,6 +294,7 @@ private:
     juce::TextButton voicesPageButton_ {"ALL VOICES"};
     juce::TextButton synthTwoPageButton_ {"SYNTH 2"};
     juce::TextButton samplePageButton_ {"SAMPLE"};
+    juce::TextButton mixerPageButton_ {"MIXER"};
     juce::TextButton backButton_ {"< BACK"};
     juce::Label selectionLabel_;
     std::vector<std::unique_ptr<juce::Label>> controlVoiceLabels_;

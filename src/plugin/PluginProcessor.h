@@ -3,12 +3,14 @@
 #include "core/PatternLibrary.h"
 #include "core/PatternPlayer.h"
 #include "core/PitchEditing.h"
+#include "core/MidiControlMapping.h"
 #include "core/ModulationLibrary.h"
 #include "core/ModulationPlayer.h"
 #include "core/RuntimeGraph.h"
 #include "core/Voice.h"
 #include "plugin/CvBufferRenderer.h"
 #include "plugin/MidiBufferRenderer.h"
+#include "plugin/MidiMappingConfiguration.h"
 #include "plugin/PatternLibraryFileStore.h"
 #include "plugin/ModulationLibraryFileStore.h"
 
@@ -18,10 +20,12 @@
 #include <array>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
-class LivePatternSequencerProcessor final : public juce::AudioProcessor
+class LivePatternSequencerProcessor final : public juce::AudioProcessor,
+                                           private juce::Timer
 {
 public:
     enum class ModulationLane : std::uint8_t
@@ -51,6 +55,8 @@ public:
     static constexpr std::size_t modulationLaneCount = 3;
     static constexpr std::size_t synthTwoPatternCount = 3;
     static constexpr std::size_t samplePartCount = 10;
+    static constexpr std::size_t mixerTrackCount = 12;
+    static constexpr std::size_t mixerTrackParameterCount = 7;
     static constexpr std::size_t groupCount = 4;
     static constexpr std::size_t maximumScheduledBars =
         lps::RuntimeGraph::maximumScheduledBars;
@@ -86,7 +92,7 @@ public:
 
     LivePatternSequencerProcessor();
     explicit LivePatternSequencerProcessor(const juce::File& patternCatalogFile);
-    ~LivePatternSequencerProcessor() override = default;
+    ~LivePatternSequencerProcessor() override;
 
     void prepareToPlay(double sampleRate, int maximumExpectedSamplesPerBlock) override;
     void releaseResources() override;
@@ -96,7 +102,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
 
     [[nodiscard]] const juce::String getName() const override;
-    [[nodiscard]] bool acceptsMidi() const override { return false; }
+    [[nodiscard]] bool acceptsMidi() const override { return true; }
     [[nodiscard]] bool producesMidi() const override { return true; }
     [[nodiscard]] bool isMidiEffect() const override { return false; }
     [[nodiscard]] bool isBusesLayoutSupported(
@@ -111,6 +117,68 @@ public:
 
     void getStateInformation(juce::MemoryBlock&) override;
     void setStateInformation(const void*, int) override;
+
+    [[nodiscard]] juce::Result replaceMappingConfiguration(
+        const juce::String& jsonText);
+    [[nodiscard]] juce::String mappingConfiguration() const;
+    [[nodiscard]] std::size_t activeMappingCount() const noexcept;
+    [[nodiscard]] std::vector<lps::MidiMappingDiagnostic>
+    mappingDiagnostics() const;
+    void dispatchPendingMidiMappingEdits() noexcept;
+
+    // Stable page profiles shared by the UI and page-relative MIDI binding.
+    static constexpr lps::MidiPageProfileId patternMidiPageProfile {1};
+    static constexpr lps::MidiPageProfileId synthMidiPageProfile {2};
+    static constexpr lps::MidiPageProfileId sampleMidiPageProfile {3};
+    [[nodiscard]] static constexpr lps::MidiSubjectId
+    patternMidiSubject(std::size_t playerIndex) noexcept
+    {
+        // These are persistent model keys, deliberately not runtime player
+        // indices. New subjects must receive a new value without renumbering
+        // existing entries.
+        constexpr std::array<std::uint32_t, 24> stableSubjects {
+            0x1101u, 0x1102u, 0x1103u, 0x1104u, 0x1105u,
+            0x1106u, 0x1107u, 0x1108u, 0x1109u, 0x110au,
+            0x1201u,
+            0x1301u, 0x1302u, 0x1303u,
+            0x1401u, 0x1402u, 0x1403u, 0x1404u, 0x1405u,
+            0x1406u, 0x1407u, 0x1408u, 0x1409u, 0x140au
+        };
+        return playerIndex < stableSubjects.size()
+            ? lps::MidiSubjectId {stableSubjects[playerIndex]}
+            : lps::MidiSubjectId {};
+    }
+    [[nodiscard]] static constexpr lps::MidiSubjectId
+    synthTwoMidiSubject() noexcept { return {0x2001u}; }
+    [[nodiscard]] static constexpr lps::MidiSubjectId
+    sampleMidiSubject(std::size_t partIndex) noexcept
+    {
+        return partIndex < samplePartCount
+            ? lps::MidiSubjectId {
+                static_cast<std::uint32_t>(0x3101u + partIndex)}
+            : lps::MidiSubjectId {};
+    }
+    [[nodiscard]] lps::MidiEditingContext midiEditingContext() const noexcept;
+    [[nodiscard]] bool setMidiEditingContext(
+        const lps::MidiEditingContext&) noexcept;
+    [[nodiscard]] bool setMidiPatternOverviewContext(
+        std::size_t playerIndex) noexcept;
+    [[nodiscard]] bool setMidiSynthOverviewContext() noexcept;
+    [[nodiscard]] bool setMidiSampleOverviewContext(
+        std::size_t partIndex) noexcept;
+    [[nodiscard]] bool setMidiParameterStepsContext(
+        lps::MidiPageProfileId profile,
+        lps::MidiSubjectId subject,
+        std::size_t parameterSlot,
+        std::size_t stepBank) noexcept;
+    [[nodiscard]] bool setMidiControllerModifier(
+        const juce::String& name, bool active) noexcept;
+    [[nodiscard]] bool setMidiControllerBank(int bank) noexcept;
+    [[nodiscard]] lps::MidiPageBindingSnapshot
+    midiPageBindingSnapshotForTests() const noexcept;
+    [[nodiscard]] std::size_t midiTargetCountForTests() const noexcept;
+    [[nodiscard]] std::vector<lps::MidiPageBindingDiagnostic>
+    midiPageBindingDiagnostics() const;
 
     [[nodiscard]] std::size_t playerCountForUi() const noexcept;
     [[nodiscard]] std::optional<std::size_t> masterPlayerIndexForUi() const noexcept;
@@ -403,11 +471,35 @@ public:
         std::size_t laneIndex,
         std::size_t length) noexcept;
 
+    [[nodiscard]] int mixerTrackParameterValueForUi(
+        std::size_t trackIndex,
+        std::size_t parameterIndex) const noexcept;
+    [[nodiscard]] bool setMixerTrackParameterValue(
+        std::size_t trackIndex,
+        std::size_t parameterIndex,
+        int value) noexcept;
+
 private:
     [[nodiscard]] SavePatternResult savePlayerPatternInternal(
         std::size_t playerIndex,
         const lps::Pattern& candidatePattern,
         bool adoptCurrentDraft);
+    void timerCallback() override;
+    void publishMidiMappingTable(
+        const lps::RuntimeMidiMappingTable& table) noexcept;
+    void buildMidiTargetCatalogue();
+    [[nodiscard]] lps::MidiTargetHandle findMidiTarget(
+        std::uint8_t kind,
+        std::size_t owner,
+        std::size_t parameter,
+        std::size_t step) const noexcept;
+    [[nodiscard]] lps::MidiPageBindingSnapshot buildMidiPageBindings(
+        const lps::MidiEditingContext&) const noexcept;
+    void publishMidiPageBindings(
+        const lps::MidiPageBindingSnapshot&) noexcept;
+    void dispatchMidiTarget(
+        lps::MidiTargetHandle, int movement) noexcept;
+    void restoreMappingConfiguration(const juce::var& value);
 
     // This is intentionally a policy switch so a future configuration menu
     // can expose immediate selection without changing the graph topology.
@@ -527,6 +619,41 @@ private:
     std::unique_ptr<lps::RuntimeGraph> runtimeGraph_;
     lps::RuntimeGraphConfig runtimeConfig_;
 
+    enum class MidiTargetKind : std::uint8_t
+    {
+        playerModulationStep,
+        synthParameterStep,
+        sampleParameterStep
+    };
+    struct MidiTargetDescriptor
+    {
+        MidiTargetKind kind = MidiTargetKind::playerModulationStep;
+        std::uint16_t owner = 0;
+        std::uint16_t parameter = 0;
+        std::uint16_t step = 0;
+    };
+    std::array<
+        MidiTargetDescriptor, lps::maximumMidiTargetCount> midiTargets_ {};
+    std::size_t midiTargetCount_ = 0;
+    lps::MidiTargetRegistry midiTargetRegistry_;
+    std::array<lps::RuntimeMidiMappingTable, 2> midiMappingTables_ {};
+    std::atomic<std::uint8_t> activeMidiMappingTable_ {0};
+    std::atomic<unsigned int> midiMappingReaders_ {0};
+    std::array<lps::MidiPageBindingSnapshot, 2> midiPageBindings_ {};
+    std::atomic<std::uint8_t> activeMidiPageBinding_ {0};
+    mutable std::mutex midiEditingContextMutex_;
+    lps::MidiEditingContext midiEditingContext_;
+    std::uint64_t midiPageBindingGeneration_ = 0;
+    lps::MidiTargetMailbox midiTargetMailbox_;
+    mutable std::mutex midiMappingConfigurationMutex_;
+    juce::String midiMappingConfigurationJson_;
+    std::vector<lps::MidiMappingDiagnostic> midiMappingDiagnostics_;
+    std::atomic<std::size_t> activeMidiMappingCount_ {0};
+    juce::StringArray midiModifierNames_;
+    std::array<std::atomic<bool>, 16> midiModifierStates_ {};
+    std::atomic<int> midiControllerBank_ {0};
+    std::array<bool, 128> midiHeldNotes_ {};
+
     std::optional<double> expectedNextPpq_;
     bool wasPlaying_ = false;
     bool internalTransportWasPlaying_ = false;
@@ -550,6 +677,8 @@ private:
         sampleLaneAdvanceModes_;
     std::vector<std::unique_ptr<std::atomic<std::size_t>>>
         sampleLanePatternSlots_;
+    std::array<std::atomic<std::uint8_t>,
+        mixerTrackCount * mixerTrackParameterCount> mixerTrackParameterValues_ {};
     std::vector<std::unique_ptr<std::atomic<std::uint8_t>>>
         playerGroupMasks_;
     std::atomic<bool> playing_ { false };

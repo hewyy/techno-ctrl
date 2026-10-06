@@ -28,6 +28,8 @@ add_library(sequencer_core STATIC
     src/core/IOutputRenderer.h
     src/core/Logger.cpp
     src/core/Logger.h
+    src/core/MidiControlMapping.cpp
+    src/core/MidiControlMapping.h
     src/core/NormalizedValue.cpp
     src/core/NormalizedValue.h
     src/core/PatternLibrary.cpp
@@ -82,6 +84,10 @@ add_executable(logger_tests
     tests/LoggerTests.cpp
 )
 
+add_executable(midi_control_mapping_tests
+    tests/MidiControlMappingTests.cpp
+)
+
 add_executable(midi_buffer_transport_tests
     tests/MidiBufferTransportTests.cpp
     src/plugin/MidiBufferRenderer.cpp
@@ -102,6 +108,7 @@ target_link_libraries(pitch_editing_tests PRIVATE sequencer_core)
 target_link_libraries(voice_tests PRIVATE sequencer_core)
 target_link_libraries(runtime_graph_tests PRIVATE sequencer_core)
 target_link_libraries(logger_tests PRIVATE sequencer_core)
+target_link_libraries(midi_control_mapping_tests PRIVATE sequencer_core)
 target_include_directories(midi_buffer_transport_tests PRIVATE src)
 target_link_libraries(midi_buffer_transport_tests
     PRIVATE
@@ -124,6 +131,7 @@ add_test(NAME pitch_editing_tests COMMAND pitch_editing_tests)
 add_test(NAME voice_tests COMMAND voice_tests)
 add_test(NAME runtime_graph_tests COMMAND runtime_graph_tests)
 add_test(NAME logger_tests COMMAND logger_tests)
+add_test(NAME midi_control_mapping_tests COMMAND midi_control_mapping_tests)
 add_test(NAME midi_buffer_transport_tests COMMAND midi_buffer_transport_tests)
 add_test(NAME cv_buffer_renderer_tests COMMAND cv_buffer_renderer_tests)
 
@@ -135,7 +143,7 @@ juce_add_plugin(LivePatternSequencer
     FORMATS VST3
     PRODUCT_NAME "Live Pattern Sequencer MVP"
     IS_SYNTH TRUE
-    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT TRUE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
@@ -147,6 +155,10 @@ target_sources(LivePatternSequencer PRIVATE
     src/plugin/CvBufferRenderer.h
     src/plugin/MidiBufferRenderer.cpp
     src/plugin/MidiBufferRenderer.h
+    src/plugin/MidiInputAdapter.cpp
+    src/plugin/MidiInputAdapter.h
+    src/plugin/MidiMappingConfiguration.cpp
+    src/plugin/MidiMappingConfiguration.h
     src/plugin/PatternLibraryFileStore.cpp
     src/plugin/PatternLibraryFileStore.h
     src/plugin/ModulationLibraryFileStore.cpp
